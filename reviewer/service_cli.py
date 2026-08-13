@@ -119,7 +119,8 @@ def _browser_exact_response(executable: str, profile: str, conversation: str,
         return None
 
 
-def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[dict[str, Any]]:
+def reconcile_semantic_history(config: ReviewerConfig, repository: str,
+                               conversation_ids: list[str] | None = None) -> list[dict[str, Any]]:
     """Recover exact dispatched responses from read-only ChatGPT history.
 
     A conversation is accepted only when SHA-256 of its complete User message
@@ -132,11 +133,14 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[
         profile=str(attempt.get("browser_profile") or "")
         if not profile:
             continue
-        try:
-            history=_opencli_json(config.opencli_executable,profile,
-                                  ["chatgpt","history","--limit","20","--site-session","ephemeral"])
-        except Exception:
-            continue
+        if conversation_ids:
+            history=[{"Id": value} for value in conversation_ids]
+        else:
+            try:
+                history=_opencli_json(config.opencli_executable,profile,
+                                      ["chatgpt","history","--limit","20","--site-session","ephemeral"])
+            except Exception:
+                continue
         match=None
         for row in history if isinstance(history,list) else []:
             conversation=row.get("Id") or row.get("id")
@@ -355,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--bootstrap-canary", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--conversation-id", action="append", default=[])
     args = parser.parse_args(argv)
     config = load_config(args.config)
     if args.command == "install": value = {"status": "INSTALLED", "path": str(install(args.config))}
@@ -368,8 +373,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "run-once": value = run_once(config, bootstrap_canary=args.bootstrap_canary)
     elif args.command == "logs": value = {"path": str(config.log_path), "recent": config.log_path.read_text(encoding="utf-8")[-12000:] if config.log_path.exists() else ""}
     elif args.command == "reconcile":
-        # Semantic uncertainty is never guessed away by an unattended command.
-        value = {"status": "RECONCILIATION_REQUIRED", "attempts": discover_unfinished(config.state_root)}
+        recovered=[]
+        for repository in config.repositories:
+            recovered.extend(reconcile_semantic_history(config,repository,args.conversation_id or None))
+        value = {"status": "RECONCILED" if recovered else "RECONCILIATION_REQUIRED",
+                 "recovered": recovered, "attempts": discover_unfinished(config.state_root)}
     else:
         daemon(config); return 0
     print(json.dumps(value, indent=2, sort_keys=True) if args.json else json.dumps(value, sort_keys=True))
