@@ -39,12 +39,12 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
     detect(out); q=ReviewQueue();q.ingest(out)
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)
     return main_sha,observed,out,q
-def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None,budget=200000,state_root='.reviewer-state',dispatch_gate=None):
+def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider=None,budget=200000,state_root='.reviewer-state',dispatch_gate=None,resume_attempt=None,profile_resolver=None,allow_semantic_dispatch=True):
     from .review_context import ReviewContext, envelope, ContextError
     from .receipt import make_receipt,persist_receipt,persist_failure,reusable_receipt
     from .semantic import parse_response,SemanticParseError
     from .attempt import (prepare_attempt, mark_dispatching, finish_attempt,
-                          discover_for_identity, COMPLETED, FAILED, OUTCOME_UNKNOWN)
+                          discover_for_identity, load_attempt, PREPARED, COMPLETED, FAILED, OUTCOME_UNKNOWN)
     main_sha,observed,items,q=scan(repo,transport)
     selected=next((x for x in items if x.snapshot.pr_number==pr_number),None)
     if selected is None or selected.disposition.value!='REVIEW_READY': raise ContextError('PR_NOT_REVIEW_READY')
@@ -69,26 +69,43 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
                          context_sha256=context.context_sha256,
                          prompt_sha256=prompt_sha)
     if old:return old
+    if not allow_semantic_dispatch:
+        raise ContextError('COMPLETED_IDENTITY_NOT_FOUND')
+    if semantic_transport is None: raise ContextError('SEMANTIC_TRANSPORT_REQUIRED')
     # An unfinished attempt for this exact identity is ambiguous: never replay
     # an external semantic request until an operator reconciles it.
     # Any prior dispatch-bound attempt without a reusable exact-context receipt
     # is ambiguous or already consumed. Never send a second semantic call.
-    if discover_for_identity(state_root, context.review_identity,
-                             context_pack_sha256=context.context_sha256,
-                             prompt_sha256=prompt_sha):
+    prior=discover_for_identity(state_root, context.review_identity,
+                                context_pack_sha256=context.context_sha256,
+                                prompt_sha256=prompt_sha)
+    attempt=None;attempt_path=None
+    if resume_attempt:
+        attempt,attempt_path=load_attempt(state_root,resume_attempt)
+        if (attempt not in prior or attempt.get('state')!=PREPARED
+                or attempt.get('retry_safe') is not True
+                or attempt.get('dispatching_at') is not None):
+            raise ContextError('ATTEMPT_NOT_SAFE_TO_RESUME')
+        profile=attempt.get('browser_profile')
+        if not profile: raise ContextError('ATTEMPT_PROFILE_MISSING')
+        semantic_transport.profile=str(profile)
+    elif prior:
         raise ContextError('RECONCILIATION_REQUIRED')
+    elif profile_resolver is not None:
+        semantic_transport.profile=str(profile_resolver())
     provenance = {
         'source': 'review_ready',
         'executable': getattr(semantic_transport, 'executable', 'unknown'),
         'version': (semantic_transport.version() if callable(getattr(semantic_transport, 'version', None)) else getattr(semantic_transport, 'version', '')),
     }
-    attempt, attempt_path = prepare_attempt(state_root, context.review_identity,
-                                      context.context_sha256, prompt_sha,
-                                      provenance,
-                                      safe_argv=(semantic_transport.safe_argv() if hasattr(semantic_transport, 'safe_argv') else []),
-                                      executable=provenance['executable'], version=provenance['version'],
-                                      browser_profile=getattr(semantic_transport, 'profile', None),
-                                      session_mode='ephemeral')
+    if attempt is None:
+        attempt, attempt_path = prepare_attempt(state_root, context.review_identity,
+                                          context.context_sha256, prompt_sha,
+                                          provenance,
+                                          safe_argv=(semantic_transport.safe_argv() if hasattr(semantic_transport, 'safe_argv') else []),
+                                          executable=provenance['executable'], version=provenance['version'],
+                                          browser_profile=getattr(semantic_transport, 'profile', None),
+                                          session_mode='ephemeral')
     if dispatch_gate:
         gate=Path(dispatch_gate);deadline=time.monotonic()+120
         while not gate.exists():

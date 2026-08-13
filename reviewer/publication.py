@@ -216,6 +216,16 @@ def publish_review(root: str | Path, transport: PublicationTransport, receipt: d
     content_hash, body = _content_hash(receipt, attempt_id)
     existing = _find_receipt(root, identity, content_hash)
     if existing:
+        current = _fresh_identity(transport, identity)
+        if current != identity:
+            raise PublicationError("PUBLICATION_REBIND_REQUIRED")
+        marker = f"reviewer-publication-v1:{attempt_id}:{content_hash}"
+        matches = [comment for comment in transport.list_comments(identity[0], identity[1])
+                   if _matches(comment, marker)]
+        if len(matches) > 1:
+            raise PublicationError("PUBLICATION_DUPLICATE_DETECTED")
+        if not matches:
+            raise PublicationError("PUBLICATION_RECONCILIATION_REQUIRED")
         return existing
     directory = _attempt_dir(root)
     directory.mkdir(parents=True, exist_ok=True)

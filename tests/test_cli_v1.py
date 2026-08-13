@@ -40,9 +40,30 @@ def test_review_runs_current_preflight_profile(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "preflight_opencli", lambda *a: PreflightResult("READY", profile={"id": "p-current"}))
     seen = {}
     class T:
-        def __init__(self, executable='opencli', profile=None): seen["profile"] = profile
+        def __init__(self, executable='opencli', profile=None): self.profile = profile
     monkeypatch.setattr(cli, "OpenCLITransport", T)
-    monkeypatch.setattr(cli, "review_ready", lambda *args, **kwargs: ({"transport_result": "REVIEW_COMPLETED"}, tmp_path / "r.json"))
+    def fake_review(*args, **kwargs):
+        kwargs["semantic_transport"].profile=kwargs["profile_resolver"]()
+        seen["profile"]=kwargs["semantic_transport"].profile
+        return ({"transport_result": "REVIEW_COMPLETED"}, tmp_path / "r.json")
+    monkeypatch.setattr(cli, "review_ready", fake_review)
     monkeypatch.setattr(cli, "GhCliTransport", lambda: object())
     assert run(monkeypatch, "--repo", "o/r", "--review-pr", "1", "--local-only", "--json", "--state-root", str(tmp_path)) is None
     assert seen["profile"] == "p-current"
+
+def test_completed_review_does_not_preflight(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(cli,"preflight_opencli",lambda *a: (_ for _ in ()).throw(AssertionError("must not preflight")))
+    monkeypatch.setattr(cli,"GhCliTransport",lambda: object())
+    monkeypatch.setattr(cli,"review_ready",lambda *a,**k: ({"transport_result":"REVIEW_COMPLETED","parse_result":"PARSED","semantic_result":{"status":"PASS"}},tmp_path/"r.json"))
+    monkeypatch.setattr(cli,"publish_review",lambda *a,**k: tmp_path/"publication.json")
+    assert run(monkeypatch,"--repo","o/r","--review-pr","1","--json","--state-root",str(tmp_path)) is None
+    assert json.loads(capsys.readouterr().out)["status"]=="AUTOMATED_PRE_REVIEW_PUBLISHED"
+
+def test_no_semantic_dispatch_is_forwarded(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(cli,"GhCliTransport",lambda: object())
+    monkeypatch.setattr(cli,"OpenCLITransport",lambda **k: object())
+    def fake_review(*args,**kwargs):
+        assert kwargs["allow_semantic_dispatch"] is False
+        return ({"transport_result":"REVIEW_COMPLETED"},tmp_path/"r.json")
+    monkeypatch.setattr(cli,"review_ready",fake_review)
+    assert run(monkeypatch,"--repo","o/r","--review-pr","1","--local-only","--no-semantic-dispatch","--json","--state-root",str(tmp_path)) is None

@@ -59,6 +59,15 @@ def test_pass_comment_write_readback_and_idempotency(tmp_path):
     assert t.writes == 1
 
 
+def test_completed_publication_requires_physical_readback(tmp_path):
+    t = Fake()
+    p = publish_review(tmp_path, t, receipt(), attempt_id="physical")
+    t.comments.clear()
+    with pytest.raises(PublicationError, match="RECONCILIATION"):
+        publish_review(tmp_path, t, receipt(), attempt_id="physical")
+    assert p.exists() and t.writes == 1
+
+
 def test_findings_and_timeout_after_write_reconcile_without_duplicate(tmp_path):
     t = Fake(fail=True)
     with pytest.raises(PublicationError, match="RECONCILIATION"):

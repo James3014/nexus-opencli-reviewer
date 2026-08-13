@@ -12,7 +12,7 @@ from .status import inventory
 from .preflight import preflight_opencli
 from .publication import publish_review, reconcile_publication, PublicationError
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--fixtures');p.add_argument('--main-sha');p.add_argument('--repo');p.add_argument('--review-pr',type=int);p.add_argument('--local-only',action='store_true');p.add_argument('--dispatch-gate');p.add_argument('--opencli',default='opencli');p.add_argument('--reconcile-attempt', action='store_true');p.add_argument('--reconcile-semantic',metavar='ATTEMPT_ID');p.add_argument('--reconcile-publication');p.add_argument('--publish-receipt');p.add_argument('--status', action='store_true');p.add_argument('--preflight', action='store_true');p.add_argument('--state-root', default='.reviewer-state');p.add_argument('--json',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--fixtures');p.add_argument('--main-sha');p.add_argument('--repo');p.add_argument('--review-pr',type=int);p.add_argument('--local-only',action='store_true');p.add_argument('--no-semantic-dispatch',action='store_true');p.add_argument('--dispatch-gate');p.add_argument('--resume-attempt');p.add_argument('--opencli',default='opencli');p.add_argument('--reconcile-attempt', action='store_true');p.add_argument('--reconcile-semantic',metavar='ATTEMPT_ID');p.add_argument('--reconcile-publication');p.add_argument('--publish-receipt');p.add_argument('--status', action='store_true');p.add_argument('--preflight', action='store_true');p.add_argument('--state-root', default='.reviewer-state');p.add_argument('--json',action='store_true');a=p.parse_args()
     try:
         if a.publish_receipt:
             receipt=json.loads(Path(a.publish_receipt).read_text())
@@ -47,12 +47,15 @@ def main():
             return
         if a.review_pr is not None and not a.repo: raise ValueError('--review-pr requires --repo')
         if a.review_pr is not None:
-            ready=preflight_opencli(a.opencli)
-            if ready.status!='READY': raise ContextError(ready.status)
-            profile=(ready.profile or {}).get('id') or (ready.profile or {}).get('contextId') or (ready.profile or {}).get('name')
-            if not profile: raise ContextError('PROFILE_SELECTION_AMBIGUOUS')
+            semantic_transport=OpenCLITransport(executable=a.opencli)
+            def resolve_profile():
+                ready=preflight_opencli(a.opencli)
+                if ready.status!='READY': raise ContextError(ready.status)
+                profile=(ready.profile or {}).get('id') or (ready.profile or {}).get('contextId') or (ready.profile or {}).get('name')
+                if not profile: raise ContextError('PROFILE_SELECTION_AMBIGUOUS')
+                return str(profile)
             gh=GhCliTransport()
-            result=review_ready(a.repo,gh,a.review_pr,OpenCLITransport(executable=a.opencli,profile=str(profile)),state_root=a.state_root,dispatch_gate=a.dispatch_gate)
+            result=review_ready(a.repo,gh,a.review_pr,semantic_transport=semantic_transport,state_root=a.state_root,dispatch_gate=a.dispatch_gate,resume_attempt=a.resume_attempt,profile_resolver=resolve_profile,allow_semantic_dispatch=not a.no_semantic_dispatch)
             payload=dict(result[0]); payload['evidence_path']=str(result[1])
             if not a.local_only and payload.get('parse_result')=='PARSED' and payload.get('semantic_result',{}).get('status') in {'PASS','FINDINGS'}:
                 publication_path=publish_review(a.state_root,gh,payload)

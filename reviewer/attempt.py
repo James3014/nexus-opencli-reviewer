@@ -197,6 +197,11 @@ def discover_for_identity(root: str | os.PathLike[str], review_identity: Iterabl
     return records
 
 
+def load_attempt(root: str | os.PathLike[str], attempt_id: str) -> tuple[dict[str, Any], Path]:
+    path = _attempt_path(root, attempt_id)
+    return _load(path), path
+
+
 def reconcile_unfinished(
     root: str | os.PathLike[str],
     *,
@@ -235,6 +240,6 @@ def reconcile_attempt(root: str | os.PathLike[str], attempt_id: str, *, now: str
 
 __all__ = [
     "SCHEMA", "PREPARED", "DISPATCHING", "COMPLETED", "FAILED", "OUTCOME_UNKNOWN",
-    "prepare_attempt", "mark_dispatching", "finish_attempt", "discover_unfinished", "discover_for_identity",
+    "prepare_attempt", "mark_dispatching", "finish_attempt", "discover_unfinished", "discover_for_identity", "load_attempt",
     "reconcile_unfinished", "reconcile_attempt",
 ]

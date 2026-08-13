@@ -11,6 +11,7 @@ from reviewer.attempt import (
     discover_unfinished,
     finish_attempt,
     mark_dispatching,
+    load_attempt,
     prepare_attempt,
     reconcile_unfinished,
 )
@@ -65,3 +66,5 @@ def test_same_physical_identity_new_prompt_is_fresh(tmp_path):
     prepare_attempt(tmp_path,identity,"context","old",{},attempt_id="old")
     assert discover_for_identity(tmp_path,identity,context_pack_sha256="context",prompt_sha256="old")
     assert not discover_for_identity(tmp_path,identity,context_pack_sha256="context",prompt_sha256="new")
+    loaded,path=load_attempt(tmp_path,"old")
+    assert loaded["state"]==PREPARED and path.name=="old.json"
