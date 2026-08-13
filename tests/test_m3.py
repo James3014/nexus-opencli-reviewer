@@ -35,7 +35,7 @@ def test_only_review_ready_can_invoke_and_receipt_dedup_identity():
 
 def test_opencli_json_envelope_and_malformed(monkeypatch):
     import subprocess
-    good={'response':json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]})}
+    good=[{'conversationId':'c','conversationUrl':'u','tool':'','response':json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]})}]
     class P:
         returncode=0;stdout=json.dumps(good);stderr=''
     monkeypatch.setattr(subprocess,'run',lambda *a,**k:P())
@@ -52,9 +52,37 @@ def test_production_orchestration_fake_path(tmp_path):
         def list_files(self,r,n):return [{'filename':'x.py'}]
         def list_checks(self,r,s):return []
         def get_patch(self,r,n):return 'diff --git a/x.py b/x.py'
+        def get_pr(self,r,n):return {'number':1,'base':{'sha':'m'},'head':{'sha':'h'}}
     good=json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]})
     class S(FakeCLI):
         calls=0
         def invoke(self,p):self.calls+=1;return TransportResult('REVIEW_COMPLETED',good,version='fake')
     s=S('');r,p=review_ready('o/r',GH(),1,s,state_root=tmp_path);assert s.calls==1 and r['review_identity'][2]=='h' and p.exists()
     old=s.calls; r2=review_ready('o/r',GH(),1,s,state_root=tmp_path);assert s.calls==old
+
+def test_stale_rebind_and_issue_task_context(tmp_path):
+    from reviewer.scan import review_ready
+    class GH:
+        def __init__(self):self.calls=0
+        def get_ref(self,r,b):return {'object':{'sha':'m' if self.calls<1 else 'm2'}}
+        def list_open_prs(self,r):return [{'number':1,'title':'issue-31','base':{'sha':'m'},'head':{'sha':'h'},'body':'Issue #31','labels':[],'draft':False,'mergeable':True}]
+        def list_files(self,r,n):return [{'filename':'tasks/x.md'}]
+        def list_checks(self,r,s):return []
+        def get_patch(self,r,n):return 'diff'
+        def get_issue(self,r,n):return {'number':n,'title':'Issue','body':'untrusted','updated_at':'now'}
+        def get_file(self,r,path,ref):return 'task data'
+        def get_pr(self,r,n):self.calls+=1;return {'number':1,'base':{'sha':'m'},'head':{'sha':'h'}}
+    class S(FakeCLI):
+        calls=0
+        def invoke(self,p):self.calls+=1;return TransportResult('REVIEW_COMPLETED',json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]}))
+    gh=GH();s=S('')
+    # main moves at the rebind, so no semantic invocation
+    gh.get_ref=lambda r,b: {'object':{'sha':'m2'}} if gh.calls else {'object':{'sha':'m'}}
+    try:review_ready('o/r',gh,1,s,state_root=tmp_path);assert False
+    except ContextError as e:assert str(e)=='REVIEW_CONTEXT_STALE'
+    assert s.calls==0
+
+def test_semantic_strict_required_fields():
+    bad={'schema':'reviewer.semantic_response.v1','status':'FINDINGS','summary':'x','findings':[{'severity':'HIGH','category':'x','path':None,'evidence':'e','reason':'r'}],'evidence_gaps':[3]}
+    try:parse_response(json.dumps(bad));assert False
+    except SemanticParseError:pass

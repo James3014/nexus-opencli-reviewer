@@ -12,6 +12,8 @@ class GitHubTransport(Protocol):
     def list_checks(self, repo:str, sha:str)->list[dict[str,Any]]: ...
     def get_patch(self, repo:str, number:int)->str: ...
     def get_pr(self, repo:str, number:int)->dict[str,Any]: ...
+    def get_issue(self, repo:str, number:int)->dict[str,Any]: ...
+    def get_file(self, repo:str, path:str, ref:str)->str: ...
 
 class GhCliTransport:
     def __init__(self, gh='gh'): self.gh=gh
@@ -51,6 +53,12 @@ class GhCliTransport:
             if len(rows)<100:return out
         raise GitHubError('check-runs pagination exceeded safety bound')
     def get_pr(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/pulls/{int(number)}')
+    def get_issue(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/issues/{int(number)}')
+    def get_file(self,repo,path,ref):
+        self._validate(repo); value=self._get(f'repos/{repo}/contents/{path}',ref=ref)
+        import base64
+        try:return base64.b64decode(value['content']).decode()
+        except Exception as e:raise GitHubError('task card acquisition failed') from e
     def get_patch(self,repo,number):
         self._validate(repo)
         args=[self.gh,'api',f'repos/{repo}/pulls/{int(number)}','-H','Accept: application/vnd.github.v3.patch']

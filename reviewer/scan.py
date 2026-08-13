@@ -32,12 +32,21 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
     main_sha,observed,items,q=scan(repo,transport)
     selected=next((x for x in items if x.snapshot.pr_number==pr_number),None)
     if selected is None or selected.disposition.value!='REVIEW_READY': raise ContextError('PR_NOT_REVIEW_READY')
-    current=next((x for x in items if x.snapshot.pr_number==pr_number),None)
-    if not current or current.review_identity!=selected.review_identity: raise ContextError('REVIEW_CONTEXT_STALE')
+    current=selected
     try:
         patch=patch_provider(pr_number) if patch_provider else transport.get_patch(repo,pr_number)
-        context=ReviewContext.build(current,patch,budget)
+        extra={}
+        if hasattr(transport,'get_issue'): extra['issues']=[transport.get_issue(repo,n) for n in current.snapshot.issue_numbers]
+        if hasattr(transport,'get_file'):
+            extra['task_cards']={path:transport.get_file(repo,path,current.snapshot.head_sha) for path in current.snapshot.changed_files if path.startswith('tasks/') and path.endswith('.md')}
+        context=ReviewContext.build(current,patch,budget,extra)
     except ContextError: raise
+    except Exception as e: raise ContextError('CONTEXT_INCOMPLETE') from e
+    rebound=transport.get_pr(repo,pr_number) if hasattr(transport,'get_pr') else None
+    main_rebound=transport.get_ref(repo,'main')['object']['sha'] if hasattr(transport,'get_ref') else current.snapshot.current_main_sha
+    if rebound is not None:
+        identity=(repo,pr_number,(rebound.get('head') or {}).get('sha',''),(rebound.get('base') or {}).get('sha',''),main_rebound)
+        if identity!=context.review_identity: raise ContextError('REVIEW_CONTEXT_STALE')
     old=reusable_receipt(state_root,context.review_identity)
     if old:return old
     prompt=envelope(context); result=semantic_transport.invoke(prompt)
