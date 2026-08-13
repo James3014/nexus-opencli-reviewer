@@ -4,6 +4,14 @@ import hashlib, json
 
 CONTEXT_BUDGET=200_000
 class ContextError(RuntimeError): pass
+
+
+class SemanticReviewError(ContextError):
+    """Terminal semantic result; the external call completed and cannot replay."""
+
+    terminal = True
+    outcome_unknown = False
+    retry_safe = False
 @dataclass(frozen=True)
 class ReviewContext:
     review_identity: tuple[str,int,str,str,str]

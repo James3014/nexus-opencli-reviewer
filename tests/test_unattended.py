@@ -114,11 +114,43 @@ def test_restart_with_interrupted_scheduler_state_blocks_replay(tmp_path):
 
 
 def test_reconciliation_error_never_enters_retry_queue(tmp_path):
+    class ReconciliationRequired(Exception):
+        outcome_unknown = True
+
     service=UnattendedReviewService(repository="repo",discover=lambda:[item()],
-        review=lambda i:(_ for _ in ()).throw(RuntimeError("RECONCILIATION_REQUIRED")),
+        review=lambda i:(_ for _ in ()).throw(ReconciliationRequired()),
         publish=lambda i,r:None,root=tmp_path,policy=ServicePolicy(bootstrap_canary=True))
     assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
     assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
+
+
+def test_terminal_semantic_failure_is_not_retried(tmp_path):
+    calls = []
+
+    class TerminalSemanticFailure(Exception):
+        terminal = True
+        retry_safe = False
+
+    service = UnattendedReviewService(repository="repo", discover=lambda: [item()],
+        review=lambda i: calls.append(i) or (_ for _ in ()).throw(TerminalSemanticFailure()),
+        publish=lambda i, r: None, root=tmp_path,
+        policy=ServicePolicy(bootstrap_canary=True))
+    assert service.run_once()["status"] == "SEMANTIC_FAILED"
+    assert service.run_once()["status"] == "IDLE"
+    assert len(calls) == 1
+    saved = service.store.load()
+    assert next(iter(saved["queue"].values()))["state"] == "semantic_failed"
+
+
+def test_predispatch_error_remains_bounded_retry(tmp_path):
+    calls = []
+    service = UnattendedReviewService(repository="repo", discover=lambda: [item()],
+        review=lambda i: calls.append(i) or (_ for _ in ()).throw(RuntimeError("profile unavailable")),
+        publish=lambda i, r: None, root=tmp_path,
+        policy=ServicePolicy(bootstrap_canary=True, max_retries=1, backoff_seconds=0))
+    assert service.run_once()["status"] == "RETRY_WAIT"
+    assert service.run_once()["status"] == "SEMANTIC_FAILED"
+    assert len(calls) == 2
 
 
 def test_stale_uncertainty_for_closed_pr_is_obsoleted_and_does_not_block_discovery(tmp_path):

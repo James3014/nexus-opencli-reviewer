@@ -29,6 +29,8 @@ from .unattended import ServicePolicy, UnattendedReviewService
 
 SERVICE_LABEL = "com.nexus.opencli-reviewer"
 MAX_LOG_BYTES = 2 * 1024 * 1024
+STOP_READBACK_TIMEOUT_SECONDS = 5.0
+STOP_READBACK_INTERVAL_SECONDS = 0.1
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -341,7 +343,27 @@ def start(config_path: str | Path) -> subprocess.CompletedProcess[str]:
 
 
 def stop() -> subprocess.CompletedProcess[str]:
-    return _launchctl("bootout", f"gui/{os.getuid()}/{SERVICE_LABEL}")
+    target = f"gui/{os.getuid()}/{SERVICE_LABEL}"
+    bootout = _launchctl("bootout", target)
+    command = getattr(bootout, "args", ("launchctl", "bootout", target))
+    deadline = time.monotonic() + STOP_READBACK_TIMEOUT_SECONDS
+    last = bootout
+    while True:
+        last = _launchctl("print", target)
+        # launchctl print fails once the service label is actually gone.  A
+        # successful bootout alone is not sufficient because the process may
+        # still be alive during the unload race.
+        if last.returncode != 0:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=getattr(last, "stdout", ""),
+                stderr=getattr(bootout, "stderr", "") or getattr(last, "stderr", ""),
+            )
+        if time.monotonic() >= deadline:
+            detail = getattr(last, "stderr", "") or "SERVICE_LABEL_STILL_PRESENT"
+            return subprocess.CompletedProcess(
+                command, 1, stdout=getattr(last, "stdout", ""), stderr=detail,
+            )
+        time.sleep(STOP_READBACK_INTERVAL_SECONDS)
 
 
 def daemon(config: ReviewerConfig) -> None:

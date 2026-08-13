@@ -281,12 +281,14 @@ class UnattendedReviewService:
             # The callback is responsible for journaling dispatch uncertainty.
             # An explicit marker lets it block replay; ordinary pre-dispatch
             # operational errors can be retried with bounded backoff.
-            unknown = bool(getattr(exc, "outcome_unknown", False)) or any(
-                marker in str(exc).upper() for marker in ("UNKNOWN", "RECONCILIATION")
-            )
+            unknown = bool(getattr(exc, "outcome_unknown", False))
+            terminal = bool(getattr(exc, "terminal", False))
             if unknown:
                 item["state"] = "outcome_unknown"; item["retry_safe"] = False
                 state["status"] = "RECONCILIATION_REQUIRED"
+            elif terminal or getattr(exc, "retry_safe", None) is False:
+                item["state"] = "semantic_failed"; item["retry_safe"] = False
+                state["status"] = "SEMANTIC_FAILED"
             elif item["attempts"] <= self.policy.max_retries:
                 item["state"] = "retry_wait"; item["next_action_at"] = self.clock() + self.policy.backoff_seconds * (2 ** (item["attempts"] - 1))
                 state["status"] = "RETRY_WAIT"

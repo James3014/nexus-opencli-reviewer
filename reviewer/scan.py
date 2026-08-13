@@ -40,7 +40,7 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)
     return main_sha,observed,out,q
 def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider=None,budget=200000,state_root='.reviewer-state',dispatch_gate=None,resume_attempt=None,profile_resolver=None,allow_semantic_dispatch=True):
-    from .review_context import ReviewContext, envelope, ContextError
+    from .review_context import ReviewContext, envelope, ContextError, SemanticReviewError
     from .receipt import make_receipt,persist_receipt,persist_failure,reusable_receipt
     from .semantic import parse_response,SemanticParseError
     from .attempt import (prepare_attempt, mark_dispatching, finish_attempt,
@@ -131,14 +131,14 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
             'prompt_sha256':prompt_sha,'transport_result':result.status,'parse_result':parse_result,
             'raw_response_sha256':hashlib.sha256((result.raw or '').encode()).hexdigest() or None,
             'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
-        raise ContextError(f'REVIEW_PARSE_FAILED evidence={path}')
+        raise SemanticReviewError(f'REVIEW_PARSE_FAILED evidence={path}')
     if result.status != 'REVIEW_COMPLETED':
         path=persist_failure(state_root,attempt['attempt_id'],{
             'review_identity':list(context.review_identity),'context_pack_sha256':context.context_sha256,
             'prompt_sha256':prompt_sha,'transport_result':result.status,'parse_result':parse_result,
             'raw_response_sha256':hashlib.sha256((result.raw or '').encode()).hexdigest() if result.raw else None,
             'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
-        raise ContextError(f'{result.status} evidence={path}')
+        raise SemanticReviewError(f'{result.status} evidence={path}')
     receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result)
     path=persist_receipt(state_root,receipt)
     return receipt,path

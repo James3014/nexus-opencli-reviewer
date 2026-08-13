@@ -67,6 +67,26 @@ def test_start_retries_launchctl_bootstrap_race(monkeypatch,tmp_path):
     assert sum(1 for x in calls if x[0]=="bootstrap")==2
 
 
+def test_stop_requires_label_readback_to_disappear(monkeypatch):
+    calls = []
+    def launch(*args):
+        calls.append(args)
+        if args[0] == "bootout":
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+        return SimpleNamespace(returncode=1 if len(calls) >= 3 else 0, stderr="", stdout="")
+    monkeypatch.setattr(service_cli, "_launchctl", launch)
+    result = service_cli.stop()
+    assert result.returncode == 0
+    assert calls[0][0] == "bootout" and calls[1][0] == "print"
+
+
+def test_stop_fails_when_label_stays_present(monkeypatch):
+    monkeypatch.setattr(service_cli, "STOP_READBACK_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(service_cli, "_launchctl",
+                        lambda *args: SimpleNamespace(returncode=0, stderr="", stdout=""))
+    assert service_cli.stop().returncode != 0
+
+
 def test_history_reconciliation_requires_exact_prompt_hash(monkeypatch,tmp_path):
     from reviewer.attempt import prepare_attempt,mark_dispatching
     cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","m"]
