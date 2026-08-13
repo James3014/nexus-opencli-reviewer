@@ -206,21 +206,48 @@ class UnattendedReviewService:
 
     def run_once(self) -> dict[str, Any]:
         state = self.store.load()
-        interrupted = [item for item in state.get("queue", {}).values()
-                       if item.get("state") in {"semantic_prepared", "publication_uncertain", "outcome_unknown"}]
-        if interrupted:
-            state["status"] = "RECONCILIATION_REQUIRED"
-            self.store.save(state)
-            return {"status": "RECONCILIATION_REQUIRED", "identity": interrupted[0].get("review_identity")}
         try:
-            self._discover(state)
+            records = self._discover(state)
         except Exception as exc:
+            interrupted = [item for item in state.get("queue", {}).values()
+                           if item.get("state") in {"semantic_prepared", "publication_uncertain", "outcome_unknown"}]
+            # Discovery is required to establish whether an uncertain attempt
+            # is obsolete.  A failed scan must never turn that uncertainty into
+            # a replayable task (or hide the reconciliation gate).
+            if interrupted:
+                state["status"] = "RECONCILIATION_REQUIRED"
+                state["last_error"] = type(exc).__name__
+                state["last_error_detail"] = str(exc)[:500]
+                self.store.save(state)
+                return {"status": "RECONCILIATION_REQUIRED",
+                        "identity": interrupted[0].get("review_identity"),
+                        "error": type(exc).__name__}
             state["status"] = "DEGRADED"
             state["last_error"] = type(exc).__name__
             state["last_error_detail"] = str(exc)[:500]
             self.store.save(state)
             return {"status": "DISCOVERY_FAILED", "error": type(exc).__name__,
                     "detail": str(exc)[:500]}
+        interrupted = [item for item in state.get("queue", {}).values()
+                       if item.get("state") in {"semantic_prepared", "publication_uncertain", "outcome_unknown"}]
+        if interrupted:
+            open_identities = {tuple(record["review_identity"]) for record in records}
+            open_prs = {tuple(record["review_identity"])[1] for record in records
+                        if len(record.get("review_identity", [])) >= 2}
+            for item in interrupted:
+                identity = tuple(item.get("review_identity", ()))
+                if identity in open_identities:
+                    continue
+                item["state"] = "obsolete_context" if len(identity) >= 2 and identity[1] in open_prs else "obsolete_closed"
+                item["retry_safe"] = False
+                item["updated_at"] = _now()
+            remaining = [item for item in interrupted
+                         if item.get("state") in {"semantic_prepared", "publication_uncertain", "outcome_unknown"}]
+            if remaining:
+                state["status"] = "RECONCILIATION_REQUIRED"
+                self.store.save(state)
+                return {"status": "RECONCILIATION_REQUIRED", "identity": remaining[0].get("review_identity")}
+            self.store.save(state)
         selected = self._next(state)
         if selected is None:
             state["status"] = "IDLE"

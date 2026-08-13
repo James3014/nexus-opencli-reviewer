@@ -109,7 +109,7 @@ def test_restart_reads_durable_queue_and_deduplicates(tmp_path):
 
 def test_restart_with_interrupted_scheduler_state_blocks_replay(tmp_path):
     root=tmp_path/"state"; service=UnattendedReviewService(repository="repo",discover=lambda:[item()],review=lambda i:None,publish=lambda i,r:None,root=root)
-    state=service.store.load();state["bootstrapped"]=True;state["queue"]={"x":{"review_identity":["repo",1,"h","b","m"],"state":"semantic_prepared"}};service.store.save(state)
+    state=service.store.load();state["bootstrapped"]=True;state["queue"]={"x":{"review_identity":["repo",1,"h1","base","main"],"state":"semantic_prepared"}};service.store.save(state)
     assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
 
 
@@ -119,3 +119,49 @@ def test_reconciliation_error_never_enters_retry_queue(tmp_path):
         publish=lambda i,r:None,root=tmp_path,policy=ServicePolicy(bootstrap_canary=True))
     assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
     assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
+
+
+def test_stale_uncertainty_for_closed_pr_is_obsoleted_and_does_not_block_discovery(tmp_path):
+    current = []
+    service = UnattendedReviewService(repository="repo", discover=lambda: current,
+        review=lambda i: None, publish=lambda i, r: None, root=tmp_path)
+    service.store.save({"bootstrapped": True, "baseline": {}, "queue": {
+        "old": {"review_identity": ["repo", 1, "merged", "base", "main"],
+                "state": "outcome_unknown"}}, "attempts": {}})
+
+    assert service.run_once()["status"] == "IDLE"
+    saved = service.store.load()
+    assert saved["queue"]["old"]["state"] == "obsolete_closed"
+    assert saved["queue"]["old"]["retry_safe"] is False
+
+
+def test_stale_uncertainty_for_changed_open_pr_is_obsolete_context_and_new_identity_queues(tmp_path):
+    current = [item("new", number=1)]
+    service = UnattendedReviewService(repository="repo", discover=lambda: current,
+        review=lambda i: {"receipt": "r"}, publish=lambda i, r: True, root=tmp_path)
+    old = service._record(item("old", number=1))
+    service.store.save({"bootstrapped": True, "baseline": {old["identity_key"]: old}, "queue": {
+        "old": {"review_identity": ["repo", 1, "old", "base", "main"],
+                "state": "publication_uncertain"}}, "attempts": {}})
+
+    assert service.run_once()["status"] == "COMPLETE"
+    saved = service.store.load()
+    assert saved["queue"]["old"]["state"] == "obsolete_context"
+    assert saved["queue"]["old"]["retry_safe"] is False
+    assert any(tuple(v["review_identity"]) == ("repo", 1, "new", "base", "main")
+               and v["state"] == "complete" for v in saved["queue"].values())
+
+
+def test_discovery_failure_does_not_bypass_uncertainty_gate(tmp_path):
+    def fail():
+        raise RuntimeError("network down")
+
+    service = UnattendedReviewService(repository="repo", discover=fail,
+        review=lambda i: None, publish=lambda i, r: None, root=tmp_path)
+    service.store.save({"bootstrapped": True, "baseline": {}, "queue": {
+        "old": {"review_identity": ["repo", 1, "h", "base", "main"],
+                "state": "semantic_prepared"}}, "attempts": {}})
+
+    result = service.run_once()
+    assert result["status"] == "RECONCILIATION_REQUIRED"
+    assert service.store.load()["queue"]["old"]["state"] == "semantic_prepared"
