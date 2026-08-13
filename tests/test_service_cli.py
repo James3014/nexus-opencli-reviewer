@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from reviewer.config import ReviewerConfig, save_config
 from reviewer import service_cli
+from reviewer.opencli import TransportResult
+from reviewer.preflight import PreflightResult
 
 
 def config(tmp_path):
@@ -202,3 +204,68 @@ def test_apply_terminal_reconciliation_unblocks_scheduler(tmp_path):
     service_cli._apply_recovered(fake,[{"identity":["r",1,"h","b","m"],"receipt":None,"terminal":"STALE_CONTEXT_AFTER_COMPLETION"}])
     item=fake.store.value["queue"]["k"]
     assert item["state"]=="semantic_failed" and item["retry_safe"] is False
+
+
+def test_build_service_end_to_end_persists_receipts_and_deduplicates(monkeypatch, tmp_path):
+    from reviewer.config import BootstrapPolicy
+
+    class FakeGitHub:
+        def __init__(self):
+            self.comments = []
+            self.comment_writes = 0
+            self.main = "m"
+            self.pr = {"number": 1, "title": "ready", "body": "", "draft": False,
+                       "mergeable": True, "state": "OPEN",
+                       "base": {"ref": "main", "sha": "m"},
+                       "head": {"ref": "feature", "sha": "h"}, "labels": []}
+        def auth_preflight(self): return None
+        def get_ref(self, repo, branch): return {"object": {"sha": self.main}}
+        def list_open_prs(self, repo): return [self.pr]
+        def get_pr(self, repo, number): return self.pr
+        def list_files(self, repo, number): return [{"filename": "src/example.py"}]
+        def list_checks(self, repo, sha): return []
+        def get_patch(self, repo, number): return "diff --git a/src/example.py b/src/example.py\n+1"
+        def list_comments(self, repo, number): return list(self.comments)
+        def create_comment(self, repo, number, body):
+            self.comment_writes += 1
+            comment = {"id": self.comment_writes, "body": body,
+                       "html_url": f"https://example.test/comments/{self.comment_writes}"}
+            self.comments.append(comment)
+            return comment
+
+    class FakeSemanticTransport:
+        calls = 0
+        def __init__(self, executable="opencli", profile=None):
+            self.executable, self.profile = executable, profile
+            self.session_mode = "ephemeral"
+        def version(self): return "fake-1"
+        def safe_argv(self):
+            return [self.executable, "chatgpt", "ask", "<prompt>", "--site-session", "ephemeral", "-f", "json"]
+        def invoke(self, prompt):
+            type(self).calls += 1
+            raw = json.dumps({"schema": "reviewer.semantic_response.v1", "status": "PASS",
+                              "summary": "ok", "findings": [], "evidence_gaps": []})
+            return TransportResult("REVIEW_COMPLETED", raw, executable=self.executable,
+                                   profile=self.profile, version="fake-1", argv=self.safe_argv())
+
+    gh = FakeGitHub()
+    monkeypatch.setattr(service_cli, "GhCliTransport", lambda: gh)
+    monkeypatch.setattr(service_cli, "OpenCLITransport", FakeSemanticTransport)
+    monkeypatch.setattr(service_cli, "preflight_opencli",
+                        lambda executable: PreflightResult("READY", profile={"id": "profile-1"}))
+    monkeypatch.setattr(service_cli, "_daemon_restart", lambda executable: True)
+    cfg = ReviewerConfig(repositories=("owner/repo",), poll_interval_seconds=5,
+                         state_root=tmp_path / "state", log_path=tmp_path / "service.log",
+                         bootstrap=BootstrapPolicy("bounded", 1))
+
+    first = service_cli.run_once(cfg, bootstrap_canary=True)
+    assert first["results"][0]["status"] == "COMPLETE"
+    assert FakeSemanticTransport.calls == 1 and gh.comment_writes == 1
+    receipts = list((cfg.state_root / "reviews").glob("*.json"))
+    publications = list((cfg.state_root / "publication-receipts").glob("*.json"))
+    assert len(receipts) == 1 and json.loads(receipts[0].read_text())["schema"] == "reviewer.pre_review.v1"
+    assert len(publications) == 1 and json.loads(publications[0].read_text())["schema"] == "reviewer.publication_receipt.v1"
+
+    assert service_cli.run_once(cfg)["results"][0]["status"] == "IDLE"
+    assert service_cli.run_once(cfg)["results"][0]["status"] == "IDLE"
+    assert FakeSemanticTransport.calls == 1 and gh.comment_writes == 1
