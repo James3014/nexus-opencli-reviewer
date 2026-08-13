@@ -204,6 +204,29 @@ class UnattendedReviewService:
                 candidates.append((str(key), item))
         return sorted(candidates, key=lambda pair: pair[0])[0] if candidates else None
 
+    @staticmethod
+    def _rebind_actionable(state: dict[str, Any], records: Iterable[Mapping[str, Any]]) -> None:
+        """Retire queued work whose PR identity changed during a fresh scan.
+
+        Actionable entries are safe to retire because no semantic call has
+        started yet (or publication is explicitly retryable).  Only the exact
+        five-tuple is retained; a missing PR is closed, while a still-open PR
+        with a different tuple has changed context.  Discovery failure never
+        reaches this method, so it cannot make an obsolete guess.
+        """
+        current = {tuple(record.get("review_identity", ())) for record in records}
+        open_prs = {identity[1] for identity in current if len(identity) >= 2}
+        actionable = {"queued", "retry_wait", "publication_pending"}
+        for item in state.get("queue", {}).values():
+            if item.get("state") not in actionable:
+                continue
+            identity = tuple(item.get("review_identity", ()))
+            if identity in current:
+                continue
+            item["state"] = "obsolete_context" if len(identity) >= 2 and identity[1] in open_prs else "obsolete_closed"
+            item["retry_safe"] = False
+            item["updated_at"] = _now()
+
     def run_once(self) -> dict[str, Any]:
         state = self.store.load()
         try:
@@ -228,6 +251,7 @@ class UnattendedReviewService:
             self.store.save(state)
             return {"status": "DISCOVERY_FAILED", "error": type(exc).__name__,
                     "detail": str(exc)[:500]}
+        self._rebind_actionable(state, records)
         interrupted = [item for item in state.get("queue", {}).values()
                        if item.get("state") in {"semantic_prepared", "publication_uncertain", "outcome_unknown"}]
         if interrupted:

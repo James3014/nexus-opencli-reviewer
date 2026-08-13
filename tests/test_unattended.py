@@ -197,3 +197,68 @@ def test_discovery_failure_does_not_bypass_uncertainty_gate(tmp_path):
     result = service.run_once()
     assert result["status"] == "RECONCILIATION_REQUIRED"
     assert service.store.load()["queue"]["old"]["state"] == "semantic_prepared"
+
+
+def test_stale_queued_closed_pr_is_obsoleted_without_review(tmp_path):
+    calls = []
+    service = UnattendedReviewService(repository="repo", discover=lambda: [],
+        review=lambda i: calls.append(i), publish=lambda i, r: None, root=tmp_path)
+    service.store.save({"bootstrapped": True, "baseline": {}, "queue": {
+        "old": {"review_identity": ["repo", 1, "old", "base", "main"],
+                "state": "queued", "next_action_at": 0}}, "attempts": {}})
+
+    assert service.run_once()["status"] == "IDLE"
+    saved = service.store.load()["queue"]["old"]
+    assert saved["state"] == "obsolete_closed"
+    assert saved["retry_safe"] is False
+    assert calls == []
+
+
+def test_stale_retry_wait_context_change_is_rebound_and_new_identity_runs(tmp_path):
+    current = [item("new", number=1)]
+    calls = []
+    service = UnattendedReviewService(repository="repo", discover=lambda: current,
+        review=lambda i: calls.append(("review", i)) or {"receipt": "r"},
+        publish=lambda i, r: calls.append(("publish", i)) or True, root=tmp_path)
+    old = service._record(item("old", number=1))
+    service.store.save({"bootstrapped": True, "baseline": {old["identity_key"]: old}, "queue": {
+        "old": {"review_identity": ["repo", 1, "old", "base", "main"],
+                "state": "retry_wait", "next_action_at": 0}}, "attempts": {}})
+
+    assert service.run_once()["status"] == "COMPLETE"
+    saved = service.store.load()["queue"]
+    assert saved["old"]["state"] == "obsolete_context"
+    assert saved["old"]["retry_safe"] is False
+    assert [kind for kind, _ in calls] == ["review", "publish"]
+    assert calls[0][1][2] == "new"
+
+
+def test_stale_publication_pending_is_obsoleted_without_publish(tmp_path):
+    calls = []
+    service = UnattendedReviewService(repository="repo", discover=lambda: [],
+        review=lambda i: None, publish=lambda i, r: calls.append(i), root=tmp_path)
+    service.store.save({"bootstrapped": True, "baseline": {}, "queue": {
+        "old": {"review_identity": ["repo", 1, "old", "base", "main"],
+                "state": "publication_pending", "semantic_result": {"receipt": "r"},
+                "next_action_at": 0}}, "attempts": {}})
+
+    assert service.run_once()["status"] == "IDLE"
+    assert service.store.load()["queue"]["old"]["state"] == "obsolete_closed"
+    assert calls == []
+
+
+def test_exact_current_publication_pending_still_publishes(tmp_path):
+    current = [item("same", number=1)]
+    calls = []
+    service = UnattendedReviewService(repository="repo", discover=lambda: current,
+        review=lambda i: None,
+        publish=lambda i, r: calls.append((i, r)) or {"status": "PUBLISHED"}, root=tmp_path)
+    identity = tuple(current[0]["review_identity"])
+    baseline = service._record(current[0])
+    service.store.save({"bootstrapped": True, "baseline": {baseline["identity_key"]: baseline}, "queue": {
+        "same": {"review_identity": list(identity), "state": "publication_pending",
+                  "semantic_result": {"receipt": "r"}, "next_action_at": 0}}, "attempts": {}})
+
+    assert service.run_once()["status"] == "PUBLISHED"
+    assert calls == [(identity, {"receipt": "r"})]
+    assert service.store.load()["queue"]["same"]["state"] == "published"
