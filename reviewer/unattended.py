@@ -217,8 +217,10 @@ class UnattendedReviewService:
         except Exception as exc:
             state["status"] = "DEGRADED"
             state["last_error"] = type(exc).__name__
+            state["last_error_detail"] = str(exc)[:500]
             self.store.save(state)
-            return {"status": "DISCOVERY_FAILED", "error": type(exc).__name__}
+            return {"status": "DISCOVERY_FAILED", "error": type(exc).__name__,
+                    "detail": str(exc)[:500]}
         selected = self._next(state)
         if selected is None:
             state["status"] = "IDLE"

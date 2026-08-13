@@ -51,3 +51,13 @@ def test_bounded_log_rotation(tmp_path):
     path=tmp_path/"service.log";path.write_bytes(b"x"*service_cli.MAX_LOG_BYTES)
     service_cli._append_log(path,{"status":"IDLE"})
     assert path.with_suffix(".log.1").exists()
+
+
+def test_history_reconciliation_requires_exact_prompt_hash(monkeypatch,tmp_path):
+    from reviewer.attempt import prepare_attempt,mark_dispatching
+    cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","m"]
+    _,path=prepare_attempt(cfg.state_root,identity,"context","expected",{},attempt_id="a",browser_profile="p")
+    mark_dispatching(path)
+    monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:[{"Id":"c"}] if "history" in a[2] else [{"Role":"User","Text":"different"},{"Role":"Assistant","Text":"{}","Generating":False}])
+    assert service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")==[]
+    assert json.loads(path.read_text())["state"]=="DISPATCHING"

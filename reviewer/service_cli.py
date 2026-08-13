@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -10,16 +11,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
-from .attempt import discover_unfinished
+from .attempt import COMPLETED, DISPATCHING, discover_unfinished, finish_attempt
 from .config import DEFAULT_CONFIG_PATH, ReviewerConfig, load_config, save_config
 from .github import GhCliTransport
 from .opencli import OpenCLITransport
 from .preflight import preflight_opencli
 from .publication import publish_review
+from .receipt import persist_receipt
 from .runtime import RuntimeSupervisor
 from .scan import review_ready, scan
+from .semantic import parse_response, SemanticParseError
 from .unattended import ServicePolicy, UnattendedReviewService
 
 SERVICE_LABEL = "com.nexus.opencli-reviewer"
@@ -49,6 +53,71 @@ def _daemon_restart(executable: str) -> bool:
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def _opencli_json(executable: str, profile: str, args: list[str]) -> Any:
+    env=os.environ.copy();env["OPENCLI_PROFILE"]=profile
+    result=subprocess.run([executable,*args,"-f","json"],check=False,capture_output=True,
+                          text=True,timeout=45,env=env)
+    if result.returncode:
+        raise RuntimeError("OPENCLI_READ_FAILURE")
+    return json.loads(result.stdout)
+
+
+def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[dict[str, Any]]:
+    """Recover exact dispatched responses from read-only ChatGPT history.
+
+    A conversation is accepted only when SHA-256 of its complete User message
+    equals the journaled prompt hash. No fuzzy title/time matching is allowed.
+    """
+    recovered=[]
+    for attempt in discover_unfinished(config.state_root):
+        if attempt.get("state") != DISPATCHING or attempt.get("review_identity", [None])[0] != repository:
+            continue
+        profile=str(attempt.get("browser_profile") or "")
+        if not profile:
+            continue
+        try:
+            history=_opencli_json(config.opencli_executable,profile,
+                                  ["chatgpt","history","--limit","20","--site-session","persistent"])
+        except Exception:
+            continue
+        match=None
+        for row in history if isinstance(history,list) else []:
+            conversation=row.get("Id") or row.get("id")
+            if not conversation: continue
+            try: detail=_opencli_json(config.opencli_executable,profile,["chatgpt","detail",str(conversation),"--site-session","persistent"])
+            except Exception: continue
+            user=next((x.get("Text") for x in detail if x.get("Role")=="User"),None) if isinstance(detail,list) else None
+            assistant=next((x.get("Text") for x in reversed(detail) if x.get("Role")=="Assistant" and not x.get("Generating")),None) if isinstance(detail,list) else None
+            if (isinstance(user,str) and isinstance(assistant,str)
+                    and hashlib.sha256(user.encode()).hexdigest()==attempt.get("prompt_sha256")):
+                match=(str(conversation),assistant);break
+        if match is None: continue
+        try: parsed=parse_response(match[1])
+        except SemanticParseError: continue
+        identity=attempt["review_identity"]
+        _,observed,items,_=scan(repository,GhCliTransport())
+        item=next((x for x in items if list(x.review_identity)==identity),None)
+        if item is None: continue
+        raw_sha=hashlib.sha256(match[1].encode()).hexdigest()
+        receipt_id=hashlib.sha256(json.dumps({"identity":identity,"context":attempt["context_pack_sha256"],"prompt":attempt["prompt_sha256"],"raw":raw_sha},sort_keys=True,separators=(",",":" )).encode()).hexdigest()
+        receipt={"schema":"reviewer.pre_review.v1","receipt_id":receipt_id,"repository":repository,
+                 "pr_number":identity[1],"head_sha":identity[2],"base_sha":identity[3],"current_main_sha":identity[4],
+                 "review_identity":identity,"source_observed_at":observed,"source_identity":item.snapshot.source_identity,
+                 "deterministic_findings":item.findings,"risk":item.risk,"changed_files":list(item.snapshot.changed_files),
+                 "context_pack_sha256":attempt["context_pack_sha256"],"prompt_sha256":attempt["prompt_sha256"],
+                 "opencli_executable":attempt.get("opencli_executable"),"opencli_version":attempt.get("opencli_version"),
+                 "browser_profile":profile,"session_mode":attempt.get("session_mode","ephemeral"),"safe_argv":attempt.get("safe_argv",[]),
+                 "invocation_started_at":attempt.get("dispatching_at"),"invocation_finished_at":datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"),
+                 "transport_result":"REVIEW_COMPLETED","outcome_unknown":False,"retry_safe":False,
+                 "raw_response_sha256":raw_sha,"parse_result":"PARSED","semantic_result":parsed,
+                 "conversation_id":match[0],"reconciliation":"opencli_history_exact_prompt_sha256","claim_ceiling":"PRE_REVIEW_ONLY"}
+        receipt_path=persist_receipt(config.state_root,receipt)
+        attempt_path=config.state_root/"reviews"/"attempts"/f"{attempt['attempt_id']}.json"
+        finish_attempt(attempt_path,COMPLETED,result={"transport_result":"REVIEW_COMPLETED","parse_result":"PARSED","reconciled":True})
+        recovered.append({"attempt_id":attempt["attempt_id"],"identity":identity,"receipt":receipt,"path":str(receipt_path)})
+    return recovered
 
 
 def build_service(config: ReviewerConfig, repository: str, *, bootstrap_canary: bool = False) -> UnattendedReviewService:
@@ -102,6 +171,16 @@ def run_once(config: ReviewerConfig, *, bootstrap_canary: bool = False) -> dict[
     results = []
     for repository in config.repositories:
         service = build_service(config, repository, bootstrap_canary=bootstrap_canary)
+        recovered=reconcile_semantic_history(config,repository)
+        if recovered:
+            state=service.store.load()
+            for value in recovered:
+                for item in state.get("queue",{}).values():
+                    if item.get("review_identity")==value["identity"]:
+                        item["semantic_result"]=value["receipt"]
+                        item["state"]="publication_pending"
+                        item["retry_safe"]=False
+            service.store.save(state)
         result = service.run_once()
         results.append({"repository": repository, **result})
         # One semantic/publication path across all repositories per cycle.
