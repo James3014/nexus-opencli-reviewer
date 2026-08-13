@@ -246,7 +246,11 @@ def start(config_path: str | Path) -> subprocess.CompletedProcess[str]:
     plist = install(config_path)
     domain = f"gui/{os.getuid()}"
     _launchctl("bootout", f"{domain}/{SERVICE_LABEL}")
-    return _launchctl("bootstrap", domain, str(plist))
+    result = _launchctl("bootstrap", domain, str(plist))
+    if result.returncode != 0:
+        time.sleep(1)
+        result = _launchctl("bootstrap", domain, str(plist))
+    return result
 
 
 def stop() -> subprocess.CompletedProcess[str]:

@@ -254,7 +254,9 @@ class UnattendedReviewService:
             # The callback is responsible for journaling dispatch uncertainty.
             # An explicit marker lets it block replay; ordinary pre-dispatch
             # operational errors can be retried with bounded backoff.
-            unknown = bool(getattr(exc, "outcome_unknown", False)) or "UNKNOWN" in str(exc).upper()
+            unknown = bool(getattr(exc, "outcome_unknown", False)) or any(
+                marker in str(exc).upper() for marker in ("UNKNOWN", "RECONCILIATION")
+            )
             if unknown:
                 item["state"] = "outcome_unknown"; item["retry_safe"] = False
                 state["status"] = "RECONCILIATION_REQUIRED"

@@ -53,6 +53,19 @@ def test_bounded_log_rotation(tmp_path):
     assert path.with_suffix(".log.1").exists()
 
 
+def test_start_retries_launchctl_bootstrap_race(monkeypatch,tmp_path):
+    monkeypatch.setattr(service_cli,"install",lambda p:tmp_path/"agent.plist")
+    monkeypatch.setattr(service_cli.time,"sleep",lambda n:None)
+    calls=[]
+    def launch(*args):
+        calls.append(args)
+        code=5 if args[0]=="bootstrap" and sum(1 for x in calls if x[0]=="bootstrap")==1 else 0
+        return SimpleNamespace(returncode=code,stderr="")
+    monkeypatch.setattr(service_cli,"_launchctl",launch)
+    assert service_cli.start(tmp_path/"config.json").returncode==0
+    assert sum(1 for x in calls if x[0]=="bootstrap")==2
+
+
 def test_history_reconciliation_requires_exact_prompt_hash(monkeypatch,tmp_path):
     from reviewer.attempt import prepare_attempt,mark_dispatching
     cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","m"]

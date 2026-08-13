@@ -111,3 +111,11 @@ def test_restart_with_interrupted_scheduler_state_blocks_replay(tmp_path):
     root=tmp_path/"state"; service=UnattendedReviewService(repository="repo",discover=lambda:[item()],review=lambda i:None,publish=lambda i,r:None,root=root)
     state=service.store.load();state["bootstrapped"]=True;state["queue"]={"x":{"review_identity":["repo",1,"h","b","m"],"state":"semantic_prepared"}};service.store.save(state)
     assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
+
+
+def test_reconciliation_error_never_enters_retry_queue(tmp_path):
+    service=UnattendedReviewService(repository="repo",discover=lambda:[item()],
+        review=lambda i:(_ for _ in ()).throw(RuntimeError("RECONCILIATION_REQUIRED")),
+        publish=lambda i,r:None,root=tmp_path,policy=ServicePolicy(bootstrap_canary=True))
+    assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
+    assert service.run_once()["status"]=="RECONCILIATION_REQUIRED"
