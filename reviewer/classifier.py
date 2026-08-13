@@ -12,7 +12,8 @@ def classify(pr,authority_patterns=DEFAULT_AUTHORITY_PATTERNS):
     if any(x.status.lower() in ('failure','failed','red') and not x.expected_failure for x in pr.checks):add('UNEXPECTED_FAILURE')
     if any(any(f==p or (p.endswith('/') and f.startswith(p)) for p in authority_patterns) for f in pr.changed_files):add('AUTHORITY_OVERLAP');c.risk='HIGH'
     if any(x.lower() in ('long-lived','stale-long-lived') for x in pr.labels):add('STALE_LONG_LIVED')
-    blockers={'STALE_BASE','STALE_EVIDENCE','DRAFT','NON_MERGEABLE','DO_NOT_MERGE','STALE_LONG_LIVED'}
+    if not pr.collection_complete:add('COLLECTION_INCOMPLETE')
+    blockers={'STALE_BASE','STALE_EVIDENCE','DRAFT','NON_MERGEABLE','DO_NOT_MERGE','STALE_LONG_LIVED','COLLECTION_INCOMPLETE'}
     if not (set(c.findings)&blockers):c.disposition=Disposition.REVIEW_READY
     elif 'DO_NOT_MERGE' in c.findings:c.disposition=Disposition.EVIDENCE_ONLY
     elif 'DRAFT' in c.findings or 'NON_MERGEABLE' in c.findings:c.disposition=Disposition.EXCLUDED

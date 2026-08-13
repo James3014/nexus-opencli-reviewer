@@ -39,7 +39,7 @@ def test_overlap_paths_and_state_persistence(tmp_path):
     changed=classify(PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h3'},'m'));loaded.ingest([changed]);assert len(loaded.items)==2
 
 def test_lineage_and_declared_evidence():
-    p=PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'physical-base','head_sha':'physical-head','body':'Exact head: prose-head','observed_at':'now','source_identity':'fixture:x'},'main')
+    p=PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'physical-base','head_sha':'physical-head','body':'Exact head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','observed_at':'now','source_identity':'fixture:x'},'main')
     assert p.observed_at=='now' and p.source_identity=='fixture:x'
     assert classify(p).snapshot.head_sha=='physical-head' and 'STALE_EVIDENCE' in classify(p).findings
 
