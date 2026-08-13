@@ -25,21 +25,22 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
     detect(out); q=ReviewQueue();q.ingest(out)
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)
     return main_sha,observed,out,q
-def review_ready(repo,transport,pr_number,patch_provider,budget=200000,state_root='.reviewer-state'):
+def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None,budget=200000,state_root='.reviewer-state'):
     from .review_context import ReviewContext, envelope, ContextError
-    from .opencli import OpenCLITransport
     from .receipt import make_receipt,persist_receipt,reusable_receipt
     from .semantic import parse_response,SemanticParseError
     main_sha,observed,items,q=scan(repo,transport)
     selected=next((x for x in items if x.snapshot.pr_number==pr_number),None)
     if selected is None or selected.disposition.value!='REVIEW_READY': raise ContextError('PR_NOT_REVIEW_READY')
-    current=next((x for x in scan(repo,transport)[2] if x.snapshot.pr_number==pr_number),None)
+    current=next((x for x in items if x.snapshot.pr_number==pr_number),None)
     if not current or current.review_identity!=selected.review_identity: raise ContextError('REVIEW_CONTEXT_STALE')
-    try: context=ReviewContext.build(current,patch_provider(pr_number),budget)
+    try:
+        patch=patch_provider(pr_number) if patch_provider else transport.get_patch(repo,pr_number)
+        context=ReviewContext.build(current,patch,budget)
     except ContextError: raise
     old=reusable_receipt(state_root,context.review_identity)
     if old:return old
-    prompt=envelope(context); cli=OpenCLITransport(); result=cli.invoke(prompt)
+    prompt=envelope(context); result=semantic_transport.invoke(prompt)
     parsed=None; parse_result='NOT_ATTEMPTED'
     if result.status=='REVIEW_COMPLETED':
         try: parsed=parse_response(result.raw);parse_result='PARSED'

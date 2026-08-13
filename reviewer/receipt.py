@@ -1,11 +1,12 @@
 from __future__ import annotations
 import hashlib,json
+from datetime import datetime,timezone
 from pathlib import Path
 from .semantic import parse_response,SemanticParseError
 def receipt_path(root, identity):
     key=hashlib.sha256(json.dumps(list(identity),separators=(',',':')).encode()).hexdigest(); p=Path(root)/'reviews'/f'{key}.json'; p.parent.mkdir(parents=True,exist_ok=True); return p
 def make_receipt(context, classification, transport, prompt, observed_at, parsed=None, parse_result='NOT_ATTEMPTED'):
-    raw=transport.raw or ''; return {'schema':'reviewer.pre_review.v1','repository':context.review_identity[0],'pr_number':context.review_identity[1],'base_sha':context.review_identity[3],'head_sha':context.review_identity[2],'current_main_sha':context.review_identity[4],'review_identity':list(context.review_identity),'source_observed_at':observed_at,'source_identity':classification.snapshot.source_identity,'deterministic_findings':classification.findings,'risk':classification.risk,'changed_files':list(classification.snapshot.changed_files),'context_pack_sha256':context.context_sha256,'prompt_sha256':hashlib.sha256(prompt.encode()).hexdigest(),'opencli_executable':getattr(transport,'executable','fake'),'transport_result':transport.status,'raw_response_sha256':hashlib.sha256(raw.encode()).hexdigest() if raw else None,'parse_result':parse_result,'semantic_result':parsed,'claim_ceiling':'PRE_REVIEW_ONLY'}
+    raw=transport.raw or ''; now=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z'); return {'schema':'reviewer.pre_review.v1','repository':context.review_identity[0],'pr_number':context.review_identity[1],'base_sha':context.review_identity[3],'head_sha':context.review_identity[2],'current_main_sha':context.review_identity[4],'review_identity':list(context.review_identity),'source_observed_at':observed_at,'source_identity':classification.snapshot.source_identity,'deterministic_findings':classification.findings,'risk':classification.risk,'changed_files':list(classification.snapshot.changed_files),'context_pack_sha256':context.context_sha256,'prompt_sha256':hashlib.sha256(prompt.encode()).hexdigest(),'opencli_executable':getattr(transport,'executable','fake'),'opencli_version':getattr(transport,'version',''),'session_mode':'ephemeral','invocation_started_at':now,'invocation_finished_at':now,'transport_result':transport.status,'raw_response_sha256':hashlib.sha256(raw.encode()).hexdigest() if raw else None,'parse_result':parse_result,'semantic_result':parsed,'claim_ceiling':'PRE_REVIEW_ONLY'}
 def persist_receipt(root, receipt):
     p=receipt_path(root,tuple(receipt['review_identity'])); p.write_text(json.dumps(receipt,indent=2,sort_keys=True)); return p
 def reusable_receipt(root, identity):

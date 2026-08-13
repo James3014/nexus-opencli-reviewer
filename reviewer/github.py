@@ -10,6 +10,8 @@ class GitHubTransport(Protocol):
     def list_open_prs(self, repo:str)->list[dict[str,Any]]: ...
     def list_files(self, repo:str, number:int)->list[dict[str,Any]]: ...
     def list_checks(self, repo:str, sha:str)->list[dict[str,Any]]: ...
+    def get_patch(self, repo:str, number:int)->str: ...
+    def get_pr(self, repo:str, number:int)->dict[str,Any]: ...
 
 class GhCliTransport:
     def __init__(self, gh='gh'): self.gh=gh
@@ -48,5 +50,13 @@ class GhCliTransport:
             rows=value['check_runs']; out.extend(rows)
             if len(rows)<100:return out
         raise GitHubError('check-runs pagination exceeded safety bound')
+    def get_pr(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/pulls/{int(number)}')
+    def get_patch(self,repo,number):
+        self._validate(repo)
+        args=[self.gh,'api',f'repos/{repo}/pulls/{int(number)}','-H','Accept: application/vnd.github.v3.patch']
+        try:p=subprocess.run(args,check=False,capture_output=True,text=True,timeout=30)
+        except (OSError,subprocess.TimeoutExpired) as e:raise GitHubError(str(e)) from e
+        if p.returncode:raise GitHubError(p.stderr.strip() or 'patch acquisition failed')
+        return p.stdout
 
 def utc_now(): return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z')

@@ -3,10 +3,16 @@ from .collector import load_fixture
 from .classifier import classify
 from .overlap import detect
 from .github import GhCliTransport, GitHubError
-from .scan import scan
+from .scan import scan,review_ready
+from .opencli import OpenCLITransport
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--fixtures');p.add_argument('--main-sha');p.add_argument('--repo');p.add_argument('--json',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--fixtures');p.add_argument('--main-sha');p.add_argument('--repo');p.add_argument('--review-pr',type=int);p.add_argument('--json',action='store_true');a=p.parse_args()
     try:
+        if a.review_pr is not None and not a.repo:p.error('--review-pr requires --repo')
+        if a.review_pr is not None:
+            result=review_ready(a.repo,GhCliTransport(),a.review_pr,OpenCLITransport(),state_root='.reviewer-state')
+            print(json.dumps(result[0],indent=2,sort_keys=True) if a.json else f'PRE_REVIEW {result[0]["transport_result"]}')
+            return
         if a.repo:
             main_sha,observed,xs,q=scan(a.repo,GhCliTransport(),persist_state=True)
         elif a.fixtures and a.main_sha:
