@@ -40,6 +40,13 @@ class GhCliTransport:
         raise GitHubError('pagination exceeded safety bound')
     def list_open_prs(self,repo): self._validate(repo); return self._paginate(f'repos/{repo}/pulls?state=open')
     def list_files(self,repo,number): self._validate(repo); return self._paginate(f'repos/{repo}/pulls/{int(number)}/files')
-    def list_checks(self,repo,sha): self._validate(repo); return self._get(f'repos/{repo}/commits/{sha}/check-runs',per_page=100).get('check_runs',[])
+    def list_checks(self,repo,sha):
+        self._validate(repo); out=[]
+        for page in range(1,101):
+            value=self._get(f'repos/{repo}/commits/{sha}/check-runs',per_page=100,page=page)
+            if not isinstance(value,dict) or not isinstance(value.get('check_runs'),list): raise GitHubError('expected check-runs page')
+            rows=value['check_runs']; out.extend(rows)
+            if len(rows)<100:return out
+        raise GitHubError('check-runs pagination exceeded safety bound')
 
 def utc_now(): return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z')
