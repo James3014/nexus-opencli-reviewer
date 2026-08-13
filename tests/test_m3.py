@@ -86,3 +86,14 @@ def test_semantic_strict_required_fields():
     bad={'schema':'reviewer.semantic_response.v1','status':'FINDINGS','summary':'x','findings':[{'severity':'HIGH','category':'x','path':None,'evidence':'e','reason':'r'}],'evidence_gaps':[3]}
     try:parse_response(json.dumps(bad));assert False
     except SemanticParseError:pass
+
+def test_process_timeout_has_headroom_and_unknown_outcome(monkeypatch,tmp_path):
+    import subprocess
+    class T:
+        def __call__(self,*a,**k):
+            if a[0][1]=='--version': return type('P',(),{'stdout':'1.8.6'})()
+            assert k['timeout']==180
+            raise subprocess.TimeoutExpired(a[0],180)
+    monkeypatch.setattr(subprocess,'run',T()); t=OpenCLITransport(timeout=120); r=t.invoke('x')
+    assert r.status=='OPENCLI_OUTCOME_UNKNOWN' and not r.retry_safe and r.argv[r.argv.index('--timeout')+1]=='120'
+    p=PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h'},'m'); c=classify(p);ctx=ReviewContext.build(c,'d'); rec=make_receipt(ctx,c,r,'p','now'); path=persist_receipt(tmp_path,rec); assert path.exists() and rec['outcome_unknown']
