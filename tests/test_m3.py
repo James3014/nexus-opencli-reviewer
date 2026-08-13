@@ -106,8 +106,9 @@ def test_parse_failure_exact_identity_cannot_dispatch_twice(tmp_path):
         calls=0
         def invoke(self,p):self.calls+=1;return TransportResult('REVIEW_COMPLETED','not-json')
     bad=Bad('')
-    first,path=review_ready('o/r',GH(),1,bad,state_root=tmp_path)
-    assert first['parse_result']=='REVIEW_PARSE_FAILED' and bad.calls==1
+    try:review_ready('o/r',GH(),1,bad,state_root=tmp_path);assert False
+    except ContextError as e:assert 'REVIEW_PARSE_FAILED' in str(e)
+    assert bad.calls==1
     try:review_ready('o/r',GH(),1,bad,state_root=tmp_path);assert False
     except ContextError as e:assert str(e)=='RECONCILIATION_REQUIRED'
     assert bad.calls==1

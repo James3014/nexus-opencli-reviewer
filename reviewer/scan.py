@@ -102,4 +102,8 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
     finish_attempt(attempt_path, terminal, result={'transport_result': result.status, 'parse_result': parse_result}, retry_safe=False)
     receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result)
     path=persist_receipt(state_root,receipt)
+    if parse_result == 'REVIEW_PARSE_FAILED':
+        raise ContextError(f'REVIEW_PARSE_FAILED evidence={path}')
+    if result.status != 'REVIEW_COMPLETED':
+        raise ContextError(f'{result.status} evidence={path}')
     return receipt,path
