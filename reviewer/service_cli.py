@@ -133,7 +133,7 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[
             conversation=row.get("Id") or row.get("id")
             if not conversation: continue
             try: detail=_opencli_json(config.opencli_executable,profile,["chatgpt","detail",str(conversation),"--site-session","ephemeral"])
-            except Exception: continue
+            except Exception: detail=[]
             user=next((x.get("Text") for x in detail if x.get("Role")=="User"),None) if isinstance(detail,list) else None
             assistant=next((x.get("Text") for x in reversed(detail) if x.get("Role")=="Assistant" and not x.get("Generating")),None) if isinstance(detail,list) else None
             if (isinstance(user,str) and isinstance(assistant,str)
