@@ -38,6 +38,24 @@ def test_overlap_paths_and_state_persistence(tmp_path):
     q=ReviewQueue();q.ingest([a]);p=tmp_path/'state.json';q.save(p);loaded=ReviewQueue.load(p);loaded.ingest([a,b]);assert len(loaded.items)==1
     changed=classify(PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h3'},'m'));loaded.ingest([changed]);assert len(loaded.items)==2
 
+def test_stale_pr_overlap_is_risk_context_not_review_blocker():
+    current=classify(PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h','changed_files':['shared.py']},'m'))
+    stale=classify(PRSnapshot.from_dict({'repository':'r','pr_number':2,'base_sha':'old','head_sha':'h2','changed_files':['shared.py']},'m'))
+    detect([current,stale])
+    assert current.disposition==Disposition.REVIEW_READY
+    assert current.overlaps=={2:['shared.py']}
+    assert 'PATH_OVERLAP' in current.findings
+    assert stale.disposition==Disposition.STALE
+
+def test_stale_pr_same_issue_is_risk_context_not_review_blocker():
+    current=classify(PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h','issue_numbers':[42]},'m'))
+    stale=classify(PRSnapshot.from_dict({'repository':'r','pr_number':2,'base_sha':'old','head_sha':'h2','issue_numbers':[42]},'m'))
+    detect([current,stale])
+    assert current.disposition==Disposition.REVIEW_READY
+    assert stale.disposition==Disposition.STALE
+    assert 'SAME_ISSUE_CHAIN' in current.findings
+    assert 'multiple active PRs share an Issue' in current.reasons
+
 def test_lineage_and_declared_evidence():
     p=PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'physical-base','head_sha':'physical-head','body':'Exact head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','observed_at':'now','source_identity':'fixture:x'},'main')
     assert p.observed_at=='now' and p.source_identity=='fixture:x'
