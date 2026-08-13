@@ -16,6 +16,7 @@ def test_launch_agent_is_user_level_and_independent(tmp_path, monkeypatch):
     plist=service_cli.install(path); text=plist.read_text()
     assert service_cli.SERVICE_LABEL in text and "<key>KeepAlive</key><true/>" in text
     assert "sudo" not in text and "reviewer.service_cli" in text and "daemon" in text
+    assert "/opt/homebrew/bin" in text
 
 
 def test_run_once_delegates_without_manual_pr(monkeypatch,tmp_path):
@@ -25,6 +26,15 @@ def test_run_once_delegates_without_manual_pr(monkeypatch,tmp_path):
     monkeypatch.setattr(service_cli,"build_service",lambda config,repository,bootstrap_canary=False:S())
     value=service_cli.run_once(cfg)
     assert seen==["run"] and value["semantic_concurrency"]==1
+
+
+def test_bounded_bootstrap_config_admits_exactly_one_canary(monkeypatch,tmp_path):
+    from reviewer.config import BootstrapPolicy
+    cfg=ReviewerConfig(poll_interval_seconds=5,state_root=tmp_path/"state",log_path=tmp_path/"log",bootstrap=BootstrapPolicy("bounded",1))
+    captured={}
+    monkeypatch.setattr(service_cli,"UnattendedReviewService",lambda **kwargs:captured.update(kwargs) or object())
+    service_cli.build_service(cfg,"James3014/Nexus-new")
+    assert captured["policy"].bootstrap_canary is True
 
 
 def test_status_reports_launch_and_durable_queue(monkeypatch,tmp_path):

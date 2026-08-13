@@ -91,7 +91,7 @@ def build_service(config: ReviewerConfig, repository: str, *, bootstrap_canary: 
         root=service_root,
         policy=ServicePolicy(
             poll_interval_seconds=config.poll_interval_seconds,
-            bootstrap_canary=bootstrap_canary,
+            bootstrap_canary=(bootstrap_canary or (config.bootstrap.mode == "bounded" and config.bootstrap.max_reviews == 1)),
             max_retries=1000000,
             backoff_seconds=30,
         ),
@@ -144,7 +144,7 @@ def _plist_xml(config_path: Path) -> str:
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 <key>ProcessType</key><string>Background</string><key>ThrottleInterval</key><integer>30</integer>
 <key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string>
-<key>EnvironmentVariables</key><dict><key>PYTHONDONTWRITEBYTECODE</key><string>1</string><key>PYTHONPATH</key><string>{html.escape(str(REPO_ROOT))}</string></dict>
+<key>EnvironmentVariables</key><dict><key>PYTHONDONTWRITEBYTECODE</key><string>1</string><key>PYTHONPATH</key><string>{html.escape(str(REPO_ROOT))}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/Users/jameschen/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
 </dict></plist>\n'''
 
 
