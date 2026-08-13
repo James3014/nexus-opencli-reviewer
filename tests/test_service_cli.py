@@ -137,3 +137,18 @@ def test_detail_failure_still_uses_exact_dom_response(monkeypatch,tmp_path):
     monkeypatch.setattr(service_cli,"scan",lambda *a,**k:(None,"observed",[Item()],None))
     assert len(service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new"))==1
     assert json.loads(path.read_text())["state"]=="COMPLETED"
+
+
+def test_exact_response_with_drifted_context_finishes_failed(monkeypatch,tmp_path):
+    from reviewer.attempt import prepare_attempt,mark_dispatching
+    cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","old-main"]
+    _,path=prepare_attempt(cfg.state_root,identity,"context","expected",{},attempt_id="a",browser_profile="p")
+    mark_dispatching(path)
+    semantic=json.dumps({"schema":"reviewer.semantic_response.v1","status":"PASS","summary":"ok","findings":[],"evidence_gaps":[]})
+    monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:[{"Id":"c"}] if "history" in a[2] else [])
+    monkeypatch.setattr(service_cli,"_browser_exact_response",lambda *a,**k:semantic)
+    monkeypatch.setattr(service_cli,"scan",lambda *a,**k:(None,"observed",[],None))
+    recovered=service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")
+    assert recovered[0]["terminal"]=="STALE_CONTEXT_AFTER_COMPLETION"
+    record=json.loads(path.read_text())
+    assert record["state"]=="FAILED" and record["retry_safe"] is False

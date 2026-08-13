@@ -163,7 +163,18 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[
         identity=attempt["review_identity"]
         _,observed,items,_=scan(repository,GhCliTransport())
         item=next((x for x in items if list(x.review_identity)==identity),None)
-        if item is None: continue
+        attempt_path=config.state_root/"reviews"/"attempts"/f"{attempt['attempt_id']}.json"
+        if item is None:
+            finish_attempt(
+                attempt_path, "FAILED",
+                result={"transport_result":"REVIEW_COMPLETED","parse_result":"PARSED",
+                        "reconciled":True,"context_result":"STALE_CONTEXT_AFTER_COMPLETION"},
+                retry_safe=False,
+            )
+            recovered.append({"attempt_id":attempt["attempt_id"],"identity":identity,
+                              "terminal":"STALE_CONTEXT_AFTER_COMPLETION","receipt":None,
+                              "path":str(attempt_path)})
+            continue
         raw_sha=hashlib.sha256(match[1].encode()).hexdigest()
         receipt_id=hashlib.sha256(json.dumps({"identity":identity,"context":attempt["context_pack_sha256"],"prompt":attempt["prompt_sha256"],"raw":raw_sha},sort_keys=True,separators=(",",":" )).encode()).hexdigest()
         receipt={"schema":"reviewer.pre_review.v1","receipt_id":receipt_id,"repository":repository,
@@ -178,7 +189,6 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[
                  "raw_response_sha256":raw_sha,"parse_result":"PARSED","semantic_result":parsed,
                  "conversation_id":match[0],"reconciliation":"opencli_history_exact_prompt_sha256","claim_ceiling":"PRE_REVIEW_ONLY"}
         receipt_path=persist_receipt(config.state_root,receipt)
-        attempt_path=config.state_root/"reviews"/"attempts"/f"{attempt['attempt_id']}.json"
         finish_attempt(attempt_path,COMPLETED,result={"transport_result":"REVIEW_COMPLETED","parse_result":"PARSED","reconciled":True})
         recovered.append({"attempt_id":attempt["attempt_id"],"identity":identity,"receipt":receipt,"path":str(receipt_path)})
     return recovered
@@ -241,8 +251,12 @@ def run_once(config: ReviewerConfig, *, bootstrap_canary: bool = False) -> dict[
             for value in recovered:
                 for item in state.get("queue",{}).values():
                     if item.get("review_identity")==value["identity"]:
-                        item["semantic_result"]=value["receipt"]
-                        item["state"]="publication_pending"
+                        if value.get("receipt") is not None:
+                            item["semantic_result"]=value["receipt"]
+                            item["state"]="publication_pending"
+                        else:
+                            item["state"]="semantic_failed"
+                            item["last_error"]=value.get("terminal","RECONCILIATION_FAILED")
                         item["retry_safe"]=False
             service.store.save(state)
         result = service.run_once()
