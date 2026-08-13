@@ -72,5 +72,34 @@ def test_history_reconciliation_requires_exact_prompt_hash(monkeypatch,tmp_path)
     _,path=prepare_attempt(cfg.state_root,identity,"context","expected",{},attempt_id="a",browser_profile="p")
     mark_dispatching(path)
     monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:[{"Id":"c"}] if "history" in a[2] else [{"Role":"User","Text":"different"},{"Role":"Assistant","Text":"{}","Generating":False}])
+    monkeypatch.setattr(service_cli,"_browser_exact_response",lambda *a,**k:None)
     assert service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")==[]
     assert json.loads(path.read_text())["state"]=="DISPATCHING"
+
+
+def test_browser_reconciliation_requires_exact_dom_hash(monkeypatch):
+    calls=[]
+    def browser(executable,profile,args):
+        calls.append(args)
+        return {} if "open" in args else '{"schema":"reviewer.semantic_response.v1"}'
+    monkeypatch.setattr(service_cli,"_opencli_browser",browser)
+    value=service_cli._browser_exact_response("opencli","profile","conversation","a"*64)
+    assert value=='{"schema":"reviewer.semantic_response.v1"}'
+    assert calls[0][0:3]==["reviewer-reconcile","open","https://chatgpt.com/c/conversation"]
+    assert "a"*64 in calls[1][-1]
+
+
+def test_history_reconciliation_accepts_exact_dom_response(monkeypatch,tmp_path):
+    from reviewer.attempt import prepare_attempt,mark_dispatching
+    cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","m"]
+    _,path=prepare_attempt(cfg.state_root,identity,"context","expected",{},attempt_id="a",browser_profile="p")
+    mark_dispatching(path)
+    semantic=json.dumps({"schema":"reviewer.semantic_response.v1","status":"PASS","summary":"ok","findings":[],"evidence_gaps":[]})
+    monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:[{"Id":"c"}] if "history" in a[2] else [{"Role":"User","Text":"truncated"}])
+    monkeypatch.setattr(service_cli,"_browser_exact_response",lambda *a,**k:semantic)
+    class Item:
+        review_identity=tuple(identity); findings=[]; risk="LOW"; snapshot=SimpleNamespace(source_identity="github",changed_files=())
+    monkeypatch.setattr(service_cli,"scan",lambda *a,**k:(None,"observed",[Item()],None))
+    recovered=service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")
+    assert len(recovered)==1 and recovered[0]["receipt"]["semantic_result"]["status"]=="PASS"
+    assert json.loads(path.read_text())["state"]=="COMPLETED"

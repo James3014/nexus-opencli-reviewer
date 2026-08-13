@@ -64,6 +64,52 @@ def _opencli_json(executable: str, profile: str, args: list[str]) -> Any:
     return json.loads(result.stdout)
 
 
+def _opencli_browser(executable: str, profile: str, args: list[str]) -> Any:
+    """Run one bounded, read-only Browser Bridge command."""
+    env = os.environ.copy()
+    env["OPENCLI_PROFILE"] = profile
+    result = subprocess.run(
+        [executable, "browser", *args], check=False, capture_output=True,
+        text=True, timeout=45, env=env,
+    )
+    if result.returncode:
+        raise RuntimeError("OPENCLI_BROWSER_READ_FAILURE")
+    return json.loads(result.stdout)
+
+
+def _browser_exact_response(executable: str, profile: str, conversation: str,
+                            expected_prompt_sha256: str) -> str | None:
+    """Recover a response only when a rendered User node hashes exactly.
+
+    ChatGPT's history/detail surface can truncate long messages.  The Browser
+    Bridge DOM retains the complete rendered message, but its outer container
+    may add UI labels.  Hash every User container/descendant and return the
+    Assistant text only after an exact journal-bound SHA-256 match.
+    """
+    session = "reviewer-reconcile"
+    _opencli_browser(executable, profile, [
+        session, "open", f"https://chatgpt.com/c/{conversation}",
+        "--window", "background",
+    ])
+    expected = json.dumps(str(expected_prompt_sha256))
+    script = f'''(async()=>{{
+      const user=document.querySelector('[data-message-author-role="user"]');
+      const assistant=document.querySelector('[data-message-author-role="assistant"]');
+      if(!user||!assistant)return null;
+      const candidates=[user,...user.querySelectorAll('*')];
+      for(const node of candidates){{
+        const text=node.textContent||'';
+        const bytes=new TextEncoder().encode(text);
+        const digest=await crypto.subtle.digest('SHA-256',bytes);
+        const sha=Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,'0')).join('');
+        if(sha==={expected})return assistant.textContent||'';
+      }}
+      return null;
+    }})()'''
+    value = _opencli_browser(executable, profile, [session, "eval", script])
+    return value if isinstance(value, str) else None
+
+
 def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[dict[str, Any]]:
     """Recover exact dispatched responses from read-only ChatGPT history.
 
@@ -92,6 +138,15 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[
             assistant=next((x.get("Text") for x in reversed(detail) if x.get("Role")=="Assistant" and not x.get("Generating")),None) if isinstance(detail,list) else None
             if (isinstance(user,str) and isinstance(assistant,str)
                     and hashlib.sha256(user.encode()).hexdigest()==attempt.get("prompt_sha256")):
+                match=(str(conversation),assistant);break
+            try:
+                assistant = _browser_exact_response(
+                    config.opencli_executable, profile, str(conversation),
+                    str(attempt.get("prompt_sha256") or ""),
+                )
+            except Exception:
+                assistant = None
+            if isinstance(assistant, str):
                 match=(str(conversation),assistant);break
         if match is None: continue
         try: parsed=parse_response(match[1])
