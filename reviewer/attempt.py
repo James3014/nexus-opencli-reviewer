@@ -176,8 +176,10 @@ def discover_unfinished(root: str | os.PathLike[str]) -> list[dict[str, Any]]:
     return records
 
 
-def discover_for_identity(root: str | os.PathLike[str], review_identity: Iterable[Any]) -> list[dict[str, Any]]:
-    """Return every valid durable attempt for one exact physical identity."""
+def discover_for_identity(root: str | os.PathLike[str], review_identity: Iterable[Any],
+                          *, context_pack_sha256: str | None = None,
+                          prompt_sha256: str | None = None) -> list[dict[str, Any]]:
+    """Return attempts for one exact physical and semantic identity."""
     directory = Path(root) / "reviews" / "attempts"
     if not directory.exists():
         return []
@@ -188,7 +190,9 @@ def discover_for_identity(root: str | os.PathLike[str], review_identity: Iterabl
             record = _load(path)
         except ValueError:
             continue
-        if record.get("review_identity") == identity:
+        if (record.get("review_identity") == identity
+                and (context_pack_sha256 is None or record.get("context_pack_sha256") == context_pack_sha256)
+                and (prompt_sha256 is None or record.get("prompt_sha256") == prompt_sha256)):
             records.append(record)
     return records
 

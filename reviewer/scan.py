@@ -5,7 +5,7 @@ from .overlap import detect
 from .queue import ReviewQueue
 from pathlib import Path
 import hashlib
-import json, os, re, tempfile
+import json, os, re, tempfile, time
 
 def _atomic_json(path, value):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
@@ -39,7 +39,7 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
     detect(out); q=ReviewQueue();q.ingest(out)
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)
     return main_sha,observed,out,q
-def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None,budget=200000,state_root='.reviewer-state'):
+def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None,budget=200000,state_root='.reviewer-state',dispatch_gate=None):
     from .review_context import ReviewContext, envelope, ContextError
     from .receipt import make_receipt,persist_receipt,persist_failure,reusable_receipt
     from .semantic import parse_response,SemanticParseError
@@ -73,7 +73,9 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
     # an external semantic request until an operator reconciles it.
     # Any prior dispatch-bound attempt without a reusable exact-context receipt
     # is ambiguous or already consumed. Never send a second semantic call.
-    if discover_for_identity(state_root, context.review_identity):
+    if discover_for_identity(state_root, context.review_identity,
+                             context_pack_sha256=context.context_sha256,
+                             prompt_sha256=prompt_sha):
         raise ContextError('RECONCILIATION_REQUIRED')
     provenance = {
         'source': 'review_ready',
@@ -87,6 +89,12 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
                                       executable=provenance['executable'], version=provenance['version'],
                                       browser_profile=getattr(semantic_transport, 'profile', None),
                                       session_mode='ephemeral')
+    if dispatch_gate:
+        gate=Path(dispatch_gate);deadline=time.monotonic()+120
+        while not gate.exists():
+            if time.monotonic()>=deadline:
+                raise ContextError(f'DISPATCH_GATE_TIMEOUT attempt={attempt_path}')
+            time.sleep(.1)
     mark_dispatching(attempt_path)
     try:
         result=semantic_transport.invoke(prompt)

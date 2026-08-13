@@ -80,6 +80,8 @@ class OpenCLIPreflight:
             text = line.strip()
             if not text or text.lower().startswith('connected browser bridge profiles'):
                 continue
+            if text.lower().startswith('no browser bridge profiles'):
+                continue
             if 'connected' not in text.lower():
                 continue
             profile_id = text.split()[0]

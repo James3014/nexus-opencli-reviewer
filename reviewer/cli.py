@@ -12,7 +12,7 @@ from .status import inventory
 from .preflight import preflight_opencli
 from .publication import publish_review, reconcile_publication, PublicationError
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--fixtures');p.add_argument('--main-sha');p.add_argument('--repo');p.add_argument('--review-pr',type=int);p.add_argument('--local-only',action='store_true');p.add_argument('--opencli',default='opencli');p.add_argument('--reconcile-attempt', action='store_true');p.add_argument('--reconcile-semantic',metavar='ATTEMPT_ID');p.add_argument('--reconcile-publication');p.add_argument('--publish-receipt');p.add_argument('--status', action='store_true');p.add_argument('--preflight', action='store_true');p.add_argument('--state-root', default='.reviewer-state');p.add_argument('--json',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--fixtures');p.add_argument('--main-sha');p.add_argument('--repo');p.add_argument('--review-pr',type=int);p.add_argument('--local-only',action='store_true');p.add_argument('--dispatch-gate');p.add_argument('--opencli',default='opencli');p.add_argument('--reconcile-attempt', action='store_true');p.add_argument('--reconcile-semantic',metavar='ATTEMPT_ID');p.add_argument('--reconcile-publication');p.add_argument('--publish-receipt');p.add_argument('--status', action='store_true');p.add_argument('--preflight', action='store_true');p.add_argument('--state-root', default='.reviewer-state');p.add_argument('--json',action='store_true');a=p.parse_args()
     try:
         if a.publish_receipt:
             receipt=json.loads(Path(a.publish_receipt).read_text())
@@ -52,7 +52,7 @@ def main():
             profile=(ready.profile or {}).get('id') or (ready.profile or {}).get('contextId') or (ready.profile or {}).get('name')
             if not profile: raise ContextError('PROFILE_SELECTION_AMBIGUOUS')
             gh=GhCliTransport()
-            result=review_ready(a.repo,gh,a.review_pr,OpenCLITransport(executable=a.opencli,profile=str(profile)),state_root=a.state_root)
+            result=review_ready(a.repo,gh,a.review_pr,OpenCLITransport(executable=a.opencli,profile=str(profile)),state_root=a.state_root,dispatch_gate=a.dispatch_gate)
             payload=dict(result[0]); payload['evidence_path']=str(result[1])
             if not a.local_only and payload.get('parse_result')=='PARSED' and payload.get('semantic_result',{}).get('status') in {'PASS','FINDINGS'}:
                 publication_path=publish_review(a.state_root,gh,payload)

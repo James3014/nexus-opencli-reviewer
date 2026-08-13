@@ -8,7 +8,7 @@ mode=sys.argv[2] if sys.argv[1]=='profile' else sys.argv[3]
 if mode=='list':
  print('Connected Browser Bridge profiles\\n\\n  a default — connected v1.0.22')
 elif mode=='ambiguous': print('Connected Browser Bridge profiles\\n\\n  a — connected v1\\n  b — connected v1')
-elif mode=='none': print('Connected Browser Bridge profiles')
+elif mode=='none': print('No Browser Bridge profiles connected.')
 elif mode=='notlogged': print(json.dumps([{'Status':'Connected','Login':'No'}]))
 elif mode=='challenge': print(json.dumps([{'Status':'challenge','Login':'Yes'}]))
 elif mode=='quota': print(json.dumps([{'error':'rate_limit'}]))

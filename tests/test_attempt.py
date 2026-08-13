@@ -7,6 +7,7 @@ from reviewer.attempt import (
     DISPATCHING,
     OUTCOME_UNKNOWN,
     PREPARED,
+    discover_for_identity,
     discover_unfinished,
     finish_attempt,
     mark_dispatching,
@@ -57,3 +58,10 @@ def test_restart_reconciliation_marks_prepared_and_dispatching_unknown(tmp_path)
     assert {x["state"] for x in done} == {OUTCOME_UNKNOWN}
     assert all(x["retry_safe"] is False for x in done)
     assert discover_unfinished(tmp_path) == []
+
+
+def test_same_physical_identity_new_prompt_is_fresh(tmp_path):
+    identity=["o/r",1,"h","b","m"]
+    prepare_attempt(tmp_path,identity,"context","old",{},attempt_id="old")
+    assert discover_for_identity(tmp_path,identity,context_pack_sha256="context",prompt_sha256="old")
+    assert not discover_for_identity(tmp_path,identity,context_pack_sha256="context",prompt_sha256="new")
