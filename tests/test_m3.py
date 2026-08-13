@@ -68,26 +68,6 @@ def test_production_orchestration_fake_path(tmp_path):
     old=s.calls; r2=review_ready('o/r',GH(),1,s,state_root=tmp_path);assert s.calls==old
 
 
-def test_review_collection_fetches_physical_evidence_only_for_target(tmp_path):
-    class GH:
-        files=[]; checks=[]
-        def get_ref(self,r,b): return {'object':{'sha':'m'}}
-        def list_open_prs(self,r):
-            return [
-                {'number':1,'title':'issue-9 target','base':{'sha':'m'},'head':{'sha':'h1'},'body':'Issue #9','labels':[],'draft':False,'mergeable':True},
-                {'number':2,'title':'issue-10 peer','base':{'sha':'m'},'head':{'sha':'h2'},'body':'','labels':[],'draft':False,'mergeable':True},
-            ]
-        def list_files(self,r,n): self.files.append(n); return [{'filename':'x.py'}]
-        def list_checks(self,r,s): self.checks.append(s); return []
-        def get_patch(self,r,n): return 'diff'
-        def get_pr(self,r,n): return {'base':{'sha':'m'},'head':{'sha':'h1'}}
-    class S(FakeCLI):
-        def invoke(self,p):
-            return TransportResult('REVIEW_COMPLETED',json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]}))
-    gh=GH()
-    review_ready('o/r',gh,1,S(''),state_root=tmp_path)
-    assert gh.files==[1] and gh.checks==['h1']
-
 def test_stale_rebind_and_issue_task_context(tmp_path):
     from reviewer.scan import review_ready
     class GH:

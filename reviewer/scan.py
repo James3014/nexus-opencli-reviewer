@@ -25,21 +25,15 @@ def persist(repo, main_sha, observed, items, queue, root='.reviewer-state'):
     _atomic_json(d/'latest-scan.json',{'repository':repo,'observed_at':observed,'current_main_sha':main_sha,'items':[x.to_dict() for x in items],'queue_identities':identities})
     queue.save(d/'queue-state.json')
     return d
-def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='.reviewer-state',focus_pr=None):
+def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='.reviewer-state'):
     transport.auth_preflight() if hasattr(transport,'auth_preflight') else None
     ref=transport.get_ref(repo,'main'); main_sha=ref['object']['sha']; observed=utc_now(); out=[]
     for raw in transport.list_open_prs(repo):
         errors=[]
-        # A semantic review needs full physical evidence only for its target.
-        # Other open PR rows remain normalized overlap peers (title/body/SHAs)
-        # so SAME_ISSUE_CHAIN stays deterministic without O(N) extra API calls.
-        if focus_pr is not None and raw['number'] != focus_pr:
-            files=[]; checks=[]
-        else:
-            try: files=transport.list_files(repo,raw['number'])
-            except Exception as e: files=[]; errors.append(f'changed_files: {e}')
-            try: checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
-            except Exception as e: checks=[]; errors.append(f'checks: {e}')
+        try: files=transport.list_files(repo,raw['number'])
+        except Exception as e: files=[]; errors.append(f'changed_files: {e}')
+        try: checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
+        except Exception as e: checks=[]; errors.append(f'checks: {e}')
         p=snapshot_from_github(repo,raw,main_sha,files,checks,observed,errors)
         out.append(classify(p,authority_patterns) if authority_patterns else classify(p))
     detect(out); q=ReviewQueue();q.ingest(out)
@@ -51,7 +45,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
     from .semantic import parse_response,SemanticParseError
     from .attempt import (prepare_attempt, mark_dispatching, finish_attempt,
                           discover_for_identity, load_attempt, PREPARED, COMPLETED, FAILED, OUTCOME_UNKNOWN)
-    main_sha,observed,items,q=scan(repo,transport,focus_pr=pr_number)
+    main_sha,observed,items,q=scan(repo,transport)
     selected=next((x for x in items if x.snapshot.pr_number==pr_number),None)
     if selected is None or selected.disposition.value!='REVIEW_READY': raise ContextError('PR_NOT_REVIEW_READY')
     current=selected
