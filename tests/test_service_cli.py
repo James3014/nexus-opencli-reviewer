@@ -170,3 +170,15 @@ def test_explicit_conversation_id_bypasses_broken_history(monkeypatch,tmp_path):
     monkeypatch.setattr(service_cli,"scan",lambda *a,**k:(None,"observed",[Item()],None))
     assert len(service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new",["known"]))==1
     assert not any("history" in command for command in commands)
+
+
+def test_apply_terminal_reconciliation_unblocks_scheduler(tmp_path):
+    cfg=config(tmp_path); service=service_cli.build_service
+    class Store:
+        def __init__(self): self.value={"queue":{"k":{"review_identity":["r",1,"h","b","m"],"state":"outcome_unknown"}}}
+        def load(self): return self.value
+        def save(self,value): self.value=value
+    fake=SimpleNamespace(store=Store())
+    service_cli._apply_recovered(fake,[{"identity":["r",1,"h","b","m"],"receipt":None,"terminal":"STALE_CONTEXT_AFTER_COMPLETION"}])
+    item=fake.store.value["queue"]["k"]
+    assert item["state"]=="semantic_failed" and item["retry_safe"] is False

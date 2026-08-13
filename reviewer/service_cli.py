@@ -245,24 +245,29 @@ def build_service(config: ReviewerConfig, repository: str, *, bootstrap_canary: 
     )
 
 
+def _apply_recovered(service: UnattendedReviewService, recovered: list[dict[str, Any]]) -> None:
+    if not recovered:
+        return
+    state=service.store.load()
+    for value in recovered:
+        for item in state.get("queue",{}).values():
+            if item.get("review_identity")==value["identity"]:
+                if value.get("receipt") is not None:
+                    item["semantic_result"]=value["receipt"]
+                    item["state"]="publication_pending"
+                else:
+                    item["state"]="semantic_failed"
+                    item["last_error"]=value.get("terminal","RECONCILIATION_FAILED")
+                item["retry_safe"]=False
+    service.store.save(state)
+
+
 def run_once(config: ReviewerConfig, *, bootstrap_canary: bool = False) -> dict[str, Any]:
     results = []
     for repository in config.repositories:
         service = build_service(config, repository, bootstrap_canary=bootstrap_canary)
         recovered=reconcile_semantic_history(config,repository)
-        if recovered:
-            state=service.store.load()
-            for value in recovered:
-                for item in state.get("queue",{}).values():
-                    if item.get("review_identity")==value["identity"]:
-                        if value.get("receipt") is not None:
-                            item["semantic_result"]=value["receipt"]
-                            item["state"]="publication_pending"
-                        else:
-                            item["state"]="semantic_failed"
-                            item["last_error"]=value.get("terminal","RECONCILIATION_FAILED")
-                        item["retry_safe"]=False
-            service.store.save(state)
+        _apply_recovered(service,recovered)
         result = service.run_once()
         results.append({"repository": repository, **result})
         # One semantic/publication path across all repositories per cycle.
@@ -375,7 +380,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "reconcile":
         recovered=[]
         for repository in config.repositories:
-            recovered.extend(reconcile_semantic_history(config,repository,args.conversation_id or None))
+            values=reconcile_semantic_history(config,repository,args.conversation_id or None)
+            _apply_recovered(build_service(config,repository),values)
+            recovered.extend(values)
         value = {"status": "RECONCILED" if recovered else "RECONCILIATION_REQUIRED",
                  "recovered": recovered, "attempts": discover_unfinished(config.state_root)}
     else:
