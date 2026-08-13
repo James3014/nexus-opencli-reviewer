@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -102,12 +103,20 @@ def _browser_exact_response(executable: str, profile: str, conversation: str,
         const bytes=new TextEncoder().encode(text);
         const digest=await crypto.subtle.digest('SHA-256',bytes);
         const sha=Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,'0')).join('');
-        if(sha==={expected})return assistant.textContent||'';
+        if(sha==={expected}){{
+          const response=new TextEncoder().encode(assistant.textContent||'');
+          return {{response_b64:btoa(String.fromCharCode(...response))}};
+        }}
       }}
       return null;
     }})()'''
     value = _opencli_browser(executable, profile, [session, "eval", script])
-    return value if isinstance(value, str) else None
+    if not isinstance(value, dict) or not isinstance(value.get("response_b64"), str):
+        return None
+    try:
+        return base64.b64decode(value["response_b64"], validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def reconcile_semantic_history(config: ReviewerConfig, repository: str) -> list[dict[str, Any]]:

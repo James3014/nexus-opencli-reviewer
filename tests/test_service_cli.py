@@ -1,4 +1,5 @@
 import json
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -81,7 +82,7 @@ def test_browser_reconciliation_requires_exact_dom_hash(monkeypatch):
     calls=[]
     def browser(executable,profile,args):
         calls.append(args)
-        return {} if "open" in args else '{"schema":"reviewer.semantic_response.v1"}'
+        return {} if "open" in args else {"response_b64":base64.b64encode(b'{"schema":"reviewer.semantic_response.v1"}').decode()}
     monkeypatch.setattr(service_cli,"_opencli_browser",browser)
     value=service_cli._browser_exact_response("opencli","profile","conversation","a"*64)
     assert value=='{"schema":"reviewer.semantic_response.v1"}'
