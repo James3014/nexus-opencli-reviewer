@@ -4,11 +4,25 @@ from .classifier import classify
 from .overlap import detect
 from .queue import ReviewQueue
 from pathlib import Path
-import json, re
+import hashlib
+import json, os, re, tempfile
+
+def _atomic_json(path, value):
+    path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
+    data=(json.dumps(value,indent=2,sort_keys=True)+'\n').encode()
+    fd,tmp=tempfile.mkstemp(prefix=f'.{path.name}.',dir=path.parent)
+    try:
+        with os.fdopen(fd,'wb') as f:
+            f.write(data);f.flush();os.fsync(f.fileno())
+        os.replace(tmp,path)
+    finally:
+        try:os.unlink(tmp)
+        except FileNotFoundError:pass
 def persist(repo, main_sha, observed, items, queue, root='.reviewer-state'):
     safe=re.sub(r'[^A-Za-z0-9_.-]+','_',repo)
     d=Path(root)/safe; d.mkdir(parents=True,exist_ok=True)
-    (d/'latest-scan.json').write_text(json.dumps({'repository':repo,'observed_at':observed,'current_main_sha':main_sha,'items':[x.to_dict() for x in items]},indent=2,sort_keys=True))
+    identities=[list(i) for i in sorted(queue._seen)]
+    _atomic_json(d/'latest-scan.json',{'repository':repo,'observed_at':observed,'current_main_sha':main_sha,'items':[x.to_dict() for x in items],'queue_identities':identities})
     queue.save(d/'queue-state.json')
     return d
 def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='.reviewer-state'):
@@ -29,6 +43,8 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
     from .review_context import ReviewContext, envelope, ContextError
     from .receipt import make_receipt,persist_receipt,reusable_receipt
     from .semantic import parse_response,SemanticParseError
+    from .attempt import (prepare_attempt, mark_dispatching, finish_attempt,
+                          discover_for_identity, COMPLETED, FAILED, OUTCOME_UNKNOWN)
     main_sha,observed,items,q=scan(repo,transport)
     selected=next((x for x in items if x.snapshot.pr_number==pr_number),None)
     if selected is None or selected.disposition.value!='REVIEW_READY': raise ContextError('PR_NOT_REVIEW_READY')
@@ -47,11 +63,43 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
     if rebound is not None:
         identity=(repo,pr_number,(rebound.get('head') or {}).get('sha',''),(rebound.get('base') or {}).get('sha',''),main_rebound)
         if identity!=context.review_identity: raise ContextError('REVIEW_CONTEXT_STALE')
-    old=reusable_receipt(state_root,context.review_identity)
+    prompt=envelope(context)
+    prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+    old=reusable_receipt(state_root,context.review_identity,
+                         context_sha256=context.context_sha256,
+                         prompt_sha256=prompt_sha)
     if old:return old
-    prompt=envelope(context); result=semantic_transport.invoke(prompt)
+    # An unfinished attempt for this exact identity is ambiguous: never replay
+    # an external semantic request until an operator reconciles it.
+    # Any prior dispatch-bound attempt without a reusable exact-context receipt
+    # is ambiguous or already consumed. Never send a second semantic call.
+    if discover_for_identity(state_root, context.review_identity):
+        raise ContextError('RECONCILIATION_REQUIRED')
+    provenance = {
+        'source': 'review_ready',
+        'executable': getattr(semantic_transport, 'executable', 'unknown'),
+        'version': (semantic_transport.version() if callable(getattr(semantic_transport, 'version', None)) else getattr(semantic_transport, 'version', '')),
+    }
+    _, attempt_path = prepare_attempt(state_root, context.review_identity,
+                                      context.context_sha256, prompt_sha,
+                                      provenance,
+                                      safe_argv=(semantic_transport.safe_argv() if hasattr(semantic_transport, 'safe_argv') else []),
+                                      executable=provenance['executable'], version=provenance['version'],
+                                      browser_profile=getattr(semantic_transport, 'profile', None),
+                                      session_mode='ephemeral')
+    mark_dispatching(attempt_path)
+    try:
+        result=semantic_transport.invoke(prompt)
+    except Exception as exc:
+        finish_attempt(attempt_path, OUTCOME_UNKNOWN, result={'error': type(exc).__name__})
+        raise
     parsed=None; parse_result='NOT_ATTEMPTED'
     if result.status=='REVIEW_COMPLETED':
         try: parsed=parse_response(result.raw);parse_result='PARSED'
         except SemanticParseError: parse_result='REVIEW_PARSE_FAILED'
-    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result); path=persist_receipt(state_root,receipt); return receipt,path
+    terminal = (COMPLETED if result.status == 'REVIEW_COMPLETED' and parse_result == 'PARSED'
+                else (OUTCOME_UNKNOWN if getattr(result, 'outcome_unknown', False) or result.status == 'OPENCLI_OUTCOME_UNKNOWN' else FAILED))
+    finish_attempt(attempt_path, terminal, result={'transport_result': result.status, 'parse_result': parse_result}, retry_safe=False)
+    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result)
+    path=persist_receipt(state_root,receipt)
+    return receipt,path

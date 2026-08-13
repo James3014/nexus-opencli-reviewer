@@ -14,6 +14,8 @@ class GitHubTransport(Protocol):
     def get_pr(self, repo:str, number:int)->dict[str,Any]: ...
     def get_issue(self, repo:str, number:int)->dict[str,Any]: ...
     def get_file(self, repo:str, path:str, ref:str)->str: ...
+    def create_comment(self, repo:str, pr_number:int, body:str)->dict[str,Any]: ...
+    def list_comments(self, repo:str, pr_number:int)->list[dict[str,Any]]: ...
 
 class GhCliTransport:
     def __init__(self, gh='gh'): self.gh=gh
@@ -30,7 +32,10 @@ class GhCliTransport:
         try:return json.loads(p.stdout)
         except json.JSONDecodeError as e:raise GitHubError('invalid GitHub JSON') from e
     def auth_preflight(self):
-        p=subprocess.run([self.gh,'auth','status'],check=False,capture_output=True,text=True,timeout=30)
+        try:
+            p=subprocess.run([self.gh,'auth','status'],check=False,capture_output=True,text=True,timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise GitHubError(f'GitHub auth/read access unavailable: {e}') from e
         if p.returncode: raise GitHubError('GitHub auth/read access unavailable')
     def get_ref(self,repo,branch):
         self._validate(repo); return self._get(f'repos/{repo}/git/ref/heads/{branch}')
@@ -53,6 +58,12 @@ class GhCliTransport:
             if len(rows)<100:return out
         raise GitHubError('check-runs pagination exceeded safety bound')
     def get_pr(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/pulls/{int(number)}')
+    def create_comment(self, repo, pr_number, body):
+        self._validate(repo)
+        return self._post(f'repos/{repo}/issues/{int(pr_number)}/comments', {'body': body})
+    def list_comments(self, repo, pr_number):
+        self._validate(repo)
+        return self._paginate(f'repos/{repo}/issues/{int(pr_number)}/comments')
     def get_issue(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/issues/{int(number)}')
     def get_file(self,repo,path,ref):
         self._validate(repo); value=self._get(f'repos/{repo}/contents/{path}',ref=ref)
@@ -66,5 +77,15 @@ class GhCliTransport:
         except (OSError,subprocess.TimeoutExpired) as e:raise GitHubError(str(e)) from e
         if p.returncode:raise GitHubError(p.stderr.strip() or 'patch acquisition failed')
         return p.stdout
+
+    def _post(self, endpoint, payload):
+        args=[self.gh,'api',endpoint,'--method','POST','--input','-']
+        try:
+            p=subprocess.run(args,input=json.dumps(payload),check=False,capture_output=True,text=True,timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise GitHubError(str(e)) from e
+        if p.returncode: raise GitHubError(p.stderr.strip() or 'gh api POST failed')
+        try: return json.loads(p.stdout)
+        except json.JSONDecodeError as e: raise GitHubError('invalid GitHub JSON') from e
 
 def utc_now(): return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z')

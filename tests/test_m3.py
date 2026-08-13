@@ -38,11 +38,18 @@ def test_opencli_json_envelope_and_malformed(monkeypatch):
     good=[{'conversationId':'c','conversationUrl':'u','tool':'','response':json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]})}]
     class P:
         returncode=0;stdout=json.dumps(good);stderr=''
-    monkeypatch.setattr(subprocess,'run',lambda *a,**k:P())
+    class PP:
+        def __init__(self,*a,**k): self.returncode=0; self.stdout=None; self.stderr=None; self.pid=999
+        def communicate(self,**k): return json.dumps(good), ''
+        def poll(self): return self.returncode
+        def wait(self): return self.returncode
+    monkeypatch.setattr(subprocess,'Popen',PP)
     x=OpenCLITransport().invoke('data');assert x.status=='REVIEW_COMPLETED' and parse_response(x.raw)['status']=='PASS' and '-f' in x.argv
     class B:
         returncode=0;stdout='not-json';stderr=''
-    monkeypatch.setattr(subprocess,'run',lambda *a,**k:B());assert OpenCLITransport().invoke('data').status=='OPENCLI_PROCESS_FAILURE'
+    class BP(PP):
+        def communicate(self,**k): return 'not-json', ''
+    monkeypatch.setattr(subprocess,'Popen',BP);assert OpenCLITransport().invoke('data').status=='OPENCLI_PROCESS_FAILURE'
 
 def test_production_orchestration_fake_path(tmp_path):
     from reviewer.scan import review_ready
@@ -87,13 +94,36 @@ def test_semantic_strict_required_fields():
     try:parse_response(json.dumps(bad));assert False
     except SemanticParseError:pass
 
+def test_parse_failure_exact_identity_cannot_dispatch_twice(tmp_path):
+    class GH:
+        def get_ref(self,r,b):return {'object':{'sha':'m'}}
+        def list_open_prs(self,r):return [{'number':1,'title':'ready','base':{'sha':'m'},'head':{'sha':'h'},'body':'','labels':[],'draft':False,'mergeable':True}]
+        def list_files(self,r,n):return [{'filename':'x.py'}]
+        def list_checks(self,r,s):return []
+        def get_patch(self,r,n):return 'diff'
+        def get_pr(self,r,n):return {'base':{'sha':'m'},'head':{'sha':'h'}}
+    class Bad(FakeCLI):
+        calls=0
+        def invoke(self,p):self.calls+=1;return TransportResult('REVIEW_COMPLETED','not-json')
+    bad=Bad('')
+    first,path=review_ready('o/r',GH(),1,bad,state_root=tmp_path)
+    assert first['parse_result']=='REVIEW_PARSE_FAILED' and bad.calls==1
+    try:review_ready('o/r',GH(),1,bad,state_root=tmp_path);assert False
+    except ContextError as e:assert str(e)=='RECONCILIATION_REQUIRED'
+    assert bad.calls==1
+
 def test_process_timeout_has_headroom_and_unknown_outcome(monkeypatch,tmp_path):
     import subprocess
     class T:
-        def __call__(self,*a,**k):
-            if a[0][1]=='--version': return type('P',(),{'stdout':'1.8.6'})()
-            assert k['timeout']==180
-            raise subprocess.TimeoutExpired(a[0],180)
-    monkeypatch.setattr(subprocess,'run',T()); t=OpenCLITransport(timeout=120); r=t.invoke('x')
+        def __init__(self,*a,**k): self.pid=999; self.returncode=None; self.stdout=None; self.stderr=None; self.calls=0
+        def communicate(self,**k):
+            self.calls += 1
+            if self.calls < 3: raise subprocess.TimeoutExpired(['fake'], k.get('timeout', 0))
+            self.returncode = -9
+            return '', ''
+        def poll(self): return self.returncode
+        def wait(self): self.returncode=-15; return self.returncode
+        def send_signal(self, sig): self.returncode=-sig
+    monkeypatch.setattr(subprocess,'Popen',T); t=OpenCLITransport(timeout=120, terminate_grace=0); r=t.invoke('x')
     assert r.status=='OPENCLI_OUTCOME_UNKNOWN' and not r.retry_safe and r.argv[r.argv.index('--timeout')+1]=='120'
     p=PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h'},'m'); c=classify(p);ctx=ReviewContext.build(c,'d'); rec=make_receipt(ctx,c,r,'p','now'); path=persist_receipt(tmp_path,rec); assert path.exists() and rec['outcome_unknown']
