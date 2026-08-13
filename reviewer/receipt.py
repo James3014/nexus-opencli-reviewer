@@ -20,6 +20,17 @@ def persist_receipt(root, receipt):
         try: os.unlink(tmp)
         except FileNotFoundError: pass
     return p
+def persist_failure(root, attempt_id, evidence):
+    p=Path(root)/'reviews'/'failures'/f'{attempt_id}.json';p.parent.mkdir(parents=True,exist_ok=True)
+    value={'schema':'reviewer.semantic_failure.v1','attempt_id':attempt_id,**evidence}
+    data=(json.dumps(value,indent=2,sort_keys=True)+'\n').encode();fd,tmp=tempfile.mkstemp(prefix=f'.{p.name}.',dir=p.parent)
+    try:
+        with os.fdopen(fd,'wb') as f:f.write(data);f.flush();os.fsync(f.fileno())
+        os.replace(tmp,p)
+    finally:
+        try:os.unlink(tmp)
+        except FileNotFoundError:pass
+    return p
 def reusable_receipt(root, identity, *, context_sha256=None, prompt_sha256=None):
     p=receipt_path(root,identity)
     if not p.exists(): return None

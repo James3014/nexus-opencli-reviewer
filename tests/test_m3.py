@@ -93,6 +93,16 @@ def test_semantic_strict_required_fields():
     bad={'schema':'reviewer.semantic_response.v1','status':'FINDINGS','summary':'x','findings':[{'severity':'HIGH','category':'x','path':None,'evidence':'e','reason':'r'}],'evidence_gaps':[3]}
     try:parse_response(json.dumps(bad));assert False
     except SemanticParseError:pass
+    missing_path={'schema':'reviewer.semantic_response.v1','status':'FINDINGS','summary':'x','findings':[{'severity':'HIGH','category':'x','evidence':'e','reason':'r','recommended_action':'a'}],'evidence_gaps':[]}
+    try:parse_response(json.dumps(missing_path));assert False
+    except SemanticParseError:pass
+
+def test_prompt_contract_is_the_parser_contract():
+    from reviewer.semantic import response_contract
+    p=PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h'},'m')
+    prompt=envelope(ReviewContext.build(classify(p),'diff'))
+    encoded=json.dumps(response_contract(),sort_keys=True,separators=(',',':'))
+    assert encoded in prompt and 'additionalProperties":false' in prompt
 
 def test_parse_failure_exact_identity_cannot_dispatch_twice(tmp_path):
     class GH:
@@ -109,6 +119,9 @@ def test_parse_failure_exact_identity_cannot_dispatch_twice(tmp_path):
     try:review_ready('o/r',GH(),1,bad,state_root=tmp_path);assert False
     except ContextError as e:assert 'REVIEW_PARSE_FAILED' in str(e)
     assert bad.calls==1
+    assert not list((tmp_path/'reviews').glob('*.json'))
+    failures=list((tmp_path/'reviews'/'failures').glob('*.json'))
+    assert len(failures)==1 and json.loads(failures[0].read_text())['schema']=='reviewer.semantic_failure.v1'
     try:review_ready('o/r',GH(),1,bad,state_root=tmp_path);assert False
     except ContextError as e:assert str(e)=='RECONCILIATION_REQUIRED'
     assert bad.calls==1

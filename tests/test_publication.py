@@ -150,3 +150,11 @@ def test_invalid_or_blocked_result_never_publishes(tmp_path):
     with pytest.raises(PublicationError):
         publish_review(tmp_path, t, blocked, attempt_id="a4")
     assert t.writes == 0
+
+def test_tampered_semantic_shape_never_publishes(tmp_path):
+    t=Fake(); value=receipt('FINDINGS')
+    value['semantic_result']['findings']=[{'severity':'HIGH','category':'x','path':None,
+        'evidence':'e','reason':'r'}]
+    with pytest.raises(PublicationError,match='SEMANTIC_RESULT_INVALID'):
+        publish_review(tmp_path,t,value)
+    assert t.writes==0

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from .render import render_advisory
+from .semantic import parse_response, SemanticParseError
 
 
 class PublicationError(RuntimeError):
@@ -94,6 +95,10 @@ def _validate_receipt(receipt: dict[str, Any]) -> tuple[str, int, str, str, str]
             or not isinstance(result.get("findings"), list)
             or not isinstance(result.get("evidence_gaps"), list)):
         raise PublicationError("PUBLICATION_SEMANTIC_RESULT_INVALID")
+    try:
+        parse_response(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    except SemanticParseError as exc:
+        raise PublicationError("PUBLICATION_SEMANTIC_RESULT_INVALID") from exc
     return identity
 
 

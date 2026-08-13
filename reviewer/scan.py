@@ -41,7 +41,7 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
     return main_sha,observed,out,q
 def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None,budget=200000,state_root='.reviewer-state'):
     from .review_context import ReviewContext, envelope, ContextError
-    from .receipt import make_receipt,persist_receipt,reusable_receipt
+    from .receipt import make_receipt,persist_receipt,persist_failure,reusable_receipt
     from .semantic import parse_response,SemanticParseError
     from .attempt import (prepare_attempt, mark_dispatching, finish_attempt,
                           discover_for_identity, COMPLETED, FAILED, OUTCOME_UNKNOWN)
@@ -80,7 +80,7 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
         'executable': getattr(semantic_transport, 'executable', 'unknown'),
         'version': (semantic_transport.version() if callable(getattr(semantic_transport, 'version', None)) else getattr(semantic_transport, 'version', '')),
     }
-    _, attempt_path = prepare_attempt(state_root, context.review_identity,
+    attempt, attempt_path = prepare_attempt(state_root, context.review_identity,
                                       context.context_sha256, prompt_sha,
                                       provenance,
                                       safe_argv=(semantic_transport.safe_argv() if hasattr(semantic_transport, 'safe_argv') else []),
@@ -100,10 +100,20 @@ def review_ready(repo,transport,pr_number,semantic_transport,patch_provider=None
     terminal = (COMPLETED if result.status == 'REVIEW_COMPLETED' and parse_result == 'PARSED'
                 else (OUTCOME_UNKNOWN if getattr(result, 'outcome_unknown', False) or result.status == 'OPENCLI_OUTCOME_UNKNOWN' else FAILED))
     finish_attempt(attempt_path, terminal, result={'transport_result': result.status, 'parse_result': parse_result}, retry_safe=False)
-    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result)
-    path=persist_receipt(state_root,receipt)
     if parse_result == 'REVIEW_PARSE_FAILED':
+        path=persist_failure(state_root,attempt['attempt_id'],{
+            'review_identity':list(context.review_identity),'context_pack_sha256':context.context_sha256,
+            'prompt_sha256':prompt_sha,'transport_result':result.status,'parse_result':parse_result,
+            'raw_response_sha256':hashlib.sha256((result.raw or '').encode()).hexdigest() or None,
+            'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
         raise ContextError(f'REVIEW_PARSE_FAILED evidence={path}')
     if result.status != 'REVIEW_COMPLETED':
+        path=persist_failure(state_root,attempt['attempt_id'],{
+            'review_identity':list(context.review_identity),'context_pack_sha256':context.context_sha256,
+            'prompt_sha256':prompt_sha,'transport_result':result.status,'parse_result':parse_result,
+            'raw_response_sha256':hashlib.sha256((result.raw or '').encode()).hexdigest() if result.raw else None,
+            'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
         raise ContextError(f'{result.status} evidence={path}')
+    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result)
+    path=persist_receipt(state_root,receipt)
     return receipt,path
