@@ -283,7 +283,7 @@ class UnattendedReviewService:
         self.store.save(state)
         return {"status": state["status"], "identity": list(identity)}
 
-def status(self) -> dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         state = self.store.load()
         return {"schema": SCHEMA, "repository": self.repository, "status": state.get("status"),
                 "last_scan": state.get("last_scan"), "next_scan": state.get("next_scan"),
