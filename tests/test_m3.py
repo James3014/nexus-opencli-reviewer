@@ -94,6 +94,23 @@ def test_semantic_strict_required_fields():
     bad={'schema':'reviewer.semantic_response.v1','status':'FINDINGS','summary':'x','findings':[{'severity':'HIGH','category':'x','path':None,'evidence':'e','reason':'r'}],'evidence_gaps':[3]}
     try:parse_response(json.dumps(bad));assert False
     except SemanticParseError:pass
+
+def test_semantic_parser_rejects_unescaped_quotes_but_accepts_json_escape():
+    # This is intentionally invalid JSON: the quote characters in the summary
+    # are not escaped and must remain a terminal parse failure.
+    malformed = ('{"schema":"reviewer.semantic_response.v1","status":"PASS",'
+                 '"summary":"status is "unknown", while reviewing",'
+                 '"findings":[],"evidence_gaps":[]}')
+    try:
+        parse_response(malformed)
+        assert False
+    except SemanticParseError:
+        pass
+
+    escaped = ('{"schema":"reviewer.semantic_response.v1","status":"PASS",'
+               '"summary":"status is \\"unknown\\", while reviewing",'
+               '"findings":[],"evidence_gaps":[]}')
+    assert parse_response(escaped)['summary'] == 'status is "unknown", while reviewing'
     missing_path={'schema':'reviewer.semantic_response.v1','status':'FINDINGS','summary':'x','findings':[{'severity':'HIGH','category':'x','evidence':'e','reason':'r','recommended_action':'a'}],'evidence_gaps':[]}
     try:parse_response(json.dumps(missing_path));assert False
     except SemanticParseError:pass
@@ -104,6 +121,10 @@ def test_prompt_contract_is_the_parser_contract():
     prompt=envelope(ReviewContext.build(classify(p),'diff'))
     encoded=json.dumps(response_contract(),sort_keys=True,separators=(',',':'))
     assert encoded in prompt and 'additionalProperties":false' in prompt
+    assert 'directly parseable by standard json.loads' in prompt
+    assert 'Escape every double quote' in prompt
+    assert 'prefer single quotes' in prompt
+    assert 'Do not emit trailing commas, comments, or any JSON5 extensions' in prompt
 
 def test_parse_failure_exact_identity_cannot_dispatch_twice(tmp_path):
     class GH:
