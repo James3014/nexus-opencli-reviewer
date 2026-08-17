@@ -19,7 +19,9 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
         if status not in _TERMINAL_FAILURES or row.get('expected_failure'):
             enriched.append(row); continue
         check_id=row.get('id') or row.get('check_run_id')
-        run_id=row.get('run_id')
+        suite=row.get('check_suite') or {}
+        suite_id=row.get('check_suite_id') or suite.get('id')
+        run_id=None
         if type(check_id) is not int or check_id<=0:
             errors.append('check annotations: check run identity unavailable')
         else:
@@ -28,13 +30,26 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
                 row['annotation_count']=len(annotations)
             except Exception as exc:
                 errors.append(f'check annotations: {type(exc).__name__}: {exc}')
-        if type(run_id) is not int or run_id<=0:
-            errors.append('workflow run: run identity unavailable')
+        if type(suite_id) is not int or suite_id<=0:
+            errors.append('workflow run: check-suite identity unavailable')
+        elif not hasattr(transport,'list_workflow_runs_for_suite'):
+            errors.append('workflow run: check-suite resolver unavailable')
         else:
             try:
-                run=transport.get_workflow_run(repo,run_id)
+                runs=transport.list_workflow_runs_for_suite(repo,suite_id)
+                matching=[candidate for candidate in runs
+                          if type(candidate.get('id')) is int and candidate.get('head_sha') == pr_head_sha]
+                if len(matching) != 1:
+                    errors.append('workflow run: missing or ambiguous exact-head relationship')
+                    enriched.append(row)
+                    continue
+                run=transport.get_workflow_run(repo,matching[0]['id'])
+                run_id=run.get('id')
+                row['run_id']=run_id
                 run_head=run.get('head_sha')
-                if run_head and run_head != pr_head_sha:
+                if type(run_id) is not int or run_id<=0 or not run_head:
+                    errors.append('workflow run: exact identity incomplete')
+                elif run_head != pr_head_sha:
                     errors.append('workflow run: foreign head identity')
                 row['workflow_name']=row.get('workflow_name') or run.get('name')
                 row['head_sha']=row.get('head_sha') or run_head
@@ -46,7 +61,7 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
                 artifacts=transport.list_workflow_artifacts(repo,run_id)
                 identities=[str(x.get('id')) for x in artifacts if x.get('id') is not None]
                 if identities:
-                    row['artifact_identity']=row.get('artifact_identity') or '|'.join(sorted(identities))
+                    row['artifact_identity']='|'.join(sorted(identities))
                 else:
                     errors.append('workflow artifacts: artifact identity unavailable')
             except Exception as exc:
@@ -70,7 +85,7 @@ def _ci_evidence_for(classification):
         collection_errors=snapshot.collection_errors,
         expected_check_run_id=selected.get('check_run_id'),
         expected_run_id=selected.get('run_id'),
-        expected_artifact_identity=(selected.get('artifact_identity') or selected.get('external_id')),
+        expected_artifact_identity=selected.get('artifact_identity'),
         canonical_disposition='NOT_AVAILABLE')
 
 def _atomic_json(path, value):

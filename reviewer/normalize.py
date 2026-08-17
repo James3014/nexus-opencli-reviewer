@@ -24,7 +24,7 @@ def snapshot_from_github(repo, raw, main_sha, files, checks, observed_at=None, e
                           'external_id': x.get('external_id'), 'details_url': x.get('details_url'),
                           'html_url': x.get('html_url'), 'node_id': x.get('node_id'),
                           'workflow_name': x.get('workflow_name'), 'head_sha': x.get('head_sha'),
-                          'check_suite_id': x.get('check_suite_id'),
+                          'check_suite_id': x.get('check_suite_id') or (x.get('check_suite') or {}).get('id'),
                           'started_at': x.get('started_at'), 'completed_at': x.get('completed_at'),
                           'artifact_identity': x.get('artifact_identity'),
                           'annotation_count': x.get('annotation_count'), 'app_slug': x.get('app_slug')}

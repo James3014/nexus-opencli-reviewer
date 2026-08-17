@@ -29,8 +29,7 @@ def _valid_check_shape(check):
     artifact = check.get("artifact_identity")
     if (external is not None and (type(external) is not str or not external)
             or (artifact is not None and (type(artifact) is not str or not artifact))
-            or (external is None and artifact is None)
-            or (external is not None and artifact is not None and external != artifact)):
+            or (external is None and artifact is None)):
         return False
     exact = {
         "details_url": str, "html_url": str, "node_id": str,

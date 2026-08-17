@@ -63,9 +63,10 @@ def test_check_observation_preserves_optional_identity_fields():
 def test_collector_enriches_failed_checks_and_preserves_head_identity():
     class Collector(Fake):
         def list_checks(self,r,s):
-            return [{'name':'CI','conclusion':'failure','id':7,'run_id':9,'external_id':'artifact',
-                     'head_sha':'h'}]
+            return [{'name':'CI','conclusion':'failure','id':7,'external_id':'provider-check',
+                     'check_suite':{'id':11},'head_sha':'h'}]
         def list_check_annotations(self,r,i): return [{'path':'x.py'}]
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9,'head_sha':'h'}]
         def get_workflow_run(self,r,i): return {'id':i,'name':'CI workflow','head_sha':'h','html_url':'https://ci/run/9'}
         def list_workflow_artifacts(self,r,i): return [{'id':42,'name':'evidence'}]
     _,_,items,_=scan('o/r',Collector())
@@ -73,18 +74,52 @@ def test_collector_enriches_failed_checks_and_preserves_head_identity():
     assert check.annotation_count == 1
     assert check.workflow_name == 'CI workflow'
     assert check.artifact_identity == '42'
+    assert check.external_id == 'provider-check'
+    assert check.run_id == 9
     assert items[0].snapshot.collection_complete is True
 
 def test_collector_partial_enrichment_is_not_review_ready():
     class Broken(Fake):
-        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'run_id':9,'head_sha':'h'}]
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
         def list_check_annotations(self,r,i): raise GitHubError('annotation page failed')
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9,'head_sha':'h'}]
         def get_workflow_run(self,r,i): return {'head_sha':'h'}
         def list_workflow_artifacts(self,r,i): return []
     _,_,items,q=scan('o/r',Broken())
     assert not q.semantic_review()
     assert items[0].snapshot.collection_complete is False
     assert any('annotation page failed' in e for e in items[0].snapshot.collection_errors)
+
+def test_collector_rejects_missing_or_ambiguous_suite_workflow_relationship():
+    class Ambiguous(Fake):
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
+        def list_check_annotations(self,r,i): return []
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9,'head_sha':'h'},{'id':10,'head_sha':'h'}]
+        def get_workflow_run(self,r,i): raise AssertionError('ambiguous relationship must not resolve')
+        def list_workflow_artifacts(self,r,i): raise AssertionError('ambiguous relationship must not collect artifacts')
+    _,_,items,q=scan('o/r',Ambiguous())
+    assert not q.semantic_review()
+    assert any('ambiguous exact-head relationship' in e for e in items[0].snapshot.collection_errors)
+
+def test_collector_rejects_suite_run_without_head_sha():
+    class MissingHead(Fake):
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
+        def list_check_annotations(self,r,i): return []
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9}]
+        def get_workflow_run(self,r,i): raise AssertionError('missing head must not resolve')
+    _,_,items,q=scan('o/r',MissingHead())
+    assert not q.semantic_review()
+    assert any('ambiguous exact-head relationship' in e for e in items[0].snapshot.collection_errors)
+
+def test_collector_rejects_suite_run_for_foreign_head():
+    class Foreign(Fake):
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
+        def list_check_annotations(self,r,i): return []
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9,'head_sha':'other'}]
+        def get_workflow_run(self,r,i): raise AssertionError('foreign run must not resolve')
+    _,_,items,q=scan('o/r',Foreign())
+    assert not q.semantic_review()
+    assert any('ambiguous exact-head relationship' in e for e in items[0].snapshot.collection_errors)
 
 def test_annotation_and_artifact_pagination_fail_closed(monkeypatch):
     t=GhCliTransport(); calls=[]
@@ -101,6 +136,15 @@ def test_annotation_and_artifact_pagination_fail_closed(monkeypatch):
     except GitHubError:pass
     try:t.list_workflow_artifacts('o/r',9);assert False
     except GitHubError:pass
+
+def test_workflow_run_suite_resolution_is_paginated(monkeypatch):
+    t=GhCliTransport(); calls=[]
+    def page(endpoint,**p):
+        calls.append((endpoint,p))
+        return {'workflow_runs':[{'id':p['page'],'head_sha':'h'}] if p['page']==1 else []}
+    monkeypatch.setattr(t,'_get',page)
+    assert t.list_workflow_runs_for_suite('o/r',11)==[{'id':1,'head_sha':'h'}]
+    assert calls[0][1]['check_suite_id'] == 11
 
 def test_title_issue_and_same_issue_chain():
     from reviewer.normalize import issue_numbers

@@ -12,6 +12,7 @@ class GitHubTransport(Protocol):
     def list_checks(self, repo:str, sha:str)->list[dict[str,Any]]: ...
     def list_check_annotations(self, repo:str, check_run_id:int)->list[dict[str,Any]]: ...
     def get_workflow_run(self, repo:str, run_id:int)->dict[str,Any]: ...
+    def list_workflow_runs_for_suite(self, repo:str, check_suite_id:int)->list[dict[str,Any]]: ...
     def list_workflow_artifacts(self, repo:str, run_id:int)->list[dict[str,Any]]: ...
     def get_patch(self, repo:str, number:int)->str: ...
     def get_pr(self, repo:str, number:int)->dict[str,Any]: ...
@@ -66,6 +67,16 @@ class GhCliTransport:
     def get_workflow_run(self, repo, run_id):
         self._validate(repo)
         return self._get(f'repos/{repo}/actions/runs/{int(run_id)}')
+    def list_workflow_runs_for_suite(self, repo, check_suite_id):
+        self._validate(repo)
+        out=[]
+        for page in range(1,101):
+            value=self._get(f'repos/{repo}/actions/runs',check_suite_id=int(check_suite_id),per_page=100,page=page)
+            if not isinstance(value,dict) or not isinstance(value.get('workflow_runs'),list):
+                raise GitHubError('expected workflow-runs page')
+            rows=value['workflow_runs']; out.extend(rows)
+            if len(rows)<100:return out
+        raise GitHubError('workflow-runs pagination exceeded safety bound')
     def list_workflow_artifacts(self, repo, run_id):
         self._validate(repo); out=[]
         for page in range(1,101):
