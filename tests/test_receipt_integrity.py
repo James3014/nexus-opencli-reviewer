@@ -2,6 +2,9 @@ import copy
 import json
 
 import pytest
+from reviewer.normalize import snapshot_from_github
+from reviewer.classifier import classify
+from reviewer.scan import _ci_evidence_for
 
 from reviewer.receipt import (
     persist_receipt, reusable_receipt, receipt_path,
@@ -301,3 +304,15 @@ def test_ci_identity_domain_rejects_coercion_and_nonpositive_ids():
             canonical_disposition="NEW_REGRESSION", expected_check_run_id=expected_check,
             expected_run_id=expected_run, expected_artifact_identity="artifact")
         assert evidence["state"] == "UNKNOWN"
+
+def test_collected_failure_is_adapted_to_identity_bound_receipt_capsule():
+    snapshot=snapshot_from_github(
+        "o/r", {"number": 7, "base": {"sha": "base"}, "head": {"sha": "head"}},
+        "main", [], [{"name": "CI", "conclusion": "failure", "id": 1,
+                       "run_id": 2, "external_id": "artifact", "head_sha": "head"}],
+    )
+    capsule=_ci_evidence_for(classify(snapshot))
+    assert capsule["schema"] == "reviewer.ci_failure_evidence.v1"
+    assert capsule["review_identity"] == ["o/r", 7, "head", "base", "main"]
+    assert capsule["state"] == "UNKNOWN"
+    assert "collection" not in " ".join(capsule["evidence_gaps"])

@@ -60,6 +60,48 @@ def test_check_observation_preserves_optional_identity_fields():
     assert check.workflow_name == 'Nexus Pytest CI'
     assert check.head_sha == 'head'
 
+def test_collector_enriches_failed_checks_and_preserves_head_identity():
+    class Collector(Fake):
+        def list_checks(self,r,s):
+            return [{'name':'CI','conclusion':'failure','id':7,'run_id':9,'external_id':'artifact',
+                     'head_sha':'h'}]
+        def list_check_annotations(self,r,i): return [{'path':'x.py'}]
+        def get_workflow_run(self,r,i): return {'id':i,'name':'CI workflow','head_sha':'h','html_url':'https://ci/run/9'}
+        def list_workflow_artifacts(self,r,i): return [{'id':42,'name':'evidence'}]
+    _,_,items,_=scan('o/r',Collector())
+    check=items[0].snapshot.checks[0]
+    assert check.annotation_count == 1
+    assert check.workflow_name == 'CI workflow'
+    assert check.artifact_identity == '42'
+    assert items[0].snapshot.collection_complete is True
+
+def test_collector_partial_enrichment_is_not_review_ready():
+    class Broken(Fake):
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'run_id':9,'head_sha':'h'}]
+        def list_check_annotations(self,r,i): raise GitHubError('annotation page failed')
+        def get_workflow_run(self,r,i): return {'head_sha':'h'}
+        def list_workflow_artifacts(self,r,i): return []
+    _,_,items,q=scan('o/r',Broken())
+    assert not q.semantic_review()
+    assert items[0].snapshot.collection_complete is False
+    assert any('annotation page failed' in e for e in items[0].snapshot.collection_errors)
+
+def test_annotation_and_artifact_pagination_fail_closed(monkeypatch):
+    t=GhCliTransport(); calls=[]
+    def page(endpoint,**p):
+        calls.append(endpoint)
+        if 'annotations' in endpoint:
+            return [{'id':p['page']}] if p['page']==1 else []
+        return {'artifacts':[{'id':p['page']}] if p['page']==1 else []}
+    monkeypatch.setattr(t,'_get',page)
+    assert t.list_check_annotations('o/r',7)==[{'id':1}]
+    assert t.list_workflow_artifacts('o/r',9)==[{'id':1}]
+    monkeypatch.setattr(t,'_get',lambda e,**p: (_ for _ in ()).throw(GitHubError('later page')) if p['page']==2 else ([{}]*100 if 'annotations' in e else {'artifacts':[{}]*100}))
+    try:t.list_check_annotations('o/r',7);assert False
+    except GitHubError:pass
+    try:t.list_workflow_artifacts('o/r',9);assert False
+    except GitHubError:pass
+
 def test_title_issue_and_same_issue_chain():
     from reviewer.normalize import issue_numbers
     from reviewer.overlap import detect

@@ -6,6 +6,72 @@ from .queue import ReviewQueue
 from pathlib import Path
 import hashlib
 import json, os, re, tempfile, time
+from dataclasses import asdict
+
+_TERMINAL_FAILURES={'failure','failed','error','cancelled','timed_out','action_required'}
+
+def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
+    """Enrich failed checks with immutable, read-only GitHub evidence."""
+    enriched=[]; errors=[]
+    for check in check_rows:
+        row=dict(check)
+        status=str(row.get('conclusion') or row.get('status') or row.get('state','unknown')).lower()
+        if status not in _TERMINAL_FAILURES or row.get('expected_failure'):
+            enriched.append(row); continue
+        check_id=row.get('id') or row.get('check_run_id')
+        run_id=row.get('run_id')
+        if type(check_id) is not int or check_id<=0:
+            errors.append('check annotations: check run identity unavailable')
+        else:
+            try:
+                annotations=transport.list_check_annotations(repo,check_id)
+                row['annotation_count']=len(annotations)
+            except Exception as exc:
+                errors.append(f'check annotations: {type(exc).__name__}: {exc}')
+        if type(run_id) is not int or run_id<=0:
+            errors.append('workflow run: run identity unavailable')
+        else:
+            try:
+                run=transport.get_workflow_run(repo,run_id)
+                run_head=run.get('head_sha')
+                if run_head and run_head != pr_head_sha:
+                    errors.append('workflow run: foreign head identity')
+                row['workflow_name']=row.get('workflow_name') or run.get('name')
+                row['head_sha']=row.get('head_sha') or run_head
+                if not row.get('details_url'):
+                    row['details_url']=run.get('html_url') or run.get('logs_url')
+            except Exception as exc:
+                errors.append(f'workflow run: {type(exc).__name__}: {exc}')
+            try:
+                artifacts=transport.list_workflow_artifacts(repo,run_id)
+                identities=[str(x.get('id')) for x in artifacts if x.get('id') is not None]
+                if identities:
+                    row['artifact_identity']=row.get('artifact_identity') or '|'.join(sorted(identities))
+                else:
+                    errors.append('workflow artifacts: artifact identity unavailable')
+            except Exception as exc:
+                errors.append(f'workflow artifacts: {type(exc).__name__}: {exc}')
+        enriched.append(row)
+    return enriched, errors
+
+def _ci_evidence_for(classification):
+    from .receipt import build_ci_failure_evidence
+    snapshot=classification.snapshot
+    failed=[asdict(x) for x in snapshot.checks
+            if x.status.lower() in _TERMINAL_FAILURES and not x.expected_failure]
+    if not failed:
+        return None
+    selected=failed[0]
+    return build_ci_failure_evidence(
+        repository=snapshot.repository, pr_number=snapshot.pr_number,
+        base_sha=snapshot.base_sha, head_sha=snapshot.head_sha,
+        current_main_sha=snapshot.current_main_sha, checks=failed,
+        collection_complete=snapshot.collection_complete,
+        collection_errors=snapshot.collection_errors,
+        expected_check_run_id=selected.get('check_run_id'),
+        expected_run_id=selected.get('run_id'),
+        expected_artifact_identity=(selected.get('artifact_identity') or selected.get('external_id')),
+        canonical_disposition='NOT_AVAILABLE')
 
 def _atomic_json(path, value):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
@@ -32,7 +98,11 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
         errors=[]
         try: files=transport.list_files(repo,raw['number'])
         except Exception as e: files=[]; errors.append(f'changed_files: {e}')
-        try: checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
+        try:
+            checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
+            checks, enrichment_errors=_collect_check_evidence(
+                repo, checks, transport, raw.get('head',{}).get('sha',''))
+            errors.extend(enrichment_errors)
         except Exception as e: checks=[]; errors.append(f'checks: {e}')
         p=snapshot_from_github(repo,raw,main_sha,files,checks,observed,errors)
         out.append(classify(p,authority_patterns) if authority_patterns else classify(p))
@@ -139,6 +209,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
             'raw_response_sha256':hashlib.sha256((result.raw or '').encode()).hexdigest() if result.raw else None,
             'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
         raise SemanticReviewError(f'{result.status} evidence={path}')
-    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result)
+    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result,
+                         ci_failure_evidence=_ci_evidence_for(current))
     path=persist_receipt(state_root,receipt)
     return receipt,path
