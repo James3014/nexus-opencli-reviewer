@@ -46,6 +46,20 @@ def test_check_run_pagination_and_failure_closed(monkeypatch):
     try:t.list_checks('o/r','h');assert False
     except GitHubError:pass
 
+def test_check_observation_preserves_optional_identity_fields():
+    p=snapshot_from_github('o/r',{'number':1,'base':{'sha':'base'},'head':{'sha':'head'},'body':''},'main',[],[
+        {'name':'Exact-base impact gate','conclusion':'failure','id':42,
+         'run_id':99,'external_id':'artifact-7','details_url':'https://example.test/run/99',
+         'workflow_name':'Nexus Pytest CI','head_sha':'head'}])
+    check=p.checks[0]
+    assert check.name == 'Exact-base impact gate' and check.status == 'failure'
+    assert check.check_run_id == 42
+    assert check.run_id == 99
+    assert check.external_id == 'artifact-7'
+    assert check.details_url.endswith('/99')
+    assert check.workflow_name == 'Nexus Pytest CI'
+    assert check.head_sha == 'head'
+
 def test_title_issue_and_same_issue_chain():
     from reviewer.normalize import issue_numbers
     from reviewer.overlap import detect

@@ -17,4 +17,16 @@ def snapshot_from_github(repo, raw, main_sha, files, checks, observed_at=None, e
     body=raw.get('body') or ''; dnm,expected=markers(body)
     head=raw.get('head') or {}; base=raw.get('base') or {}
     complete=not errors
-    return PRSnapshot.from_dict({'repository':repo,'pr_number':int(raw['number']),'title':raw.get('title',''),'state':raw.get('state','OPEN'),'draft':bool(raw.get('draft',False)),'mergeable':raw.get('mergeable'),'base_branch':base.get('ref','main'),'base_sha':base.get('sha',''),'head_branch':head.get('ref',''),'head_sha':head.get('sha',''),'changed_files':[x.get('filename','') for x in files],'issue_numbers':issue_numbers(body,raw.get('title','')),'labels':[x.get('name','') if isinstance(x,dict) else str(x) for x in raw.get('labels',[])],'body':body,'checks':[{'name':x.get('name',x.get('context','check')),'status':x.get('conclusion') or x.get('state','unknown')} for x in checks],'observed_at':observed_at or utc_now(),'source_identity':f'github:{repo}:pr:{raw["number"]}@{head.get("sha","")}', 'expected_failure':expected,'do_not_merge':dnm,'collection_complete':complete,'collection_errors':list(errors),'created_at':raw.get('created_at',''),'updated_at':raw.get('updated_at','')},main_sha)
+    normalized_checks = [{'name': x.get('name', x.get('context', 'check')),
+                          'status': x.get('conclusion') or x.get('state', 'unknown'),
+                          'expected_failure': bool(x.get('expected_failure', False)),
+                          'check_run_id': x.get('id'), 'run_id': x.get('run_id'),
+                          'external_id': x.get('external_id'), 'details_url': x.get('details_url'),
+                          'html_url': x.get('html_url'), 'node_id': x.get('node_id'),
+                          'workflow_name': x.get('workflow_name'), 'head_sha': x.get('head_sha'),
+                          'check_suite_id': x.get('check_suite_id'),
+                          'started_at': x.get('started_at'), 'completed_at': x.get('completed_at'),
+                          'artifact_identity': x.get('artifact_identity'),
+                          'annotation_count': x.get('annotation_count'), 'app_slug': x.get('app_slug')}
+                         for x in checks]
+    return PRSnapshot.from_dict({'repository':repo,'pr_number':int(raw['number']),'title':raw.get('title',''),'state':raw.get('state','OPEN'),'draft':bool(raw.get('draft',False)),'mergeable':raw.get('mergeable'),'base_branch':base.get('ref','main'),'base_sha':base.get('sha',''),'head_branch':head.get('ref',''),'head_sha':head.get('sha',''),'changed_files':[x.get('filename','') for x in files],'issue_numbers':issue_numbers(body,raw.get('title','')),'labels':[x.get('name','') if isinstance(x,dict) else str(x) for x in raw.get('labels',[])],'body':body,'checks':normalized_checks,'observed_at':observed_at or utc_now(),'source_identity':f'github:{repo}:pr:{raw["number"]}@{head.get("sha","")}', 'expected_failure':expected,'do_not_merge':dnm,'collection_complete':complete,'collection_errors':list(errors),'created_at':raw.get('created_at',''),'updated_at':raw.get('updated_at','')},main_sha)
