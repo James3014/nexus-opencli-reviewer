@@ -14,6 +14,9 @@ class GitHubTransport(Protocol):
     def get_workflow_run(self, repo:str, run_id:int)->dict[str,Any]: ...
     def list_workflow_runs_for_suite(self, repo:str, check_suite_id:int)->list[dict[str,Any]]: ...
     def list_workflow_artifacts(self, repo:str, run_id:int)->list[dict[str,Any]]: ...
+    def list_workflow_jobs(self, repo:str, run_id:int)->list[dict[str,Any]]: ...
+    def get_job_log(self, repo:str, job_id:int)->bytes: ...
+    def get_artifact_archive(self, repo:str, artifact_id:int)->bytes: ...
     def get_patch(self, repo:str, number:int)->str: ...
     def get_pr(self, repo:str, number:int)->dict[str,Any]: ...
     def get_issue(self, repo:str, number:int)->dict[str,Any]: ...
@@ -86,6 +89,33 @@ class GhCliTransport:
             rows=value['artifacts']; out.extend(rows)
             if len(rows)<100:return out
         raise GitHubError('workflow-artifacts pagination exceeded safety bound')
+    def list_workflow_jobs(self, repo, run_id):
+        self._validate(repo)
+        out=[]
+        for page in range(1,101):
+            value=self._get(f'repos/{repo}/actions/runs/{int(run_id)}/jobs',per_page=100,page=page)
+            if not isinstance(value,dict) or not isinstance(value.get('jobs'),list):
+                raise GitHubError('expected workflow-jobs page')
+            rows=value['jobs']; out.extend(rows)
+            if len(rows)<100:return out
+        raise GitHubError('workflow-jobs pagination exceeded safety bound')
+    def _get_bytes(self, endpoint):
+        self._validate_endpoint(endpoint)
+        try:
+            p=subprocess.run([self.gh,'api',endpoint],check=False,capture_output=True,timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise GitHubError(str(e)) from e
+        if p.returncode: raise GitHubError(p.stderr.decode(errors='replace').strip() or 'gh api failed')
+        return bytes(p.stdout)
+    def _validate_endpoint(self, endpoint):
+        if not isinstance(endpoint,str) or endpoint.startswith(('/', 'http:', 'https:')):
+            raise ValueError('invalid GitHub endpoint')
+    def get_job_log(self, repo, job_id):
+        self._validate(repo)
+        return self._get_bytes(f'repos/{repo}/actions/jobs/{int(job_id)}/logs')
+    def get_artifact_archive(self, repo, artifact_id):
+        self._validate(repo)
+        return self._get_bytes(f'repos/{repo}/actions/artifacts/{int(artifact_id)}/zip')
     def get_pr(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/pulls/{int(number)}')
     def create_comment(self, repo, pr_number, body):
         self._validate(repo)

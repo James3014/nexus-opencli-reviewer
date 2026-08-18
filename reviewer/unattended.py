@@ -66,6 +66,24 @@ def _key(identity: Iterable[Any], context_sha256: str = "", prompt_sha256: str =
                 "prompt_sha256": prompt_sha256}
     return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
+def _failure_fingerprint(record: Mapping[str, Any]) -> str:
+    failures = []
+    for check in record.get("checks", ()):
+        if not isinstance(check, Mapping) or str(check.get("status", "")).lower() not in {
+                "failure", "failed", "error", "cancelled", "timed_out", "action_required"}:
+            continue
+        if check.get("expected_failure"):
+            continue
+        failures.append({"check_run_id": check.get("check_run_id"),
+                         "name": check.get("name"), "status": check.get("status"),
+                         "run_id": check.get("run_id"), "run_attempt": check.get("run_attempt"),
+                         "job_identity": check.get("job_identity")})
+    if not failures:
+        return ""
+    material = {"review_identity": list(_identity(record)),
+                "failures": sorted(failures, key=lambda item: json.dumps(item, sort_keys=True))}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
 
 @dataclass(frozen=True)
 class ServicePolicy:
@@ -140,8 +158,11 @@ class UnattendedReviewService:
             disposition = str(getattr(getattr(value, "disposition", ""), "value", getattr(value, "disposition", "")))
             record = {"review_identity": list(ident), "disposition": disposition}
         record["review_identity"] = list(ident)
+        record["failure_fingerprint"] = _failure_fingerprint(record)
         record["identity_key"] = _key(ident, str(record.get("context_pack_sha256", "")),
                                        str(record.get("prompt_sha256", "")))
+        if record["failure_fingerprint"]:
+            record["identity_key"] = hashlib.sha256((record["identity_key"] + ":" + record["failure_fingerprint"]).encode()).hexdigest()
         record["disposition"] = disposition
         return record
 
@@ -201,6 +222,8 @@ class UnattendedReviewService:
                     reason = "new_identity"
                     if previous and previous.get("review_identity", [None, None, None])[2] != record["review_identity"][2]:
                         reason = "head_changed"
+                    elif previous and record.get("failure_fingerprint") and previous.get("failure_fingerprint") != record.get("failure_fingerprint"):
+                        reason = "ci_failure_fingerprint"
                     elif previous and not self._eligible(previous):
                         reason = "eligibility_changed"
                     self._enqueue(state, record, reason=reason)

@@ -2,7 +2,7 @@ from reviewer.github import GhCliTransport
 from reviewer.normalize import issue_numbers,markers,snapshot_from_github
 from reviewer.classifier import classify
 from reviewer.models import Disposition
-from reviewer.scan import scan
+from reviewer.scan import scan, _safe_archive_evidence, _bounded_evidence
 from reviewer.github import GitHubError
 
 class Fake:
@@ -78,6 +78,40 @@ def test_collector_enriches_failed_checks_and_preserves_head_identity():
     assert check.run_id == 9
     assert items[0].snapshot.collection_complete is True
 
+def test_collector_binds_one_exact_job_and_bounded_log():
+    class WithJob(Fake):
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
+        def list_check_annotations(self,r,i): return []
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9,'head_sha':'h'}]
+        def get_workflow_run(self,r,i): return {'id':9,'name':'CI','head_sha':'h'}
+        def list_workflow_artifacts(self,r,i): return []
+        def list_workflow_jobs(self,r,i): return [{'id':77,'name':'CI','run_id':9,'head_sha':'h'}]
+        def get_job_log(self,r,i): return b'x' * (1024 * 1024 + 1)
+    _,_,items,_=scan('o/r',WithJob())
+    check=items[0].snapshot.checks[0]
+    assert check.job_identity == '77' and check.log_sha256 and check.log_truncated
+
+def test_collector_rejects_foreign_or_ambiguous_jobs():
+    class BadJobs(Fake):
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
+        def list_check_annotations(self,r,i): return []
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9,'head_sha':'h'}]
+        def get_workflow_run(self,r,i): return {'id':9,'name':'CI','head_sha':'h'}
+        def list_workflow_artifacts(self,r,i): return []
+        def list_workflow_jobs(self,r,i): return [{'id':77,'run_id':9,'head_sha':'other'}, {'id':78,'run_id':9,'head_sha':'h'}, {'id':79,'run_id':9,'head_sha':'h'}]
+    _,_,items,q=scan('o/r',BadJobs())
+    assert not q.semantic_review()
+    assert any('ambiguous exact-run relationship' in e for e in items[0].snapshot.collection_errors)
+
+def test_bounded_evidence_rejects_hostile_archive_without_extracting():
+    import io, zipfile
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,'w') as z: z.writestr('../escape.txt','no')
+    try: _safe_archive_evidence(out.getvalue()); assert False
+    except ValueError as exc: assert 'unsafe' in str(exc)
+    digest,size,truncated=_bounded_evidence(b'a' * (1024 * 1024 + 3))
+    assert len(digest) == 64 and size == 1024 * 1024 and truncated
+
 def test_collector_partial_enrichment_is_not_review_ready():
     class Broken(Fake):
         def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
@@ -134,6 +168,11 @@ def test_annotation_and_artifact_pagination_fail_closed(monkeypatch):
     monkeypatch.setattr(t,'_get',lambda e,**p: (_ for _ in ()).throw(GitHubError('later page')) if p['page']==2 else ([{}]*100 if 'annotations' in e else {'artifacts':[{}]*100}))
     try:t.list_check_annotations('o/r',7);assert False
     except GitHubError:pass
+
+def test_workflow_jobs_are_paginated(monkeypatch):
+    t=GhCliTransport()
+    monkeypatch.setattr(t, '_get', lambda e, **p: {'jobs': ([{'id': 1}] * 100 if p['page'] == 1 else [{'id': 2}])})
+    assert [x['id'] for x in t.list_workflow_jobs('o/r', 9)] == [1] * 100 + [2]
     try:t.list_workflow_artifacts('o/r',9);assert False
     except GitHubError:pass
 

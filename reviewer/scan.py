@@ -6,9 +6,38 @@ from .queue import ReviewQueue
 from pathlib import Path
 import hashlib
 import json, os, re, tempfile, time
-from dataclasses import asdict
+import io, zipfile
+from dataclasses import asdict, replace
+from .models import CheckObservation
 
 _TERMINAL_FAILURES={'failure','failed','error','cancelled','timed_out','action_required'}
+_MAX_EVIDENCE_BYTES = 1024 * 1024
+
+def _bounded_evidence(value, limit=_MAX_EVIDENCE_BYTES):
+    """Hash only a bounded byte prefix; never interpret it as executable data."""
+    raw = value.encode() if isinstance(value, str) else bytes(value)
+    captured = raw[:limit]
+    return hashlib.sha256(captured).hexdigest(), len(captured), len(raw) > limit
+
+def _safe_archive_evidence(value, limit=_MAX_EVIDENCE_BYTES, max_members=256):
+    """Inspect a ZIP manifest without extraction or execution."""
+    digest, size, truncated = _bounded_evidence(value, limit)
+    if truncated:
+        return digest, size, True
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(bytes(value)))
+        members = archive.infolist()
+        if len(members) > max_members:
+            raise ValueError('artifact archive member bound exceeded')
+        for member in members:
+            parts = member.filename.replace('\\', '/').split('/')
+            if member.filename.startswith(('/', '\\')) or '..' in parts:
+                raise ValueError('unsafe artifact archive path')
+            if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError('unsafe artifact archive symlink')
+        return digest, size, False
+    except zipfile.BadZipFile as exc:
+        raise ValueError('invalid artifact archive') from exc
 
 def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
     """Enrich failed checks with immutable, read-only GitHub evidence."""
@@ -55,6 +84,7 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
                 row['head_sha']=row.get('head_sha') or run_head
                 if not row.get('details_url'):
                     row['details_url']=run.get('html_url') or run.get('logs_url')
+                row['run_attempt']=run.get('run_attempt')
             except Exception as exc:
                 errors.append(f'workflow run: {type(exc).__name__}: {exc}')
             try:
@@ -64,8 +94,31 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
                     row['artifact_identity']='|'.join(sorted(identities))
                 else:
                     errors.append('workflow artifacts: artifact identity unavailable')
+                if identities and hasattr(transport, 'get_artifact_archive'):
+                    try:
+                        artifact_blob=transport.get_artifact_archive(repo, int(identities[0]))
+                        row['artifact_sha256'], _, row['artifact_truncated'] = _safe_archive_evidence(artifact_blob)
+                    except Exception as exc:
+                        errors.append(f'workflow artifacts: bounded content unavailable: {type(exc).__name__}: {exc}')
             except Exception as exc:
                 errors.append(f'workflow artifacts: {type(exc).__name__}: {exc}')
+            if hasattr(transport, 'list_workflow_jobs'):
+                try:
+                    jobs=transport.list_workflow_jobs(repo, int(run_id))
+                    exact=[job for job in jobs if job.get('head_sha') == pr_head_sha
+                           and (job.get('run_id') in (None, run_id))]
+                    named=[job for job in exact if job.get('name') == row.get('name')]
+                    candidates=named or exact
+                    if len(candidates) != 1 or type(candidates[0].get('id')) is not int:
+                        errors.append('workflow job: missing or ambiguous exact-run relationship')
+                    else:
+                        job=candidates[0]
+                        row['job_identity']=str(job['id'])
+                        if hasattr(transport, 'get_job_log'):
+                            log_sha, _, log_truncated = _bounded_evidence(transport.get_job_log(repo, job['id']))
+                            row['log_sha256']=log_sha; row['log_truncated']=log_truncated
+                except Exception as exc:
+                    errors.append(f'workflow job: {type(exc).__name__}: {exc}')
         enriched.append(row)
     return enriched, errors
 
@@ -120,6 +173,18 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
             errors.extend(enrichment_errors)
         except Exception as e: checks=[]; errors.append(f'checks: {e}')
         p=snapshot_from_github(repo,raw,main_sha,files,checks,observed,errors)
+        # Keep the normalizer's stable input contract while retaining additive
+        # evidence fields collected by this bounded CI enrichment pass.
+        if checks:
+            merged=[]
+            for current_check, row in zip(p.checks, checks):
+                values=asdict(current_check)
+                for field in ('job_identity', 'log_sha256', 'log_truncated',
+                              'artifact_sha256', 'artifact_truncated', 'run_attempt'):
+                    if field in row:
+                        values[field]=row[field]
+                merged.append(CheckObservation(**values))
+            p=replace(p, checks=tuple(merged))
         out.append(classify(p,authority_patterns) if authority_patterns else classify(p))
     detect(out); q=ReviewQueue();q.ingest(out)
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)

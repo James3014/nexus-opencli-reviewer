@@ -13,6 +13,9 @@ class CheckObservation:
     workflow_name:str|None=None; head_sha:str|None=None; check_suite_id:int|None=None
     started_at:str|None=None; completed_at:str|None=None; artifact_identity:str|None=None
     annotation_count:int|None=None; app_slug:str|None=None
+    job_identity:str|None=None; log_sha256:str|None=None; log_truncated:bool=False
+    artifact_sha256:str|None=None; artifact_truncated:bool=False
+    run_attempt:int|None=None
 @dataclass(frozen=True)
 class PRSnapshot:
     repository:str; pr_number:int; title:str; state:str; draft:bool; mergeable:bool|None; base_branch:str; base_sha:str; head_branch:str; head_sha:str; current_main_sha:str; changed_files:tuple[str,...]=(); issue_numbers:tuple[int,...]=(); labels:tuple[str,...]=(); body:str=''; checks:tuple[CheckObservation,...]=(); observed_at:str=''; source_identity:str='fixture'; declared_base_sha:str|None=None; declared_head_sha:str|None=None; declared_main_sha:str|None=None; expected_failure:bool=False; do_not_merge:bool=False; collection_complete:bool=True; collection_errors:tuple[str,...]=(); created_at:str=''; updated_at:str=''
