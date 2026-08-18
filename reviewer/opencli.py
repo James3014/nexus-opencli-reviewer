@@ -73,24 +73,14 @@ class OpenCLITransport:
                 out, err = process.communicate()
             return self._text(out) or partial_out, self._text(err) or partial_err, True
 
-    def invoke(self, prompt):
-        now = lambda: datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
-        started = now()
-        args = [self.executable, 'chatgpt', 'ask', prompt, '--new', '--timeout', str(self.timeout),
-                '--site-session', 'ephemeral', '-f', 'json']
-        def result(status, raw='', **kwargs):
-            return TransportResult(status, raw, executable=self.executable,
-                                   profile=self.profile, session_mode='ephemeral', **kwargs)
+    def _run_process(self, args, env):
         try:
-            env = os.environ.copy()
-            if self.profile:
-                env['OPENCLI_PROFILE'] = self.profile
             process = subprocess.Popen(
                 args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, start_new_session=True, shell=False, env=env,
             )
         except FileNotFoundError:
-            return result('OPENCLI_NOT_FOUND', argv=args, started_at=started, finished_at=now())
+            return None, '', '', False
         try:
             stdout, stderr, timed_out = self._communicate(process)
         finally:
@@ -101,25 +91,78 @@ class OpenCLITransport:
                     stream.close()
             if process.poll() is None:
                 process.wait()
-        if timed_out:
-            return result('OPENCLI_OUTCOME_UNKNOWN', stdout, argv=args,
-                                   outcome_unknown=True, retry_safe=False,
-                                   started_at=started, finished_at=now())
-        if process.returncode:
-            return result('OPENCLI_PROCESS_FAILURE', stdout or stderr, argv=args,
-                                   started_at=started, finished_at=now())
-        try:
-            envelope = json.loads(stdout)
-            if (not isinstance(envelope, list) or len(envelope) != 1 or
-                    not isinstance(envelope[0], dict) or not isinstance(envelope[0].get('response'), str)):
-                raise ValueError
-            envelope = envelope[0]
-        except (ValueError, json.JSONDecodeError, TypeError):
-            return result('OPENCLI_PROCESS_FAILURE', stdout, argv=args,
-                                   started_at=started, finished_at=now())
+        return process.returncode, stdout, stderr, timed_out
+
+    @staticmethod
+    def _stable_assistant_text(stdout, stable_seconds=6):
+        rows = json.loads(stdout)
+        if not isinstance(rows, list):
+            raise ValueError
+        assistants = [
+            row for row in rows
+            if isinstance(row, dict)
+            and row.get('Role') == 'Assistant'
+            and isinstance(row.get('Text'), str)
+            and row.get('Text')
+            and row.get('Generating') is False
+            and isinstance(row.get('StableSeconds'), (int, float))
+            and row.get('StableSeconds') >= stable_seconds
+        ]
+        if not assistants:
+            raise ValueError
+        return assistants[-1]['Text']
+
+    def invoke(self, prompt):
+        now = lambda: datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        started = now()
+        args = [self.executable, 'chatgpt', 'ask', prompt, '--new', '--timeout', str(self.timeout),
+                '--site-session', 'ephemeral', '-f', 'json']
         redacted = self.safe_argv()
-        return result('REVIEW_COMPLETED', envelope['response'], version=self.version(),
-                               envelope=envelope, argv=redacted, started_at=started, finished_at=now())
+        def result(status, raw='', **kwargs):
+            return TransportResult(status, raw, executable=self.executable,
+                                   profile=self.profile, session_mode='ephemeral', **kwargs)
+        env = os.environ.copy()
+        if self.profile:
+            env['OPENCLI_PROFILE'] = self.profile
+        returncode, stdout, stderr, timed_out = self._run_process(args, env)
+        if returncode is None:
+            return result('OPENCLI_NOT_FOUND', argv=redacted, started_at=started, finished_at=now())
+        if timed_out:
+            return result('OPENCLI_OUTCOME_UNKNOWN', stdout, argv=redacted,
+                          outcome_unknown=True, retry_safe=False,
+                          started_at=started, finished_at=now())
+        if returncode:
+            return result('OPENCLI_PROCESS_FAILURE', stdout or stderr, argv=redacted,
+                          started_at=started, finished_at=now())
+        try:
+            ask_rows = json.loads(stdout)
+            if (not isinstance(ask_rows, list) or len(ask_rows) != 1 or
+                    not isinstance(ask_rows[0], dict) or
+                    not isinstance(ask_rows[0].get('response'), str) or
+                    not isinstance(ask_rows[0].get('conversationId'), str) or
+                    not ask_rows[0].get('conversationId')):
+                raise ValueError
+            envelope = ask_rows[0]
+        except (ValueError, json.JSONDecodeError, TypeError):
+            return result('OPENCLI_PROCESS_FAILURE', stdout, argv=redacted,
+                          started_at=started, finished_at=now())
+
+        detail_args = [self.executable, 'chatgpt', 'detail', envelope['conversationId'],
+                       '--wait', '--stable', '6', '--timeout', str(self.timeout),
+                       '--site-session', 'ephemeral', '-f', 'json']
+        detail_code, detail_stdout, detail_stderr, detail_timed_out = self._run_process(detail_args, env)
+        if detail_code is None or detail_timed_out or detail_code:
+            return result('OPENCLI_STABLE_READ_FAILURE', detail_stdout or detail_stderr,
+                          envelope=envelope, argv=redacted, retry_safe=False,
+                          started_at=started, finished_at=now())
+        try:
+            stable_text = self._stable_assistant_text(detail_stdout)
+        except (ValueError, json.JSONDecodeError, TypeError):
+            return result('OPENCLI_STABLE_READ_FAILURE', detail_stdout,
+                          envelope=envelope, argv=redacted, retry_safe=False,
+                          started_at=started, finished_at=now())
+        return result('REVIEW_COMPLETED', stable_text, version=self.version(),
+                      envelope=envelope, argv=redacted, started_at=started, finished_at=now())
 
     def version(self):
         try:

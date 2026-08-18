@@ -62,7 +62,7 @@ class ReviewerConfig:
     bootstrap: BootstrapPolicy = field(default_factory=BootstrapPolicy)
     state_root: Path = DEFAULT_STATE_ROOT
     log_path: Path = DEFAULT_LOG_PATH
-    opencli_executable: str = "/Users/jameschen/.npm-global/bin/opencli"
+    opencli_executable: str = "opencli"
 
     def __post_init__(self) -> None:
         repos = tuple(str(r).strip() for r in self.repositories)
@@ -114,7 +114,7 @@ class ReviewerConfig:
             bootstrap=bootstrap,
             state_root=raw.get("state_root", DEFAULT_STATE_ROOT),
             log_path=raw.get("log_path", DEFAULT_LOG_PATH),
-            opencli_executable=raw.get("opencli_executable", "/Users/jameschen/.npm-global/bin/opencli"),
+            opencli_executable=raw.get("opencli_executable", "opencli"),
         )
 
     @classmethod

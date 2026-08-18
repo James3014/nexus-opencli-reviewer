@@ -22,6 +22,14 @@ def test_launch_agent_is_user_level_and_independent(tmp_path, monkeypatch):
     assert "/opt/homebrew/bin" in text
 
 
+def test_launch_agent_path_uses_current_environment_and_escapes_deduplicated_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "/custom/bin:/custom/bin:/path&with<markup>")
+    monkeypatch.setattr(service_cli.shutil, "which", lambda executable: None)
+    text = service_cli._plist_xml(tmp_path / "config&.json")
+    assert "/custom/bin:/path&amp;with&lt;markup&gt;" in text
+    assert text.count("/custom/bin") == 1
+
+
 def test_run_once_delegates_without_manual_pr(monkeypatch,tmp_path):
     cfg=config(tmp_path); seen=[]
     class S:

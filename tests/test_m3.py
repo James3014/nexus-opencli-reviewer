@@ -35,21 +35,25 @@ def test_only_review_ready_can_invoke_and_receipt_dedup_identity():
 
 def test_opencli_json_envelope_and_malformed(monkeypatch):
     import subprocess
-    good=[{'conversationId':'c','conversationUrl':'u','tool':'','response':json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]})}]
-    class P:
-        returncode=0;stdout=json.dumps(good);stderr=''
+    stable=json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS','summary':'ok','findings':[],'evidence_gaps':[]})
+    ask=[{'conversationId':'c','conversationUrl':'u','tool':'','response':'ask-snapshot'}]
+    detail=[{'Index':1,'Role':'Assistant','Text':stable,'Generating':False,'StableSeconds':6}]
+    calls=[]
     class PP:
-        def __init__(self,*a,**k): self.returncode=0; self.stdout=None; self.stderr=None; self.pid=999
-        def communicate(self,**k): return json.dumps(good), ''
+        def __init__(self,args,**k): self.args=args; self.returncode=0; self.stdout=None; self.stderr=None; self.pid=999; calls.append(args)
+        def communicate(self,**k): return (json.dumps(ask) if self.args[2]=='ask' else json.dumps(detail)), ''
         def poll(self): return self.returncode
         def wait(self): return self.returncode
     monkeypatch.setattr(subprocess,'Popen',PP)
-    x=OpenCLITransport().invoke('data');assert x.status=='REVIEW_COMPLETED' and parse_response(x.raw)['status']=='PASS' and '-f' in x.argv
-    class B:
-        returncode=0;stdout='not-json';stderr=''
+    x=OpenCLITransport().invoke('data')
+    assert x.status=='REVIEW_COMPLETED' and x.raw==stable and parse_response(x.raw)['status']=='PASS' and '-f' in x.argv
+    chatgpt_calls=[c for c in calls if len(c)>2 and c[1]=='chatgpt']
+    assert [c[2] for c in chatgpt_calls]==['ask','detail']
+
     class BP(PP):
-        def communicate(self,**k): return 'not-json', ''
-    monkeypatch.setattr(subprocess,'Popen',BP);assert OpenCLITransport().invoke('data').status=='OPENCLI_PROCESS_FAILURE'
+        def communicate(self,**k): return ('not-json', '') if self.args[2]=='ask' else (json.dumps(detail), '')
+    monkeypatch.setattr(subprocess,'Popen',BP)
+    assert OpenCLITransport().invoke('data').status=='OPENCLI_PROCESS_FAILURE'
 
 def test_production_orchestration_fake_path(tmp_path):
     from reviewer.scan import review_ready
@@ -115,6 +119,25 @@ def test_semantic_parser_rejects_unescaped_quotes_but_accepts_json_escape():
     try:parse_response(json.dumps(missing_path));assert False
     except SemanticParseError:pass
 
+def test_parser_rejects_literal_control_chars_in_strings_but_accepts_escapes():
+    # Literal U+000A / U+0009 inside a JSON string are invalid JSON and must
+    # remain terminal parse failures; only the \\n / \\t escape forms are valid.
+    literal_nl = ('{"schema":"reviewer.semantic_response.v1","status":"PASS",'
+                  '"summary":"multi\nline",'
+                  '"findings":[],"evidence_gaps":[]}')
+    literal_tab = ('{"schema":"reviewer.semantic_response.v1","status":"PASS",'
+                   '"summary":"a\tb",'
+                   '"findings":[],"evidence_gaps":[]}')
+    for bad in (literal_nl, literal_tab):
+        try:
+            parse_response(bad)
+            assert False
+        except SemanticParseError:
+            pass
+    escaped = json.dumps({'schema':'reviewer.semantic_response.v1','status':'PASS',
+                          'summary':'multi\nline\ttab','findings':[],'evidence_gaps':[]})
+    assert parse_response(escaped)['summary'] == 'multi\nline\ttab'
+
 def test_prompt_contract_is_the_parser_contract():
     from reviewer.semantic import response_contract
     p=PRSnapshot.from_dict({'repository':'r','pr_number':1,'base_sha':'m','head_sha':'h'},'m')
@@ -125,6 +148,10 @@ def test_prompt_contract_is_the_parser_contract():
     assert 'Escape every double quote' in prompt
     assert 'prefer single quotes' in prompt
     assert 'Do not emit trailing commas, comments, or any JSON5 extensions' in prompt
+    assert 'single-line at the serialization layer' in prompt
+    assert 'U+0000-U+001F' in prompt
+    assert 'escapes such as \\n and \\t' in prompt
+    assert 'Never paste multi-line source' in prompt
 
 def test_parse_failure_exact_identity_cannot_dispatch_twice(tmp_path):
     class GH:

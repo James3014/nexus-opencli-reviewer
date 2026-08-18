@@ -11,6 +11,12 @@ def test_safe_defaults_are_single_repo_serial_and_advisory():
     assert config.semantic_concurrency == 1
     assert config.publication_enabled is True
     assert config.bootstrap == BootstrapPolicy("new_only", 0)
+    assert config.opencli_executable == "opencli"
+
+
+def test_explicit_opencli_executable_is_preserved():
+    config = ReviewerConfig.from_mapping({"opencli_executable": "/custom/bin/opencli"})
+    assert config.opencli_executable == "/custom/bin/opencli"
 
 
 def test_mapping_accepts_operator_friendly_aliases(tmp_path):

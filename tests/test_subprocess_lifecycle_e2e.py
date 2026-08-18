@@ -7,6 +7,9 @@ These tests deliberately use a real executable rather than monkeypatching
 from __future__ import annotations
 
 import stat
+import os
+import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -26,8 +29,14 @@ def fake_opencli(tmp_path):
             import json, os, signal, subprocess, sys, time
 
             mode = sys.argv[1]
+            command = sys.argv[3] if len(sys.argv) > 3 else ""
             if mode == "valid":
-                print(json.dumps([{"response": "{\\"status\\":\\"PASS\\"}", "conversationId": "c"}]))
+                if command == "ask":
+                    print(json.dumps([{"response": "ask-snapshot", "conversationId": "c"}]))
+                elif command == "detail":
+                    print(json.dumps([{"Index": 1, "Role": "Assistant", "Text": "{\\"status\\":\\"PASS\\"}", "Generating": False, "StableSeconds": 6}]))
+                else:
+                    raise SystemExit(2)
             elif mode == "malformed":
                 print("not-json")
             elif mode == "empty":
@@ -103,12 +112,15 @@ def test_descendant_pipe_holder_is_bounded(fake_opencli):
 
 
 def test_installed_opencli_version_is_observation_only():
+    executable = os.environ.get("OPENCLI_EXECUTABLE") or shutil.which("opencli")
+    if not executable:
+        pytest.skip("OpenCLI is not installed")
     completed = subprocess.run(
-        ["/Users/jameschen/.npm-global/bin/opencli", "--version"],
+        [executable, "--version"],
         check=False,
         capture_output=True,
         text=True,
         timeout=10,
     )
     assert completed.returncode == 0
-    assert completed.stdout.strip() == "1.8.6"
+    assert re.fullmatch(r"v?\d+\.\d+\.\d+", completed.stdout.strip())

@@ -33,6 +33,9 @@ def envelope(context: ReviewContext) -> str:
             'BEGIN_UNTRUSTED_PR_DATA\n'+json.dumps(context.payload,sort_keys=True)+'\nEND_UNTRUSTED_PR_DATA\n'
             'Return exactly one JSON object and no markdown fences or prose. The response must be directly parseable by standard json.loads. '
             'Escape every double quote that appears inside a JSON string with a backslash; in explanatory text inside string values, prefer single quotes '
-            'instead of double quotes. Do not emit trailing commas, comments, or any JSON5 extensions. The exact JSON Schema is: '
+            'instead of double quotes. Do not emit trailing commas, comments, or any JSON5 extensions. '
+            'Every JSON string value must be single-line at the serialization layer: literal U+0000-U+001F control characters (including real newlines and tabs) are forbidden inside any JSON string. '
+            'Represent line breaks and tabs with JSON escapes such as \\n and \\t. Never paste multi-line source, Task Card YAML, or frontmatter verbatim into a string value; summarize it or encode each line break as the escape sequence. '
+            'The exact JSON Schema is: '
             +json.dumps(response_contract(),sort_keys=True,separators=(',',':'))+'. '
             'Use empty arrays when there are no findings or evidence gaps.')
