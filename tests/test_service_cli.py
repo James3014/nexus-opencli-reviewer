@@ -48,6 +48,64 @@ def test_bounded_bootstrap_config_admits_exactly_one_canary(monkeypatch,tmp_path
     assert captured["policy"].bootstrap_canary is True
 
 
+def test_metadata_canary_is_get_only_and_rejects_artifact_head_mismatch(monkeypatch):
+    head = "f" * 40
+    calls = []
+
+    class FakeGh:
+        def _get(self, endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith("check-suites/11"):
+                return {"id": 11, "head_sha": head}
+            if endpoint.endswith("check-runs/12"):
+                return {"id": 12, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("actions/runs/13"):
+                return {"id": 13, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("jobs?per_page=100&page=1"):
+                return {"jobs": [{"id": 14, "head_sha": head}]}
+            if endpoint.endswith("artifacts?per_page=100&page=1"):
+                return {"artifacts": [{"id": 15, "name": "exact-base-impact-" + "a" * 40}]}
+            if endpoint.endswith("actions/artifacts/15"):
+                return {"id": 15, "name": "exact-base-impact-" + "a" * 40,
+                        "expired": False, "workflow_run": {"id": 13, "head_sha": head}}
+            raise AssertionError(endpoint)
+
+        def get_job_log(self, *args):
+            raise AssertionError("job logs are forbidden")
+
+        def get_artifact_archive(self, *args):
+            raise AssertionError("artifact archives are forbidden")
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository="James3014/Nexus-new", pr_number=380, head_sha=head,
+        check_suite_id=11, check_run_id=12, run_id=13, job_id=14, artifact_id=15)
+    assert value["status"] == "CANARY_REJECTED"
+    assert "CANARY_ARTIFACT_NAME_HEAD_MISMATCH" in value["evidence_gaps"]
+    assert len(calls) == 6 and all("logs" not in call and not call.endswith("/zip") for call in calls)
+
+
+def test_metadata_canary_rejects_pagination_limit(monkeypatch):
+    class FakeGh:
+        def _get(self, endpoint):
+            if endpoint.endswith("check-suites/11"):
+                return {"id": 11, "head_sha": "h"}
+            if endpoint.endswith("check-runs/12"):
+                return {"id": 12, "head_sha": "h"}
+            if endpoint.endswith("actions/runs/13"):
+                return {"id": 13, "head_sha": "h", "conclusion": "failure"}
+            if endpoint.endswith("jobs?per_page=1&page=1"):
+                return {"jobs": [{"id": 14}]}
+            return {"artifacts": []}
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository="o/r", pr_number=1, head_sha="h", check_suite_id=11,
+        check_run_id=12, run_id=13, job_id=14, artifact_id=15, max_records=1)
+    assert value["status"] == "CANARY_REJECTED"
+    assert "CANARY_PAGINATION_OR_RECORD_LIMIT" in value["evidence_gaps"]
+
+
 def test_status_reports_launch_and_durable_queue(monkeypatch,tmp_path):
     cfg=config(tmp_path)
     monkeypatch.setattr(service_cli,"_launchctl",lambda *a:SimpleNamespace(returncode=0))

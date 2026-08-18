@@ -18,7 +18,7 @@ from typing import Any
 
 from .attempt import COMPLETED, DISPATCHING, discover_unfinished, finish_attempt
 from .config import DEFAULT_CONFIG_PATH, ReviewerConfig, load_config, save_config
-from .github import GhCliTransport
+from .github import GhCliTransport, REPO_RE
 from .opencli import OpenCLITransport
 from .preflight import preflight_opencli
 from .publication import publish_review
@@ -37,6 +37,106 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _safe_repo(repo: str) -> str:
     return repo.replace("/", "_")
+
+
+def _canary_get(transport: GhCliTransport, endpoint: str, *, max_bytes: int) -> Any:
+    """Read one bounded JSON metadata response; never follows redirects."""
+    if hasattr(transport, "gh"):
+        try:
+            result = subprocess.run([transport.gh, "api", endpoint], check=False,
+                                    capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("CANARY_GET_FAILED") from exc
+        if result.returncode:
+            raise ValueError("CANARY_GET_FAILED")
+        if len(result.stdout) > max_bytes:
+            raise ValueError("CANARY_RESPONSE_BYTE_LIMIT")
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("CANARY_JSON_INVALID") from exc
+    value = transport._get(endpoint)  # noqa: SLF001 - metadata-only test seam
+    if len(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()) > max_bytes:
+        raise ValueError("CANARY_RESPONSE_BYTE_LIMIT")
+    return value
+
+
+def run_metadata_canary(*, repository: str, pr_number: int, head_sha: str,
+                        check_suite_id: int, check_run_id: int, run_id: int,
+                        job_id: int, artifact_id: int, max_bytes: int = 65536,
+                        max_records: int = 100) -> dict[str, Any]:
+    """Acquire only exact GitHub check/run/job/artifact metadata."""
+    if (not isinstance(repository, str) or not REPO_RE.fullmatch(repository)
+            or type(pr_number) is not int or pr_number <= 0
+            or not isinstance(head_sha, str) or not head_sha
+            or any(type(value) is not int or value <= 0 for value in
+                   (check_suite_id, check_run_id, run_id, job_id, artifact_id))
+            or type(max_bytes) is not int or max_bytes <= 0
+            or type(max_records) is not int or max_records <= 0 or max_records > 100):
+        return {"status": "CANARY_REJECTED", "reason": "CANARY_INPUT_INVALID",
+                "claim_ceiling": "CI_EVIDENCE_ONLY"}
+    transport = GhCliTransport()
+    gaps: list[str] = []
+    metadata: dict[str, Any] = {}
+    try:
+        suite = _canary_get(transport, f"repos/{repository}/check-suites/{check_suite_id}", max_bytes=max_bytes)
+        check = _canary_get(transport, f"repos/{repository}/check-runs/{check_run_id}", max_bytes=max_bytes)
+        run = _canary_get(transport, f"repos/{repository}/actions/runs/{run_id}", max_bytes=max_bytes)
+        jobs_page = _canary_get(transport, f"repos/{repository}/actions/runs/{run_id}/jobs?per_page={max_records}&page=1", max_bytes=max_bytes)
+        artifacts_page = _canary_get(transport, f"repos/{repository}/actions/runs/{run_id}/artifacts?per_page={max_records}&page=1", max_bytes=max_bytes)
+        artifact = _canary_get(transport, f"repos/{repository}/actions/artifacts/{artifact_id}", max_bytes=max_bytes)
+        metadata = {"check_suite": suite, "check_run": check, "workflow_run": run,
+                    "jobs": jobs_page, "artifacts": artifacts_page, "artifact": artifact}
+    except Exception as exc:
+        gaps.append(str(exc))
+    if metadata:
+        suite, check, run = metadata["check_suite"], metadata["check_run"], metadata["workflow_run"]
+        jobs_page, artifacts_page, artifact = metadata["jobs"], metadata["artifacts"], metadata["artifact"]
+        jobs = jobs_page.get("jobs") if isinstance(jobs_page, dict) else None
+        artifacts = artifacts_page.get("artifacts") if isinstance(artifacts_page, dict) else None
+        if not isinstance(jobs, list) or not isinstance(artifacts, list):
+            gaps.append("CANARY_METADATA_SHAPE_INVALID")
+        else:
+            if len(jobs) >= max_records or len(artifacts) >= max_records:
+                gaps.append("CANARY_PAGINATION_OR_RECORD_LIMIT")
+            if sum(isinstance(row, dict) and row.get("id") == job_id
+                   and row.get("head_sha") == head_sha
+                   and row.get("run_id") in (None, run_id) for row in jobs) != 1:
+                gaps.append("CANARY_JOB_ID_MISMATCH_OR_AMBIGUOUS")
+            if sum(isinstance(row, dict) and row.get("id") == artifact_id for row in artifacts) != 1:
+                gaps.append("CANARY_ARTIFACT_ID_MISMATCH_OR_AMBIGUOUS")
+        if not isinstance(suite, dict) or suite.get("id") != check_suite_id:
+            gaps.append("CANARY_CHECK_SUITE_ID_MISMATCH")
+        if not isinstance(check, dict) or check.get("id") != check_run_id:
+            gaps.append("CANARY_CHECK_RUN_ID_MISMATCH")
+        if not isinstance(run, dict) or run.get("id") != run_id:
+            gaps.append("CANARY_WORKFLOW_RUN_ID_MISMATCH")
+        for label, value in (("CHECK_SUITE", suite), ("CHECK_RUN", check), ("WORKFLOW_RUN", run)):
+            if not isinstance(value, dict) or value.get("head_sha") != head_sha:
+                gaps.append(f"CANARY_{label}_HEAD_MISMATCH")
+        if isinstance(run, dict) and run.get("conclusion") not in {"failure", "cancelled", "timed_out"}:
+            gaps.append("CANARY_RUN_NOT_TERMINAL_FAILURE")
+        if isinstance(check, dict) and check.get("conclusion") not in {"failure", "cancelled", "timed_out", "action_required"}:
+            gaps.append("CANARY_CHECK_NOT_TERMINAL_FAILURE")
+        if isinstance(artifact, dict):
+            if artifact.get("id") != artifact_id:
+                gaps.append("CANARY_ARTIFACT_METADATA_ID_MISMATCH")
+            if artifact.get("expired") is True:
+                gaps.append("CANARY_ARTIFACT_EXPIRED")
+            binding = artifact.get("workflow_run")
+            if not isinstance(binding, dict) or binding.get("id") != run_id or binding.get("head_sha") != head_sha:
+                gaps.append("CANARY_ARTIFACT_WORKFLOW_BINDING_MISMATCH")
+            name = artifact.get("name")
+            if isinstance(name, str) and name.startswith("exact-base-impact-"):
+                suffix = name.removeprefix("exact-base-impact-")
+                if len(suffix) == 40 and suffix != head_sha:
+                    gaps.append("CANARY_ARTIFACT_NAME_HEAD_MISMATCH")
+    return {"status": "CANARY_REJECTED" if gaps else "CANARY_METADATA_BOUND",
+            "schema": "reviewer.ci_failure_evidence.v1", "repository": repository,
+            "pr_number": pr_number, "head_sha": head_sha, "check_suite_id": check_suite_id,
+            "check_run_id": check_run_id, "run_id": run_id, "job_id": job_id,
+            "artifact_id": artifact_id, "evidence_gaps": sorted(set(gaps)),
+            "claim_ceiling": "CI_EVIDENCE_ONLY"}
 
 
 def _append_log(path: Path, event: dict[str, Any]) -> None:
@@ -396,12 +496,30 @@ def daemon(config: ReviewerConfig) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="reviewer-service")
-    parser.add_argument("command", choices=("install", "start", "stop", "restart", "status", "run-once", "daemon", "logs", "reconcile"))
+    parser.add_argument("command", choices=("install", "start", "stop", "restart", "status", "run-once", "daemon", "logs", "reconcile", "ci-metadata-canary"))
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--bootstrap-canary", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--conversation-id", action="append", default=[])
+    parser.add_argument("--repository")
+    parser.add_argument("--pr-number", type=int)
+    parser.add_argument("--head-sha")
+    parser.add_argument("--check-suite-id", type=int)
+    parser.add_argument("--check-run-id", type=int)
+    parser.add_argument("--run-id", type=int)
+    parser.add_argument("--job-id", type=int)
+    parser.add_argument("--artifact-id", type=int)
+    parser.add_argument("--max-bytes", type=int, default=65536)
+    parser.add_argument("--max-records", type=int, default=100)
     args = parser.parse_args(argv)
+    if args.command == "ci-metadata-canary":
+        value = run_metadata_canary(repository=args.repository, pr_number=args.pr_number,
+                                    head_sha=args.head_sha, check_suite_id=args.check_suite_id,
+                                    check_run_id=args.check_run_id, run_id=args.run_id,
+                                    job_id=args.job_id, artifact_id=args.artifact_id,
+                                    max_bytes=args.max_bytes, max_records=args.max_records)
+        print(json.dumps(value, indent=2, sort_keys=True) if args.json else json.dumps(value, sort_keys=True))
+        return 0
     config = load_config(args.config)
     if args.command == "install": value = {"status": "INSTALLED", "path": str(install(args.config))}
     elif args.command == "start":
