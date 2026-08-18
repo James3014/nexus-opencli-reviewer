@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -30,9 +31,12 @@ from .unattended import ServicePolicy, UnattendedReviewService
 
 SERVICE_LABEL = "com.nexus.opencli-reviewer"
 MAX_LOG_BYTES = 2 * 1024 * 1024
+MAX_CANARY_BYTES = 1024 * 1024
+MAX_EVIDENCE_GAPS = 32
 STOP_READBACK_TIMEOUT_SECONDS = 5.0
 STOP_READBACK_INTERVAL_SECONDS = 0.1
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def _safe_repo(repo: str) -> str:
@@ -61,6 +65,40 @@ def _canary_get(transport: GhCliTransport, endpoint: str, *, max_bytes: int) -> 
     return value
 
 
+def _redacted_gap(exc: BaseException) -> str:
+    """Return only a bounded typed gap; never expose transport exception text."""
+    known = {
+        "CANARY_GET_FAILED",
+        "CANARY_RESPONSE_BYTE_LIMIT",
+        "CANARY_JSON_INVALID",
+    }
+    message = exc.args[0] if len(exc.args) == 1 else None
+    return message if isinstance(message, str) and message in known else "CANARY_METADATA_READ_FAILED"
+
+
+def _pr_identity_gaps(pr: Any, repository: str, pr_number: int, head_sha: str) -> tuple[list[str], str | None]:
+    if not isinstance(pr, dict):
+        return ["CANARY_PR_METADATA_SHAPE_INVALID"], None
+    gaps: list[str] = []
+    if pr.get("number") != pr_number:
+        gaps.append("CANARY_PR_NUMBER_MISMATCH")
+    base = pr.get("base")
+    head = pr.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        return [*gaps, "CANARY_PR_BINDING_FIELDS_MISSING"], None
+    base_repo = (base.get("repo") or {}).get("full_name") if isinstance(base.get("repo"), dict) else None
+    head_repo = (head.get("repo") or {}).get("full_name") if isinstance(head.get("repo"), dict) else None
+    if base_repo != repository or head_repo != repository:
+        gaps.append("CANARY_PR_REPOSITORY_MISMATCH")
+    base_sha = base.get("sha")
+    if not isinstance(base_sha, str) or not SHA_RE.fullmatch(base_sha):
+        gaps.append("CANARY_PR_BASE_SHA_INVALID")
+        base_sha = None
+    if head.get("sha") != head_sha:
+        gaps.append("CANARY_PR_HEAD_MISMATCH")
+    return gaps, base_sha
+
+
 def run_metadata_canary(*, repository: str, pr_number: int, head_sha: str,
                         check_suite_id: int, check_run_id: int, run_id: int,
                         job_id: int, artifact_id: int, max_bytes: int = 65536,
@@ -68,16 +106,33 @@ def run_metadata_canary(*, repository: str, pr_number: int, head_sha: str,
     """Acquire only exact GitHub check/run/job/artifact metadata."""
     if (not isinstance(repository, str) or not REPO_RE.fullmatch(repository)
             or type(pr_number) is not int or pr_number <= 0
-            or not isinstance(head_sha, str) or not head_sha
+            or not isinstance(head_sha, str) or not SHA_RE.fullmatch(head_sha)
             or any(type(value) is not int or value <= 0 for value in
                    (check_suite_id, check_run_id, run_id, job_id, artifact_id))
-            or type(max_bytes) is not int or max_bytes <= 0
+            or type(max_bytes) is not int or not 0 < max_bytes <= MAX_CANARY_BYTES
             or type(max_records) is not int or max_records <= 0 or max_records > 100):
         return {"status": "CANARY_REJECTED", "reason": "CANARY_INPUT_INVALID",
                 "claim_ceiling": "CI_EVIDENCE_ONLY"}
     transport = GhCliTransport()
     gaps: list[str] = []
     metadata: dict[str, Any] = {}
+    base_sha: str | None = None
+    get_pr = getattr(transport, "get_pr", None)
+    if not callable(get_pr):
+        gaps.append("CANARY_PR_BINDING_UNAVAILABLE")
+    else:
+        try:
+            pr_gaps, base_sha = _pr_identity_gaps(get_pr(repository, pr_number), repository, pr_number, head_sha)
+            gaps.extend(pr_gaps)
+        except Exception as exc:
+            gaps.append(_redacted_gap(exc))
+    if gaps:
+        return {"status": "CANARY_REJECTED", "schema": "reviewer.ci_failure_evidence.v1",
+                "repository": repository, "pr_number": pr_number, "head_sha": head_sha,
+                "base_sha": base_sha, "check_suite_id": check_suite_id,
+                "check_run_id": check_run_id, "run_id": run_id, "job_id": job_id,
+                "artifact_id": artifact_id, "evidence_gaps": sorted(set(gaps))[:MAX_EVIDENCE_GAPS],
+                "claim_ceiling": "CI_EVIDENCE_ONLY"}
     try:
         suite = _canary_get(transport, f"repos/{repository}/check-suites/{check_suite_id}", max_bytes=max_bytes)
         check = _canary_get(transport, f"repos/{repository}/check-runs/{check_run_id}", max_bytes=max_bytes)
@@ -88,7 +143,7 @@ def run_metadata_canary(*, repository: str, pr_number: int, head_sha: str,
         metadata = {"check_suite": suite, "check_run": check, "workflow_run": run,
                     "jobs": jobs_page, "artifacts": artifacts_page, "artifact": artifact}
     except Exception as exc:
-        gaps.append(str(exc))
+        gaps.append(_redacted_gap(exc))
     if metadata:
         suite, check, run = metadata["check_suite"], metadata["check_run"], metadata["workflow_run"]
         jobs_page, artifacts_page, artifact = metadata["jobs"], metadata["artifacts"], metadata["artifact"]
@@ -133,9 +188,10 @@ def run_metadata_canary(*, repository: str, pr_number: int, head_sha: str,
                     gaps.append("CANARY_ARTIFACT_NAME_HEAD_MISMATCH")
     return {"status": "CANARY_REJECTED" if gaps else "CANARY_METADATA_BOUND",
             "schema": "reviewer.ci_failure_evidence.v1", "repository": repository,
-            "pr_number": pr_number, "head_sha": head_sha, "check_suite_id": check_suite_id,
+            "pr_number": pr_number, "head_sha": head_sha, "base_sha": base_sha,
+            "check_suite_id": check_suite_id,
             "check_run_id": check_run_id, "run_id": run_id, "job_id": job_id,
-            "artifact_id": artifact_id, "evidence_gaps": sorted(set(gaps)),
+            "artifact_id": artifact_id, "evidence_gaps": sorted(set(gaps))[:MAX_EVIDENCE_GAPS],
             "claim_ceiling": "CI_EVIDENCE_ONLY"}
 
 
