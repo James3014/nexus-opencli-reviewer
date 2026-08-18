@@ -1,11 +1,12 @@
-import json
 import base64
-import pytest
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from reviewer.config import ReviewerConfig, save_config
+import pytest
+
 from reviewer import service_cli
+from reviewer.config import ReviewerConfig, save_config
 from reviewer.opencli import TransportResult
 from reviewer.preflight import PreflightResult
 
@@ -72,8 +73,11 @@ def test_metadata_canary_is_get_only_and_rejects_artifact_head_mismatch(monkeypa
             raise AssertionError(endpoint)
 
         def get_pr(self, repo, number):
-            return {"number": number, "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
-                    "head": {"sha": head, "repo": {"full_name": repo}}}
+            return {
+                "number": number,
+                "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
+                "head": {"sha": head, "repo": {"full_name": repo}},
+            }
 
         def get_job_log(self, *args):
             raise AssertionError("job logs are forbidden")
@@ -94,8 +98,11 @@ def test_metadata_canary_rejects_pagination_limit(monkeypatch):
     head = "a" * 40
     class FakeGh:
         def get_pr(self, repo, number):
-            return {"number": number, "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
-                    "head": {"sha": head, "repo": {"full_name": repo}}}
+            return {
+                "number": number,
+                "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
+                "head": {"sha": head, "repo": {"full_name": repo}},
+            }
 
         def _get(self, endpoint):
             if endpoint.endswith("check-suites/11"):
@@ -136,7 +143,11 @@ def test_metadata_canary_rejects_huge_byte_budget_without_transport(monkeypatch)
 
 @pytest.mark.parametrize("head", ["A" * 40, "a" * 39, "a" * 41, "not-a-sha"])
 def test_metadata_canary_rejects_malformed_head_sha(monkeypatch, head):
-    monkeypatch.setattr(service_cli, "GhCliTransport", lambda: (_ for _ in ()).throw(AssertionError("transport forbidden")))
+    monkeypatch.setattr(
+        service_cli,
+        "GhCliTransport",
+        lambda: (_ for _ in ()).throw(AssertionError("transport forbidden")),
+    )
     value = service_cli.run_metadata_canary(
         repository="o/r", pr_number=1, head_sha=head,
         check_suite_id=1, check_run_id=2, run_id=3, job_id=4, artifact_id=5)
@@ -148,15 +159,20 @@ def test_metadata_canary_rejects_pr_number_and_head_mismatch(monkeypatch):
 
     class FakeGh:
         def get_pr(self, repo, number):
-            return {"number": number + 1, "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
-                    "head": {"sha": "c" * 40, "repo": {"full_name": repo}}}
+            return {
+                "number": number + 1,
+                "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
+                "head": {"sha": "c" * 40, "repo": {"full_name": repo}},
+            }
 
     monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
     value = service_cli.run_metadata_canary(
         repository="o/r", pr_number=1, head_sha=head,
         check_suite_id=1, check_run_id=2, run_id=3, job_id=4, artifact_id=5)
     assert value["status"] == "CANARY_REJECTED"
-    assert {"CANARY_PR_NUMBER_MISMATCH", "CANARY_PR_HEAD_MISMATCH"} <= set(value["evidence_gaps"])
+    assert {"CANARY_PR_NUMBER_MISMATCH", "CANARY_PR_HEAD_MISMATCH"} <= set(
+        value["evidence_gaps"]
+    )
 
 
 def test_metadata_canary_rejects_foreign_pr_repository(monkeypatch):
@@ -164,8 +180,17 @@ def test_metadata_canary_rejects_foreign_pr_repository(monkeypatch):
 
     class FakeGh:
         def get_pr(self, repo, number):
-            return {"number": number, "base": {"sha": "b" * 40, "repo": {"full_name": "foreign/repo"}},
-                    "head": {"sha": head, "repo": {"full_name": "foreign/repo"}}}
+            return {
+                "number": number,
+                "base": {
+                    "sha": "b" * 40,
+                    "repo": {"full_name": "foreign/repo"},
+                },
+                "head": {
+                    "sha": head,
+                    "repo": {"full_name": "foreign/repo"},
+                },
+            }
 
     monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
     value = service_cli.run_metadata_canary(

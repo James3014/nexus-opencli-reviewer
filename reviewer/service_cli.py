@@ -8,25 +8,25 @@ import html
 import json
 import os
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .attempt import COMPLETED, DISPATCHING, discover_unfinished, finish_attempt
 from .config import DEFAULT_CONFIG_PATH, ReviewerConfig, load_config, save_config
-from .github import GhCliTransport, REPO_RE
+from .github import REPO_RE, GhCliTransport
 from .opencli import OpenCLITransport
 from .preflight import preflight_opencli
 from .publication import publish_review
 from .receipt import persist_receipt
 from .runtime import RuntimeSupervisor
 from .scan import review_ready, scan
-from .semantic import parse_response, SemanticParseError
+from .semantic import SemanticParseError, parse_response
 from .unattended import ServicePolicy, UnattendedReviewService
 
 SERVICE_LABEL = "com.nexus.opencli-reviewer"
@@ -73,10 +73,16 @@ def _redacted_gap(exc: BaseException) -> str:
         "CANARY_JSON_INVALID",
     }
     message = exc.args[0] if len(exc.args) == 1 else None
-    return message if isinstance(message, str) and message in known else "CANARY_METADATA_READ_FAILED"
+    return (
+        message
+        if isinstance(message, str) and message in known
+        else "CANARY_METADATA_READ_FAILED"
+    )
 
 
-def _pr_identity_gaps(pr: Any, repository: str, pr_number: int, head_sha: str) -> tuple[list[str], str | None]:
+def _pr_identity_gaps(
+    pr: Any, repository: str, pr_number: int, head_sha: str
+) -> tuple[list[str], str | None]:
     if not isinstance(pr, dict):
         return ["CANARY_PR_METADATA_SHAPE_INVALID"], None
     gaps: list[str] = []
@@ -86,8 +92,16 @@ def _pr_identity_gaps(pr: Any, repository: str, pr_number: int, head_sha: str) -
     head = pr.get("head")
     if not isinstance(base, dict) or not isinstance(head, dict):
         return [*gaps, "CANARY_PR_BINDING_FIELDS_MISSING"], None
-    base_repo = (base.get("repo") or {}).get("full_name") if isinstance(base.get("repo"), dict) else None
-    head_repo = (head.get("repo") or {}).get("full_name") if isinstance(head.get("repo"), dict) else None
+    base_repo = (
+        (base.get("repo") or {}).get("full_name")
+        if isinstance(base.get("repo"), dict)
+        else None
+    )
+    head_repo = (
+        (head.get("repo") or {}).get("full_name")
+        if isinstance(head.get("repo"), dict)
+        else None
+    )
     if base_repo != repository or head_repo != repository:
         gaps.append("CANARY_PR_REPOSITORY_MISMATCH")
     base_sha = base.get("sha")
@@ -122,17 +136,28 @@ def run_metadata_canary(*, repository: str, pr_number: int, head_sha: str,
         gaps.append("CANARY_PR_BINDING_UNAVAILABLE")
     else:
         try:
-            pr_gaps, base_sha = _pr_identity_gaps(get_pr(repository, pr_number), repository, pr_number, head_sha)
+            pr_gaps, base_sha = _pr_identity_gaps(
+                get_pr(repository, pr_number), repository, pr_number, head_sha
+            )
             gaps.extend(pr_gaps)
         except Exception as exc:
             gaps.append(_redacted_gap(exc))
     if gaps:
-        return {"status": "CANARY_REJECTED", "schema": "reviewer.ci_failure_evidence.v1",
-                "repository": repository, "pr_number": pr_number, "head_sha": head_sha,
-                "base_sha": base_sha, "check_suite_id": check_suite_id,
-                "check_run_id": check_run_id, "run_id": run_id, "job_id": job_id,
-                "artifact_id": artifact_id, "evidence_gaps": sorted(set(gaps))[:MAX_EVIDENCE_GAPS],
-                "claim_ceiling": "CI_EVIDENCE_ONLY"}
+        return {
+            "status": "CANARY_REJECTED",
+            "schema": "reviewer.ci_failure_evidence.v1",
+            "repository": repository,
+            "pr_number": pr_number,
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "check_suite_id": check_suite_id,
+            "check_run_id": check_run_id,
+            "run_id": run_id,
+            "job_id": job_id,
+            "artifact_id": artifact_id,
+            "evidence_gaps": sorted(set(gaps))[:MAX_EVIDENCE_GAPS],
+            "claim_ceiling": "CI_EVIDENCE_ONLY",
+        }
     try:
         suite = _canary_get(transport, f"repos/{repository}/check-suites/{check_suite_id}", max_bytes=max_bytes)
         check = _canary_get(transport, f"repos/{repository}/check-runs/{check_run_id}", max_bytes=max_bytes)
