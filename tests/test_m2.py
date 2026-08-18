@@ -89,7 +89,30 @@ def test_collector_binds_one_exact_job_and_bounded_log():
         def get_job_log(self,r,i): return b'x' * (1024 * 1024 + 1)
     _,_,items,_=scan('o/r',WithJob())
     check=items[0].snapshot.checks[0]
-    assert check.job_identity == '77' and check.log_sha256 and check.log_truncated
+    import hashlib
+    assert check.job_identity == '77'
+    assert check.log_sha256 == hashlib.sha256(b'x' * (1024 * 1024)).hexdigest()
+    assert check.log_truncated is True
+
+def test_collector_binds_exact_artifact_hash_without_extracting():
+    import hashlib, io, zipfile
+    archive=io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('evidence/result.json', '{"ok":true}')
+    blob=archive.getvalue()
+
+    class WithArtifact(Fake):
+        def list_checks(self,r,s): return [{'name':'CI','conclusion':'failure','id':7,'check_suite':{'id':11},'head_sha':'h'}]
+        def list_check_annotations(self,r,i): return []
+        def list_workflow_runs_for_suite(self,r,i): return [{'id':9,'head_sha':'h'}]
+        def get_workflow_run(self,r,i): return {'id':9,'name':'CI','head_sha':'h'}
+        def list_workflow_artifacts(self,r,i): return [{'id':42,'name':'evidence'}]
+        def get_artifact_archive(self,r,i): return blob
+
+    _,_,items,_=scan('o/r',WithArtifact())
+    check=items[0].snapshot.checks[0]
+    assert check.artifact_sha256 == hashlib.sha256(blob).hexdigest()
+    assert check.artifact_truncated is False
 
 def test_collector_rejects_foreign_or_ambiguous_jobs():
     class BadJobs(Fake):
@@ -110,7 +133,33 @@ def test_bounded_evidence_rejects_hostile_archive_without_extracting():
     try: _safe_archive_evidence(out.getvalue()); assert False
     except ValueError as exc: assert 'unsafe' in str(exc)
     digest,size,truncated=_bounded_evidence(b'a' * (1024 * 1024 + 3))
-    assert len(digest) == 64 and size == 1024 * 1024 and truncated
+    import hashlib
+    assert digest == hashlib.sha256(b'a' * (1024 * 1024)).hexdigest()
+    assert len(digest) == 64 and size == 1024 * 1024 and truncated is True
+
+def test_safe_archive_evidence_rejects_symlinks_and_member_bound():
+    import io, zipfile
+    symlink=io.BytesIO()
+    with zipfile.ZipFile(symlink, 'w') as z:
+        info=zipfile.ZipInfo('link')
+        info.create_system=3
+        info.external_attr=(0o120777 << 16)
+        z.writestr(info, 'target')
+    try:
+        _safe_archive_evidence(symlink.getvalue())
+        assert False
+    except ValueError as exc:
+        assert 'symlink' in str(exc)
+
+    oversized=io.BytesIO()
+    with zipfile.ZipFile(oversized, 'w') as z:
+        for index in range(257):
+            z.writestr(f'member-{index}', 'x')
+    try:
+        _safe_archive_evidence(oversized.getvalue())
+        assert False
+    except ValueError as exc:
+        assert 'member bound' in str(exc)
 
 def test_collector_partial_enrichment_is_not_review_ready():
     class Broken(Fake):

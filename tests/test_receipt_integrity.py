@@ -104,6 +104,81 @@ def test_ci_failure_evidence_is_content_addressed_and_exact_identity_bound():
     assert manifest["content_sha256"] == evidence["content_sha256"]
 
 
+def test_ci_capsule_preserves_bounded_job_log_and_artifact_evidence():
+    check = {
+        "name": "Exact-base impact gate", "status": "failure",
+        "check_run_id": 42, "run_id": 9, "external_id": "artifact-9",
+        "head_sha": "head", "job_identity": "job-77",
+        "log_sha256": "a" * 64, "log_truncated": True,
+        "artifact_sha256": "b" * 64, "artifact_truncated": False,
+        "run_attempt": 3,
+    }
+    evidence = build_ci_failure_evidence(
+        repository="o/r", pr_number=358, base_sha="base", head_sha="head",
+        current_main_sha="main", checks=[check], canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=42, expected_run_id=9,
+        expected_artifact_identity="artifact-9",
+    )
+    normalized = evidence["checks"][0]
+    for field in ("job_identity", "log_sha256", "log_truncated",
+                  "artifact_sha256", "artifact_truncated", "run_attempt"):
+        assert normalized[field] == check[field]
+    assert ci_failure_evidence_manifest(evidence)["content_sha256"] == evidence["content_sha256"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("job_identity", ""),
+    ("log_sha256", "not-a-sha"),
+    ("log_truncated", "true"),
+    ("artifact_sha256", "not-a-sha"),
+    ("artifact_truncated", 0),
+    ("run_attempt", 0),
+    ("run_attempt", True),
+])
+def test_ci_capsule_rejects_malformed_bounded_evidence_fields(field, value):
+    check = {
+        "name": "Exact-base impact gate", "status": "failure",
+        "check_run_id": 42, "run_id": 9, "external_id": "artifact-9",
+        "head_sha": "head", "job_identity": "job-77",
+        "log_sha256": "a" * 64, "log_truncated": True,
+        "artifact_sha256": "b" * 64, "artifact_truncated": False,
+        "run_attempt": 3,
+    }
+    check[field] = value
+    evidence = build_ci_failure_evidence(
+        repository="o/r", pr_number=358, base_sha="base", head_sha="head",
+        current_main_sha="main", checks=[check], canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=42, expected_run_id=9,
+        expected_artifact_identity="artifact-9",
+    )
+    assert evidence["state"] == "UNKNOWN"
+    assert "check identity type or shape invalid" in evidence["evidence_gaps"]
+
+
+def test_ci_capsule_rejects_hash_valid_bounded_evidence_tamper():
+    check = {
+        "name": "Exact-base impact gate", "status": "failure",
+        "check_run_id": 42, "run_id": 9, "external_id": "artifact-9",
+        "head_sha": "head", "job_identity": "job-77",
+        "log_sha256": "a" * 64, "log_truncated": True,
+        "artifact_sha256": "b" * 64, "artifact_truncated": False,
+        "run_attempt": 3,
+    }
+    evidence = build_ci_failure_evidence(
+        repository="o/r", pr_number=358, base_sha="base", head_sha="head",
+        current_main_sha="main", checks=[check], canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=42, expected_run_id=9,
+        expected_artifact_identity="artifact-9",
+    )
+    tampered = copy.deepcopy(evidence)
+    tampered["checks"][0]["log_sha256"] = "c" * 64
+    unsigned = {key: value for key, value in tampered.items() if key != "content_sha256"}
+    tampered["content_sha256"] = __import__("hashlib").sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with pytest.raises(ValueError, match="CI_FAILURE_EVIDENCE_FINGERPRINT_MISMATCH"):
+        ci_failure_evidence_manifest(tampered)
+
+
 def test_ci_failure_manifest_rejects_capsule_or_manifest_hash_tamper():
     evidence = build_ci_failure_evidence(
         repository="o/r", pr_number=1, base_sha="base", head_sha="head",

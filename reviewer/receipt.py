@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,json
+import hashlib,json,re
 import os,tempfile
 from datetime import datetime,timezone
 from pathlib import Path
@@ -12,7 +12,9 @@ def _valid_check_shape(check):
     allowed_keys = {"name", "status", "expected_failure", "check_run_id", "run_id",
                     "external_id", "artifact_identity", "details_url", "html_url",
                     "node_id", "workflow_name", "head_sha", "check_suite_id",
-                    "started_at", "completed_at", "annotation_count", "app_slug"}
+                    "started_at", "completed_at", "annotation_count", "app_slug",
+                    "job_identity", "log_sha256", "log_truncated", "artifact_sha256",
+                    "artifact_truncated", "run_attempt"}
     if set(check) - allowed_keys:
         return False
     if not isinstance(check.get("name"), str) or not isinstance(check.get("status"), str):
@@ -44,6 +46,19 @@ def _valid_check_shape(check):
     if "annotation_count" in check and check["annotation_count"] is not None:
         if type(check["annotation_count"]) is not int or check["annotation_count"] < 0:
             return False
+    if "job_identity" in check and check["job_identity"] is not None:
+        if type(check["job_identity"]) is not str or not check["job_identity"]:
+            return False
+    for key in ("log_sha256", "artifact_sha256"):
+        if key in check and check[key] is not None:
+            if type(check[key]) is not str or not re.fullmatch(r"[0-9a-f]{64}", check[key]):
+                return False
+    for key in ("log_truncated", "artifact_truncated"):
+        if key in check and type(check[key]) is not bool:
+            return False
+    if "run_attempt" in check and check["run_attempt"] is not None:
+        if type(check["run_attempt"]) is not int or check["run_attempt"] <= 0:
+            return False
     return True
 
 
@@ -52,6 +67,14 @@ def _valid_review_identity(identity):
             and type(identity[0]) is str and bool(identity[0])
             and type(identity[1]) is int and identity[1] > 0
             and all(type(value) is str and bool(value) for value in identity[2:]))
+
+
+def _bounded_evidence_fingerprint(checks):
+    fields = ("job_identity", "log_sha256", "log_truncated",
+              "artifact_sha256", "artifact_truncated", "run_attempt")
+    if not any(any(field in check for field in fields) for check in checks):
+        return None
+    return [{field: check.get(field) for field in fields} for check in checks]
 
 
 def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
@@ -93,7 +116,8 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
             "name", "status", "check_run_id", "run_id", "external_id",
             "details_url", "html_url", "node_id", "workflow_name", "head_sha",
             "check_suite_id", "started_at", "completed_at", "artifact_identity",
-            "annotation_count", "app_slug",
+            "annotation_count", "app_slug", "job_identity", "log_sha256",
+            "log_truncated", "artifact_sha256", "artifact_truncated", "run_attempt",
         ) if check.get(key) is not None}
         item["expected_failure"] = check.get("expected_failure", False)
         normalized.append(item)
@@ -144,6 +168,9 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
         "artifact_identity": [item.get("external_id") or item.get("artifact_identity") for item in normalized],
         "canonical_disposition": canonical_disposition,
     }
+    bounded_evidence = _bounded_evidence_fingerprint(normalized)
+    if bounded_evidence is not None:
+        fingerprint_payload["bounded_evidence"] = bounded_evidence
     capsule["failure_fingerprint"] = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     canonical = json.dumps(capsule, sort_keys=True, separators=(",", ":"))
@@ -225,6 +252,9 @@ def ci_failure_evidence_manifest(evidence):
         "artifact_identity": [check.get("external_id") or check.get("artifact_identity") for check in checks],
         "canonical_disposition": disposition,
     }
+    bounded_evidence = _bounded_evidence_fingerprint(checks)
+    if bounded_evidence is not None:
+        fp_payload["bounded_evidence"] = bounded_evidence
     expected_fingerprint = hashlib.sha256(
         json.dumps(fp_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if evidence.get("failure_fingerprint") != expected_fingerprint:
