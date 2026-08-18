@@ -8,6 +8,7 @@ import html
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -303,6 +304,8 @@ def launch_agent_path() -> Path:
 def _plist_xml(config_path: Path) -> str:
     args = [sys.executable, "-m", "reviewer.service_cli", "daemon", "--config", str(config_path)]
     arg_xml = "".join(f"<string>{html.escape(value)}</string>" for value in args)
+    path_entries = _launch_agent_path_entries()
+    path_xml = html.escape(":".join(path_entries))
     return f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -312,8 +315,19 @@ def _plist_xml(config_path: Path) -> str:
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 <key>ProcessType</key><string>Background</string><key>ThrottleInterval</key><integer>30</integer>
 <key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string>
-<key>EnvironmentVariables</key><dict><key>PYTHONDONTWRITEBYTECODE</key><string>1</string><key>PYTHONPATH</key><string>{html.escape(str(REPO_ROOT))}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/Users/jameschen/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>EnvironmentVariables</key><dict><key>PYTHONDONTWRITEBYTECODE</key><string>1</string><key>PYTHONPATH</key><string>{html.escape(str(REPO_ROOT))}</string><key>PATH</key><string>{path_xml}</string></dict>
 </dict></plist>\n'''
+
+
+def _launch_agent_path_entries(executable: str = "opencli") -> list[str]:
+    """Build a portable, deterministic PATH for the user LaunchAgent."""
+    entries: list[str] = []
+    resolved = shutil.which(executable)
+    if resolved:
+        entries.append(str(Path(resolved).resolve().parent))
+    entries.extend(os.environ.get("PATH", "").split(os.pathsep))
+    entries.extend(("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"))
+    return list(dict.fromkeys(entry for entry in entries if entry))
 
 
 def install(config_path: str | Path) -> Path:
