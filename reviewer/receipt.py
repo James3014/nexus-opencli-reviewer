@@ -107,9 +107,12 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
             gaps.append("foreign check identity")
         if item.get("run_id") != expected_run_id:
             gaps.append("foreign check run identity")
-        if (item.get("external_id") != expected_artifact_identity
-                and item.get("artifact_identity") != expected_artifact_identity):
-            gaps.append("foreign check artifact identity")
+        external = item.get("external_id")
+        artifact = item.get("artifact_identity")
+        if ((external is not None and external != expected_artifact_identity)
+                or (artifact is not None and artifact != expected_artifact_identity)):
+            gaps.append("conflicting artifact identities" if external is not None and artifact is not None
+                        else "foreign check artifact identity")
     normalized.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
     if not collection_complete:
         state = "UNKNOWN"
@@ -184,11 +187,13 @@ def ci_failure_evidence_manifest(evidence):
     for check in checks:
         if not _valid_check_shape(check):
             raise ValueError("CI_FAILURE_EVIDENCE_CHECK_SHAPE_INVALID")
+        external = check.get("external_id")
+        artifact = check.get("artifact_identity")
         if (check.get("head_sha") != identity[2]
                 or check.get("check_run_id") != expected_check
                 or check.get("run_id") != expected_run
-                or (check.get("external_id") != expected_artifact
-                    and check.get("artifact_identity") != expected_artifact)):
+                or (external is not None and external != expected_artifact)
+                or (artifact is not None and artifact != expected_artifact)):
             raise ValueError("CI_FAILURE_EVIDENCE_IDENTITY_MISMATCH")
     allowed = {"NEW_REGRESSION", "EXACT_BASELINE_DEBT", "CI_BOOTSTRAP_DEFECT",
                "IMPACT_UNKNOWN", "NOT_AVAILABLE"}

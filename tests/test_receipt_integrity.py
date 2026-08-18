@@ -245,12 +245,19 @@ def test_ci_artifact_identity_only_is_valid_and_conflicts_are_unknown():
         current_main_sha="main", checks=[base], canonical_disposition="NEW_REGRESSION",
         expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
     assert valid["state"] == "TRIGGERED"
+    matching = dict(base, external_id="artifact")
+    matching_evidence = build_ci_failure_evidence(
+        repository="o/r", pr_number=1, base_sha="base", head_sha="head",
+        current_main_sha="main", checks=[matching], canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
+    assert matching_evidence["state"] == "TRIGGERED"
     provider_and_artifact = dict(base, external_id="provider-check")
     separated = build_ci_failure_evidence(
         repository="o/r", pr_number=1, base_sha="base", head_sha="head",
         current_main_sha="main", checks=[provider_and_artifact], canonical_disposition="NEW_REGRESSION",
         expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
-    assert separated["state"] == "TRIGGERED"
+    assert separated["state"] == "UNKNOWN"
+    assert "conflicting artifact identities" in separated["evidence_gaps"]
     missing = dict(base); missing.pop("artifact_identity")
     missing_evidence = build_ci_failure_evidence(
         repository="o/r", pr_number=1, base_sha="base", head_sha="head",
@@ -262,7 +269,10 @@ def test_ci_artifact_identity_only_is_valid_and_conflicts_are_unknown():
         repository="o/r", pr_number=1, base_sha="base", head_sha="head",
         current_main_sha="main", checks=[conflict], canonical_disposition="NEW_REGRESSION",
         expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
-    assert conflict_evidence["state"] == "TRIGGERED"
+    assert conflict_evidence["state"] == "UNKNOWN"
+    assert "conflicting artifact identities" in conflict_evidence["evidence_gaps"]
+    with pytest.raises(ValueError, match="CI_FAILURE_EVIDENCE_IDENTITY_MISMATCH"):
+        ci_failure_evidence_manifest(conflict_evidence)
 
 
 @pytest.mark.parametrize("field,value", [
