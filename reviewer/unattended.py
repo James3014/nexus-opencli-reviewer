@@ -148,6 +148,33 @@ class UnattendedReviewService:
     def _eligible(self, record: Mapping[str, Any]) -> bool:
         return str(record.get("disposition", "")).upper() == "REVIEW_READY"
 
+    @staticmethod
+    def _semantic_status(result: Any) -> str:
+        if not isinstance(result, Mapping):
+            return ""
+        semantic = result.get("semantic_result")
+        if not isinstance(semantic, Mapping):
+            return ""
+        return str(semantic.get("status", "")).upper()
+
+    def _finish_semantic_only(self, state: dict[str, Any], item: dict[str, Any], identity: tuple[Any, ...]) -> dict[str, Any]:
+        item["state"] = "semantic_completed"
+        item["publication_result"] = {"status": "NOT_ELIGIBLE", "reason": "SEMANTIC_BLOCKED"}
+        item["retry_safe"] = False
+        item["updated_at"] = _now()
+        state["status"] = "COMPLETE"
+        self.store.save(state)
+        return {"status": "COMPLETE", "identity": list(identity), "publication": "NOT_ELIGIBLE"}
+
+    def _reconcile_semantic_only(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        for _, item in sorted(state.get("queue", {}).items()):
+            if item.get("state") not in {"queued", "retry_wait", "publication_pending"}:
+                continue
+            if self._semantic_status(item.get("semantic_result")) != "BLOCKED":
+                continue
+            return self._finish_semantic_only(state, item, tuple(item["review_identity"]))
+        return None
+
     def _discover(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         records = [self._record(item) for item in self.discover()]
         now = _now()
@@ -272,6 +299,9 @@ class UnattendedReviewService:
                 self.store.save(state)
                 return {"status": "RECONCILIATION_REQUIRED", "identity": remaining[0].get("review_identity")}
             self.store.save(state)
+        semantic_only = self._reconcile_semantic_only(state)
+        if semantic_only is not None:
+            return semantic_only
         selected = self._next(state)
         if selected is None:
             state["status"] = "IDLE"
@@ -279,6 +309,8 @@ class UnattendedReviewService:
             return {"status": "IDLE", "queued": len(state.get("queue", {}))}
         key, item = selected
         identity = tuple(item["review_identity"])
+        if self._semantic_status(item.get("semantic_result")) == "BLOCKED":
+            return self._finish_semantic_only(state, item, identity)
         if item.get("state") == "publication_pending":
             try:
                 result = self.publish(identity, item.get("semantic_result"))
@@ -320,7 +352,10 @@ class UnattendedReviewService:
                 item["state"] = "semantic_failed"; state["status"] = "SEMANTIC_FAILED"
             item["last_error"] = type(exc).__name__; item["updated_at"] = _now(); self.store.save(state)
             return {"status": state["status"], "identity": list(identity), "error": type(exc).__name__}
-        item["semantic_result"] = result; item["state"] = "publication_pending"; item["updated_at"] = _now()
+        item["semantic_result"] = result
+        if self._semantic_status(result) == "BLOCKED":
+            return self._finish_semantic_only(state, item, identity)
+        item["state"] = "publication_pending"; item["updated_at"] = _now()
         self.store.save(state)
         try:
             published = self.publish(identity, result)

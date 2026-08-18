@@ -72,6 +72,69 @@ def test_draft_to_ready_transition_is_queued(tmp_path):
     assert calls == ["review", "publish"]
 
 
+def test_blocked_semantic_result_completes_without_publication(tmp_path):
+    calls = []
+    blocked = {
+        "schema": "reviewer.pre_review.v1",
+        "semantic_result": {"schema": "reviewer.semantic_response.v1", "status": "BLOCKED"},
+    }
+    service = UnattendedReviewService(
+        repository="repo", discover=lambda: [item()],
+        review=lambda identity: calls.append("review") or blocked,
+        publish=lambda identity, result: calls.append("publish") or True,
+        root=tmp_path / "state", policy=ServicePolicy(bootstrap_canary=True),
+    )
+
+    result = service.run_once()
+    assert result["status"] == "COMPLETE"
+    assert result["publication"] == "NOT_ELIGIBLE"
+    assert calls == ["review"]
+    saved = next(iter(service.store.load()["queue"].values()))
+    assert saved["state"] == "semantic_completed"
+    assert saved["publication_result"] == {"status": "NOT_ELIGIBLE", "reason": "SEMANTIC_BLOCKED"}
+    assert saved["retry_safe"] is False
+    assert service.run_once()["status"] == "IDLE"
+    assert calls == ["review"]
+
+
+def test_existing_blocked_semantic_retry_state_is_terminalized_without_replay(tmp_path):
+    current = [item()]
+    calls = []
+    service = UnattendedReviewService(
+        repository="repo", discover=lambda: current,
+        review=lambda identity: calls.append("review"),
+        publish=lambda identity, result: calls.append("publish"),
+        root=tmp_path / "state",
+    )
+    record = service._record(current[0])
+    blocked = {
+        "schema": "reviewer.pre_review.v1",
+        "semantic_result": {"schema": "reviewer.semantic_response.v1", "status": "BLOCKED"},
+    }
+    service.store.save({
+        "bootstrapped": True,
+        "baseline": {record["identity_key"]: record},
+        "queue": {
+            record["identity_key"]: {
+                "review_identity": list(current[0]["review_identity"]),
+                "state": "retry_wait",
+                "semantic_result": blocked,
+                "attempts": 1,
+                "next_action_at": 0,
+            }
+        },
+        "attempts": {},
+    })
+
+    result = service.run_once()
+    assert result["status"] == "COMPLETE"
+    assert result["publication"] == "NOT_ELIGIBLE"
+    assert calls == []
+    saved = service.store.load()["queue"][record["identity_key"]]
+    assert saved["state"] == "semantic_completed"
+    assert saved["retry_safe"] is False
+
+
 def test_uncertain_review_is_durable_and_never_replayed(tmp_path):
     calls = []
 
@@ -245,6 +308,57 @@ def test_stale_publication_pending_is_obsoleted_without_publish(tmp_path):
     assert service.run_once()["status"] == "IDLE"
     assert service.store.load()["queue"]["old"]["state"] == "obsolete_closed"
     assert calls == []
+
+
+def test_blocked_retry_is_reconciled_before_other_actionable_work(tmp_path):
+    current = [item("blocked", number=1), item("other", number=2)]
+    calls = []
+    service = UnattendedReviewService(
+        repository="repo", discover=lambda: current,
+        review=lambda i: calls.append(("review", i)) or {"receipt": "unexpected"},
+        publish=lambda i, r: calls.append(("publish", i)) or True,
+        root=tmp_path,
+    )
+    blocked_record = service._record(current[0])
+    other_record = service._record(current[1])
+    blocked_receipt = {
+        "semantic_result": {
+            "schema": "reviewer.semantic_response.v1",
+            "status": "BLOCKED",
+            "summary": "blocked",
+            "findings": [],
+            "evidence_gaps": [],
+        }
+    }
+    service.store.save({
+        "bootstrapped": True,
+        "baseline": {
+            blocked_record["identity_key"]: blocked_record,
+            other_record["identity_key"]: other_record,
+        },
+        "queue": {
+            "z-blocked": {
+                "review_identity": current[0]["review_identity"],
+                "state": "retry_wait",
+                "semantic_result": blocked_receipt,
+                "next_action_at": 0,
+            },
+            "a-other": {
+                "review_identity": current[1]["review_identity"],
+                "state": "queued",
+                "next_action_at": 0,
+            },
+        },
+        "attempts": {},
+    })
+
+    result = service.run_once()
+    assert result == {"status": "COMPLETE", "identity": current[0]["review_identity"], "publication": "NOT_ELIGIBLE"}
+    assert calls == []
+    saved = service.store.load()["queue"]
+    assert saved["z-blocked"]["state"] == "semantic_completed"
+    assert saved["z-blocked"]["publication_result"] == {"status": "NOT_ELIGIBLE", "reason": "SEMANTIC_BLOCKED"}
+    assert saved["a-other"]["state"] == "queued"
 
 
 def test_exact_current_publication_pending_still_publishes(tmp_path):
