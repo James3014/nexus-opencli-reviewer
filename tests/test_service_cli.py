@@ -94,6 +94,99 @@ def test_metadata_canary_is_get_only_and_rejects_artifact_head_mismatch(monkeypa
     assert len(calls) == 6 and all("logs" not in call and not call.endswith("/zip") for call in calls)
 
 
+def test_metadata_canary_valid_binds_six_endpoints_without_side_effects(monkeypatch):
+    repository = "James3014/Nexus-new"
+    pr_number = 380
+    head = "f" * 40
+    base = "b" * 40
+    artifact_name = "exact-base-impact-" + head
+    calls = []
+    forbidden = {"logs": 0, "archives": 0, "providers": 0, "config": 0, "runtime": 0}
+
+    class FakeGh:
+        def _get(self, endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith("check-suites/11"):
+                return {"id": 11, "head_sha": head}
+            if endpoint.endswith("check-runs/12"):
+                return {"id": 12, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("actions/runs/13"):
+                return {"id": 13, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("jobs?per_page=100&page=1"):
+                return {"jobs": [{"id": 14, "head_sha": head, "run_id": 13}]}
+            if endpoint.endswith("artifacts?per_page=100&page=1"):
+                return {"artifacts": [{"id": 15, "name": artifact_name}]}
+            if endpoint.endswith("actions/artifacts/15"):
+                return {
+                    "id": 15,
+                    "name": artifact_name,
+                    "expired": False,
+                    "workflow_run": {"id": 13, "head_sha": head},
+                }
+            raise AssertionError(endpoint)
+
+        def get_pr(self, repo, number):
+            return {
+                "number": number,
+                "base": {"sha": base, "repo": {"full_name": repo}},
+                "head": {"sha": head, "repo": {"full_name": repo}},
+            }
+
+        def get_job_log(self, *args):
+            forbidden["logs"] += 1
+            raise AssertionError("job logs are forbidden")
+
+        def get_artifact_archive(self, *args):
+            forbidden["archives"] += 1
+            raise AssertionError("artifact archives are forbidden")
+
+        def invoke_provider(self, *args):
+            forbidden["providers"] += 1
+            raise AssertionError("provider calls are forbidden")
+
+        def load_config(self, *args):
+            forbidden["config"] += 1
+            raise AssertionError("config calls are forbidden")
+
+        def start_runtime(self, *args):
+            forbidden["runtime"] += 1
+            raise AssertionError("runtime calls are forbidden")
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository=repository, pr_number=pr_number, head_sha=head,
+        check_suite_id=11, check_run_id=12, run_id=13, job_id=14,
+        artifact_id=15, max_bytes=65536, max_records=100)
+
+    assert value == {
+        "status": "CANARY_METADATA_BOUND",
+        "schema": "reviewer.ci_failure_evidence.v1",
+        "repository": repository,
+        "pr_number": pr_number,
+        "head_sha": head,
+        "base_sha": base,
+        "check_suite_id": 11,
+        "check_run_id": 12,
+        "run_id": 13,
+        "job_id": 14,
+        "artifact_id": 15,
+        "evidence_gaps": [],
+        "claim_ceiling": "CI_EVIDENCE_ONLY",
+    }
+    assert calls == [
+        f"repos/{repository}/check-suites/11",
+        f"repos/{repository}/check-runs/12",
+        f"repos/{repository}/actions/runs/13",
+        f"repos/{repository}/actions/runs/13/jobs?per_page=100&page=1",
+        f"repos/{repository}/actions/runs/13/artifacts?per_page=100&page=1",
+        f"repos/{repository}/actions/artifacts/15",
+    ]
+    assert len(calls) == 6
+    assert forbidden == {
+        "logs": 0, "archives": 0, "providers": 0, "config": 0, "runtime": 0,
+    }
+
+
 def test_metadata_canary_rejects_pagination_limit(monkeypatch):
     head = "a" * 40
     class FakeGh:
