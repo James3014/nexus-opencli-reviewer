@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, re, subprocess
+import json, re, selectors, subprocess, time
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -99,14 +99,47 @@ class GhCliTransport:
             rows=value['jobs']; out.extend(rows)
             if len(rows)<100:return out
         raise GitHubError('workflow-jobs pagination exceeded safety bound')
-    def _get_bytes(self, endpoint):
+    def _get_bytes(self, endpoint, *, max_bytes=1024 * 1024):
         self._validate_endpoint(endpoint)
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError('invalid byte limit')
+        process = None
         try:
-            p=subprocess.run([self.gh,'api',endpoint],check=False,capture_output=True,timeout=30)
+            process = subprocess.Popen([self.gh, 'api', endpoint], stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+            assert process.stdout is not None
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            output = bytearray()
+            deadline = time.monotonic() + 30
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired([self.gh, 'api', endpoint], 30)
+                events = selector.select(remaining)
+                if not events:
+                    raise subprocess.TimeoutExpired([self.gh, 'api', endpoint], 30)
+                chunk = process.stdout.read1(min(65536, max_bytes + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > max_bytes:
+                    raise GitHubError('response exceeds byte limit')
+            returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            stderr = process.stderr.read(8192) if process.stderr is not None else b''
         except (OSError, subprocess.TimeoutExpired) as e:
+            if process is not None:
+                process.kill()
+                process.wait()
             raise GitHubError(str(e)) from e
-        if p.returncode: raise GitHubError(p.stderr.decode(errors='replace').strip() or 'gh api failed')
-        return bytes(p.stdout)
+        except Exception:
+            if process is not None:
+                process.kill()
+                process.wait()
+            raise
+        if returncode:
+            raise GitHubError(stderr.decode(errors='replace').strip() or 'gh api failed')
+        return bytes(output)
     def _validate_endpoint(self, endpoint):
         if not isinstance(endpoint,str) or endpoint.startswith(('/', 'http:', 'https:')):
             raise ValueError('invalid GitHub endpoint')

@@ -23,6 +23,21 @@ def test_render_caps_fields_and_body():
     assert len(result) > 0
 
 
+def test_render_reserves_terminal_claim_boundary_for_hostile_maximum_payload():
+    result = render_advisory(
+        {"status": "FINDINGS", "summary": "x" * 10000,
+         "findings": [{"severity": "LOW", "category": "c", "path": "p",
+                       "evidence": "e", "reason": "r" * 10000,
+                       "recommended_action": "a" * 10000} for _ in range(50)]},
+        reviewed_head="head", attempt_id="attempt", content_hash="hash",
+    )
+    assert len(result) <= MAX_BODY
+    assert result.rstrip().endswith(
+        "reviewer-publication-v1:attempt:hash"
+    )
+    assert result.count("NOT APPROVAL") == 2
+
+
 def test_render_uses_only_semantic_fields_and_fixed_disclaimer():
     result = render_advisory(
         {"status": "PASS", "summary": "ok", "findings": [], "raw_response": "SECRET", "prompt": "PRIVATE"},

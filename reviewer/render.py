@@ -89,14 +89,22 @@ def render_advisory(
                 lines.extend(f"- {_safe(gap, MAX_FIELD)}" for gap in gaps[:20])
     # Repeat the claim boundary after all untrusted text, so it cannot be
     # visually displaced by a field containing markdown/HTML controls.
-    lines.extend([
-        "",
+    terminal = "\n\n".join([
         "ADVISORY ONLY — NOT APPROVAL, ACCEPTANCE, VERIFICATION, OR MERGE AUTHORIZATION.",
         f"Publication identity: {_safe(attempt_id, 128)}",
         f"Publication marker: reviewer-publication-v1:{_safe(attempt_id, 128)}:{_safe(content_hash, 128)}",
-    ])
+    ]) + "\n"
     body = "\n".join(lines) + "\n"
-    return body[:MAX_BODY]
+    # Reserve the fixed terminal boundary before truncating any untrusted
+    # semantic/evidence fields.  This keeps the repeated claim and marker
+    # physically present even for a maximum-size valid response.
+    available = MAX_BODY - len(terminal) - 1
+    if available <= 0:
+        return terminal[-MAX_BODY:]
+    prefix = body[:available].rstrip()
+    if prefix:
+        prefix += "\n"
+    return prefix + terminal
 
 
 __all__ = ["render_advisory", "MAX_BODY", "MAX_FIELD"]

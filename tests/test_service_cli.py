@@ -307,6 +307,36 @@ def test_metadata_canary_redacts_long_secret_like_transport_error(monkeypatch):
     assert secret not in json.dumps(value)
 
 
+def test_metadata_canary_rejection_is_a_failed_cli_exit(monkeypatch):
+    monkeypatch.setattr(service_cli, "run_metadata_canary", lambda **_: {
+        "status": "CANARY_REJECTED", "claim_ceiling": "CI_EVIDENCE_ONLY"
+    })
+    assert service_cli.main(["ci-metadata-canary", "--json"]) == 2
+
+
+def test_github_binary_read_rejects_oversized_archive_before_materializing(monkeypatch):
+    import tempfile
+    from reviewer.github import GhCliTransport, GitHubError
+
+    payload = tempfile.TemporaryFile()
+    payload.write(b"x" * 17)
+    payload.seek(0)
+
+    class Process:
+        stdout = payload
+        stderr = tempfile.TemporaryFile()
+
+        def wait(self, **_):
+            return 0
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr("reviewer.github.subprocess.Popen", lambda *a, **k: Process())
+    with pytest.raises(GitHubError, match="byte limit"):
+        GhCliTransport("gh")._get_bytes("repos/o/r/actions/artifacts/1/zip", max_bytes=16)
+
+
 def test_status_reports_launch_and_durable_queue(monkeypatch,tmp_path):
     cfg=config(tmp_path)
     monkeypatch.setattr(service_cli,"_launchctl",lambda *a:SimpleNamespace(returncode=0))

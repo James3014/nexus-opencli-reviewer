@@ -600,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
                                     job_id=args.job_id, artifact_id=args.artifact_id,
                                     max_bytes=args.max_bytes, max_records=args.max_records)
         print(json.dumps(value, indent=2, sort_keys=True) if args.json else json.dumps(value, sort_keys=True))
-        return 0
+        return 0 if value.get("status") == "CANARY_METADATA_BOUND" else 2
     config = load_config(args.config)
     if args.command == "install": value = {"status": "INSTALLED", "path": str(install(args.config))}
     elif args.command == "start":
