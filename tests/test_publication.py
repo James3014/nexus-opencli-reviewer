@@ -202,3 +202,41 @@ def test_publication_identity_never_coerces_malformed_values(tmp_path, identity)
     value = receipt(); value["review_identity"] = identity
     with pytest.raises(PublicationError, match="IDENTITY"):
         publish_review(tmp_path, Fake(), value, attempt_id="identity-bad")
+
+
+def test_valid_cfi_blocked_receipt_publishes_advisory_comment_with_ci_section(tmp_path):
+    t = Fake()
+    valid_cfi = receipt("BLOCKED")
+    valid_cfi["ci_failure_evidence"] = ci_evidence()
+    p = publish_review(tmp_path, t, valid_cfi, attempt_id="cfi-blocked-1")
+    assert p.exists() and t.writes == 1
+    value = json.loads(p.read_text())
+    assert value["state"] == "COMPLETED"
+    assert value["claim_ceiling"] == "PRE_REVIEW_ONLY"
+
+    body = t.comments[0]["body"]
+    assert "Result: BLOCKED" in body
+    assert "CI Failure Intelligence" in body
+    assert "ADVISORY ONLY — NOT APPROVAL, ACCEPTANCE, VERIFICATION, OR MERGE AUTHORIZATION." in body
+    assert "Claim ceiling: CI\\_EVIDENCE\\_ONLY" in body
+
+    # Idempotent republish
+    assert publish_review(tmp_path, t, valid_cfi, attempt_id="cfi-blocked-1") == p
+    assert t.writes == 1
+
+
+def test_cfi_blocked_rejects_tampered_or_foreign_ci_evidence(tmp_path):
+    foreign = receipt("BLOCKED")
+    foreign["ci_failure_evidence"] = ci_evidence("foreign")
+    with pytest.raises(PublicationError):
+        publish_review(tmp_path, Fake(), foreign, attempt_id="cfi-foreign")
+
+    tampered = receipt("BLOCKED")
+    tampered["ci_failure_evidence"] = ci_evidence()
+    tampered["ci_failure_evidence"]["trigger"] = "ATTACKER"
+    with pytest.raises(PublicationError):
+        publish_review(tmp_path, Fake(), tampered, attempt_id="cfi-tampered")
+
+    missing_ci = receipt("BLOCKED")
+    with pytest.raises(PublicationError):
+        publish_review(tmp_path, Fake(), missing_ci, attempt_id="cfi-missing")

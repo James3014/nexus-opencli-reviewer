@@ -393,3 +393,142 @@ def test_exact_current_publication_pending_still_publishes(tmp_path):
     assert service.run_once()["status"] == "PUBLISHED"
     assert calls == [(identity, {"receipt": "r"})]
     assert service.store.load()["queue"]["same"]["state"] == "published"
+
+
+def test_scheduler_publishes_valid_cfi_blocked_exactly_once(tmp_path):
+    from reviewer.receipt import build_ci_failure_evidence
+    identity = ["repo", 1, "h1", "base", "main"]
+    ci = build_ci_failure_evidence(
+        repository="repo", pr_number=1, base_sha="base", head_sha="h1",
+        current_main_sha="main", canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=10, expected_run_id=20, expected_artifact_identity="art-1",
+        checks=[{"name": "ci-check", "status": "failure", "check_run_id": 10,
+                 "run_id": 20, "external_id": "art-1", "head_sha": "h1"}],
+    )
+    cfi_blocked = {
+        "schema": "reviewer.pre_review.v1",
+        "review_identity": identity,
+        "semantic_result": {
+            "schema": "reviewer.semantic_response.v1",
+            "status": "BLOCKED",
+            "summary": "Intentional candidate failure",
+            "findings": [],
+            "evidence_gaps": [],
+        },
+        "ci_failure_evidence": ci,
+    }
+    calls = []
+    service = UnattendedReviewService(
+        repository="repo", discover=lambda: [item("h1")],
+        review=lambda ident: calls.append(("review", ident)) or cfi_blocked,
+        publish=lambda ident, receipt: calls.append(("publish", ident)) or {"status": "PUBLISHED"},
+        root=tmp_path / "state", policy=ServicePolicy(bootstrap_canary=True),
+    )
+
+    result = service.run_once()
+    assert result["status"] == "COMPLETE"
+    assert [kind for kind, _ in calls] == ["review", "publish"]
+    saved = next(iter(service.store.load()["queue"].values()))
+    assert saved["state"] == "complete"
+
+    # Exactly-once publication: next run is IDLE
+    assert service.run_once()["status"] == "IDLE"
+    assert [kind for kind, _ in calls] == ["review", "publish"]
+
+
+def test_scheduler_accepts_recovered_cfi_blocked_for_publication(tmp_path):
+    from reviewer.receipt import build_ci_failure_evidence
+    from reviewer.service_cli import _apply_recovered
+    identity = ["repo", 1, "h1", "base", "main"]
+    ci = build_ci_failure_evidence(
+        repository="repo", pr_number=1, base_sha="base", head_sha="h1",
+        current_main_sha="main", canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=10, expected_run_id=20, expected_artifact_identity="art-1",
+        checks=[{"name": "ci-check", "status": "failure", "check_run_id": 10,
+                 "run_id": 20, "external_id": "art-1", "head_sha": "h1"}],
+    )
+    cfi_blocked_receipt = {
+        "schema": "reviewer.pre_review.v1",
+        "review_identity": identity,
+        "semantic_result": {
+            "schema": "reviewer.semantic_response.v1",
+            "status": "BLOCKED",
+            "summary": "reconciled cfi blocked",
+            "findings": [],
+            "evidence_gaps": [],
+        },
+        "ci_failure_evidence": ci,
+    }
+    current = [item("h1")]
+    calls = []
+    service = UnattendedReviewService(
+        repository="repo", discover=lambda: current,
+        review=lambda i: None,
+        publish=lambda i, r: calls.append(("publish", i, r)) or {"status": "PUBLISHED"},
+        root=tmp_path / "state",
+    )
+    # Prime baseline
+    assert service.run_once()["status"] == "IDLE"
+
+    # Enqueue work in queue
+    record = service._record(current[0])
+    state = service.store.load()
+    state["queue"][record["identity_key"]] = {
+        "review_identity": identity,
+        "state": "outcome_unknown",
+        "retry_safe": False,
+    }
+    service.store.save(state)
+
+    # Apply recovered receipt
+    _apply_recovered(service, [{"identity": identity, "receipt": cfi_blocked_receipt}])
+    assert service.store.load()["queue"][record["identity_key"]]["state"] == "publication_pending"
+
+    # Run scheduler: must publish
+    result = service.run_once()
+    assert result["status"] == "PUBLISHED"
+    assert len(calls) == 1
+    assert calls[0][0] == "publish"
+
+    # Deduplicated subsequent run
+    assert service.run_once()["status"] == "IDLE"
+    assert len(calls) == 1
+
+
+def test_scheduler_foreign_or_tampered_cfi_blocked_remains_semantic_only(tmp_path):
+    from reviewer.receipt import build_ci_failure_evidence
+    identity = ["repo", 1, "h1", "base", "main"]
+    ci_foreign = build_ci_failure_evidence(
+        repository="repo", pr_number=1, base_sha="base", head_sha="foreign_head",
+        current_main_sha="main", canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=10, expected_run_id=20, expected_artifact_identity="art-1",
+        checks=[{"name": "ci-check", "status": "failure", "check_run_id": 10,
+                 "run_id": 20, "external_id": "art-1", "head_sha": "foreign_head"}],
+    )
+    foreign_cfi_blocked = {
+        "schema": "reviewer.pre_review.v1",
+        "review_identity": identity,
+        "semantic_result": {
+            "schema": "reviewer.semantic_response.v1",
+            "status": "BLOCKED",
+            "summary": "foreign cfi blocked",
+            "findings": [],
+            "evidence_gaps": [],
+        },
+        "ci_failure_evidence": ci_foreign,
+    }
+    calls = []
+    service = UnattendedReviewService(
+        repository="repo", discover=lambda: [item("h1")],
+        review=lambda ident: calls.append(("review", ident)) or foreign_cfi_blocked,
+        publish=lambda ident, receipt: calls.append(("publish", ident)) or {"status": "PUBLISHED"},
+        root=tmp_path / "state", policy=ServicePolicy(bootstrap_canary=True),
+    )
+
+    result = service.run_once()
+    assert result["status"] == "COMPLETE"
+    assert result["publication"] == "NOT_ELIGIBLE"
+    assert calls == [("review", tuple(identity))]
+    saved = next(iter(service.store.load()["queue"].values()))
+    assert saved["state"] == "semantic_completed"
+    assert saved["publication_result"] == {"status": "NOT_ELIGIBLE", "reason": "SEMANTIC_BLOCKED"}
