@@ -198,6 +198,25 @@ class UnattendedReviewService:
             return ""
         return str(semantic.get("status", "")).upper()
 
+    @staticmethod
+    def _is_publishable_cfi_blocked(result: Any, identity: tuple[Any, ...]) -> bool:
+        if not isinstance(result, Mapping):
+            return False
+        semantic = result.get("semantic_result")
+        if not isinstance(semantic, Mapping) or str(semantic.get("status", "")).upper() != "BLOCKED":
+            return False
+        ci = result.get("ci_failure_evidence")
+        if not isinstance(ci, Mapping):
+            return False
+        try:
+            from .receipt import ci_failure_evidence_manifest
+            ci_failure_evidence_manifest(dict(ci))
+            if ci.get("review_identity") != list(identity):
+                return False
+            return True
+        except Exception:
+            return False
+
     def _finish_semantic_only(self, state: dict[str, Any], item: dict[str, Any], identity: tuple[Any, ...]) -> dict[str, Any]:
         item["state"] = "semantic_completed"
         item["publication_result"] = {"status": "NOT_ELIGIBLE", "reason": "SEMANTIC_BLOCKED"}
@@ -212,6 +231,8 @@ class UnattendedReviewService:
             if item.get("state") not in {"queued", "retry_wait", "publication_pending"}:
                 continue
             if self._semantic_status(item.get("semantic_result")) != "BLOCKED":
+                continue
+            if self._is_publishable_cfi_blocked(item.get("semantic_result"), tuple(item["review_identity"])):
                 continue
             return self._finish_semantic_only(state, item, tuple(item["review_identity"]))
         return None
@@ -352,7 +373,8 @@ class UnattendedReviewService:
             return {"status": "IDLE", "queued": len(state.get("queue", {}))}
         key, item = selected
         identity = tuple(item["review_identity"])
-        if self._semantic_status(item.get("semantic_result")) == "BLOCKED":
+        if (self._semantic_status(item.get("semantic_result")) == "BLOCKED"
+                and not self._is_publishable_cfi_blocked(item.get("semantic_result"), identity)):
             return self._finish_semantic_only(state, item, identity)
         if item.get("state") == "publication_pending":
             try:
@@ -396,7 +418,8 @@ class UnattendedReviewService:
             item["last_error"] = type(exc).__name__; item["updated_at"] = _now(); self.store.save(state)
             return {"status": state["status"], "identity": list(identity), "error": type(exc).__name__}
         item["semantic_result"] = result
-        if self._semantic_status(result) == "BLOCKED":
+        if (self._semantic_status(result) == "BLOCKED"
+                and not self._is_publishable_cfi_blocked(result, identity)):
             return self._finish_semantic_only(state, item, identity)
         item["state"] = "publication_pending"; item["updated_at"] = _now()
         self.store.save(state)

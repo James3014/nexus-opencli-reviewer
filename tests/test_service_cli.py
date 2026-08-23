@@ -566,3 +566,190 @@ def test_build_service_end_to_end_persists_receipts_and_deduplicates(monkeypatch
     assert service_cli.run_once(cfg)["results"][0]["status"] == "IDLE"
     assert service_cli.run_once(cfg)["results"][0]["status"] == "IDLE"
     assert FakeSemanticTransport.calls == 1 and gh.comment_writes == 1
+
+
+def test_reconcile_recovers_failed_opencli_process_failure_with_exact_prompt(monkeypatch, tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    from reviewer.receipt import persist_failure
+    cfg = config(tmp_path)
+    identity = ["James3014/Nexus-new", 7, "h", "b", "m"]
+    prompt = "exact user prompt for review"
+    prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+    _, path = prepare_attempt(cfg.state_root, identity, "context-pack", prompt_sha, {},
+                              attempt_id="failed-attempt-1", browser_profile="profile-p")
+    mark_dispatching(path)
+    finish_attempt(path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE", "parse_result": "NOT_ATTEMPTED"}, retry_safe=False)
+    fail_path = persist_failure(cfg.state_root, "failed-attempt-1", {
+        "review_identity": identity, "context_pack_sha256": "context-pack",
+        "prompt_sha256": prompt_sha, "transport_result": "OPENCLI_PROCESS_FAILURE",
+        "parse_result": "NOT_ATTEMPTED", "claim_ceiling": "PRE_REVIEW_ONLY", "retry_safe": False,
+    })
+    assert fail_path.exists()
+
+    semantic = json.dumps({"schema": "reviewer.semantic_response.v1", "status": "PASS", "summary": "ok", "findings": [], "evidence_gaps": []})
+    monkeypatch.setattr(service_cli, "_opencli_json", lambda *a, **k: [{"Id": "conv-1"}] if "history" in a[2] else [
+        {"Role": "User", "Text": prompt},
+        {"Role": "Assistant", "Text": semantic, "Generating": False},
+    ])
+    class Item:
+        review_identity = tuple(identity); findings = []; risk = "LOW"; snapshot = SimpleNamespace(source_identity="github", changed_files=())
+    monkeypatch.setattr(service_cli, "scan", lambda *a, **k: (None, "observed", [Item()], None))
+
+    recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new")
+    assert len(recovered) == 1
+    assert recovered[0]["attempt_id"] == "failed-attempt-1"
+    assert recovered[0]["receipt"]["semantic_result"]["status"] == "PASS"
+    assert recovered[0]["receipt"]["transport_result"] == "REVIEW_COMPLETED"
+    assert recovered[0]["receipt"]["reconciliation"] == "opencli_history_exact_prompt_sha256"
+
+    attempt_record = json.loads(path.read_text())
+    assert attempt_record["state"] == "COMPLETED"
+    assert attempt_record["reconciled"] is True
+
+    # Durable first-pass failure JSON is preserved
+    assert fail_path.exists()
+    fail_record = json.loads(fail_path.read_text())
+    assert fail_record["transport_result"] == "OPENCLI_PROCESS_FAILURE"
+
+
+def test_reconcile_negative_cases_for_failed_attempts(monkeypatch, tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    identity = ["James3014/Nexus-new", 7, "h", "b", "m"]
+    prompt = "user prompt"
+    prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+
+    # Case 1: Unrelated FAILED transport result (e.g. OPENCLI_TIMEOUT or REVIEW_PARSE_FAILED)
+    _, p1 = prepare_attempt(cfg.state_root, identity, "c", prompt_sha, {}, attempt_id="timeout-1", browser_profile="p")
+    mark_dispatching(p1)
+    finish_attempt(p1, "FAILED", result={"transport_result": "OPENCLI_TIMEOUT", "parse_result": "NOT_ATTEMPTED"}, retry_safe=False)
+
+    # Case 2: Mismatched prompt
+    _, p2 = prepare_attempt(cfg.state_root, identity, "c", prompt_sha, {}, attempt_id="mismatch-prompt", browser_profile="p")
+    mark_dispatching(p2)
+    finish_attempt(p2, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE", "parse_result": "NOT_ATTEMPTED"}, retry_safe=False)
+
+    # Case 3: Generating/incomplete assistant response
+    _, p3 = prepare_attempt(cfg.state_root, identity, "c", "different_prompt_sha", {}, attempt_id="generating-1", browser_profile="p")
+    mark_dispatching(p3)
+    finish_attempt(p3, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE", "parse_result": "NOT_ATTEMPTED"}, retry_safe=False)
+
+    semantic = json.dumps({"schema": "reviewer.semantic_response.v1", "status": "PASS", "summary": "ok", "findings": [], "evidence_gaps": []})
+    def read_opencli(*a, **k):
+        if "history" in a[2]:
+            return [{"Id": "conv-mismatch"}]
+        return [
+            {"Role": "User", "Text": "completely different prompt text"},
+            {"Role": "Assistant", "Text": semantic, "Generating": False},
+        ]
+    monkeypatch.setattr(service_cli, "_opencli_json", read_opencli)
+    monkeypatch.setattr(service_cli, "_browser_exact_response", lambda *a, **k: None)
+
+    recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new")
+    assert recovered == []
+    assert json.loads(p1.read_text())["state"] == "FAILED"
+    assert json.loads(p2.read_text())["state"] == "FAILED"
+    assert json.loads(p3.read_text())["state"] == "FAILED"
+
+
+def test_apply_recovered_exact_key_hostile_cfi_lineage(tmp_path):
+    from reviewer.receipt import build_ci_failure_evidence
+    from reviewer.unattended import UnattendedReviewService
+    identity = ["James3014/Nexus-new", 7, "h", "b", "m"]
+    ci = build_ci_failure_evidence(
+        repository="James3014/Nexus-new", pr_number=7, base_sha="b", head_sha="h",
+        current_main_sha="m", canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="art-1",
+        checks=[{"name": "check1", "status": "failure", "check_run_id": 1,
+                 "run_id": 2, "external_id": "art-1", "head_sha": "h"}],
+    )
+    cfi_receipt = {
+        "schema": "reviewer.pre_review.v1",
+        "review_identity": identity,
+        "semantic_result": {
+            "schema": "reviewer.semantic_response.v1",
+            "status": "BLOCKED",
+            "summary": "cfi blocked",
+            "findings": [],
+            "evidence_gaps": [],
+        },
+        "ci_failure_evidence": ci,
+    }
+    old_key = "old-generic-failed-key"
+    current_cfi_key = "current-cfi-fingerprint-key"
+
+    calls = []
+    current_item = {"review_identity": identity, "disposition": "REVIEW_READY",
+                    "checks": [{"name": "check1", "status": "failure", "check_run_id": 1, "run_id": 2}]}
+    service = UnattendedReviewService(
+        repository="James3014/Nexus-new",
+        discover=lambda: [current_item],
+        review=lambda i: None,
+        publish=lambda i, r: calls.append(("publish", i, r)) or {"status": "PUBLISHED"},
+        root=tmp_path / "state",
+    )
+    # Prime baseline
+    assert service.run_once()["status"] == "IDLE"
+
+    # Setup 2 queue entries with the SAME 5-field identity
+    state = service.store.load()
+    state["queue"] = {
+        old_key: {
+            "review_identity": list(identity),
+            "state": "semantic_failed",
+            "last_error": "OPENCLI_PROCESS_FAILURE",
+            "retry_safe": False,
+        },
+        current_cfi_key: {
+            "review_identity": list(identity),
+            "state": "outcome_unknown",
+            "retry_safe": False,
+        },
+    }
+    service.store.save(state)
+
+    # Recovered result specifies the exact current_cfi_key
+    recovered = [{"identity": identity, "identity_key": current_cfi_key, "receipt": cfi_receipt}]
+    service_cli._apply_recovered(service, recovered)
+
+    # Old lineage remains strictly untouched
+    saved = service.store.load()["queue"]
+    assert saved[old_key]["state"] == "semantic_failed"
+    assert saved[old_key]["last_error"] == "OPENCLI_PROCESS_FAILURE"
+    assert saved[old_key]["retry_safe"] is False
+
+    # Current CFI item moved to publication_pending
+    assert saved[current_cfi_key]["state"] == "publication_pending"
+    assert saved[current_cfi_key]["semantic_result"] == cfi_receipt
+
+    # Scheduler publishes the current CFI item exactly once
+    result = service.run_once()
+    assert result["status"] == "PUBLISHED"
+    assert len(calls) == 1
+
+    # Second run deduplicates
+    assert service.run_once()["status"] == "IDLE"
+    assert len(calls) == 1
+    assert service.store.load()["queue"][old_key]["state"] == "semantic_failed"
+
+
+def test_apply_recovered_legacy_ambiguity_fails_closed(tmp_path):
+    identity = ["James3014/Nexus-new", 7, "h", "b", "m"]
+    class Store:
+        def __init__(self):
+            self.value = {
+                "queue": {
+                    "k1": {"review_identity": list(identity), "state": "semantic_failed", "last_error": "ERR1"},
+                    "k2": {"review_identity": list(identity), "state": "outcome_unknown", "last_error": "ERR2"},
+                }
+            }
+        def load(self): return self.value
+        def save(self, v): self.value = v
+
+    fake = SimpleNamespace(store=Store())
+    # Legacy recovered without identity_key when multiple items share identity -> fail closed
+    service_cli._apply_recovered(fake, [{"identity": identity, "receipt": {"dummy": "receipt"}}])
+    assert fake.store.value["queue"]["k1"]["state"] == "semantic_failed"
+    assert fake.store.value["queue"]["k2"]["state"] == "outcome_unknown"

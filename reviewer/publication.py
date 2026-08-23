@@ -93,8 +93,13 @@ def _validate_receipt(receipt: dict[str, Any]) -> tuple[str, int, str, str, str]
     result = receipt.get("semantic_result")
     if not isinstance(result, dict) or result.get("schema") != "reviewer.semantic_response.v1":
         raise PublicationError("PUBLICATION_REQUIRES_SEMANTIC_RESULT")
-    if result.get("status") not in {"PASS", "FINDINGS"}:
-        raise PublicationError("PUBLICATION_STATUS_NOT_ELIGIBLE")
+    status = result.get("status")
+    ci = receipt.get("ci_failure_evidence")
+    if status not in {"PASS", "FINDINGS"}:
+        if status == "BLOCKED" and ci is not None:
+            pass
+        else:
+            raise PublicationError("PUBLICATION_STATUS_NOT_ELIGIBLE")
     if (not isinstance(result.get("summary"), str)
             or not isinstance(result.get("findings"), list)
             or not isinstance(result.get("evidence_gaps"), list)):
@@ -103,7 +108,6 @@ def _validate_receipt(receipt: dict[str, Any]) -> tuple[str, int, str, str, str]
         parse_response(json.dumps(result, sort_keys=True, separators=(",", ":")))
     except SemanticParseError as exc:
         raise PublicationError("PUBLICATION_SEMANTIC_RESULT_INVALID") from exc
-    ci = receipt.get("ci_failure_evidence")
     if ci is not None:
         try:
             ci_failure_evidence_manifest(ci)

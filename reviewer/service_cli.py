@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,7 @@ from .preflight import preflight_opencli
 from .publication import publish_review
 from .receipt import persist_receipt
 from .runtime import RuntimeSupervisor
-from .scan import review_ready, scan
+from .scan import review_ready, scan, _ci_evidence_for
 from .semantic import SemanticParseError, parse_response
 from .unattended import ServicePolicy, UnattendedReviewService
 
@@ -303,6 +304,60 @@ def _browser_exact_response(executable: str, profile: str, conversation: str,
         return None
 
 
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        try:
+            dfd = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def _discover_reconcilable_attempts(root: Path, repository: str) -> list[dict[str, Any]]:
+    directory = root / "reviews" / "attempts"
+    if not directory.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or record.get("schema") != "reviewer.semantic_attempt.v1":
+            continue
+        if record.get("review_identity", [None])[0] != repository:
+            continue
+        state = record.get("state")
+        if state == DISPATCHING:
+            records.append(record)
+        elif state == "FAILED":
+            result = record.get("result")
+            if (
+                record.get("retry_safe") is False
+                and isinstance(result, dict)
+                and result.get("transport_result") == "OPENCLI_PROCESS_FAILURE"
+                and not record.get("reconciled")
+            ):
+                records.append(record)
+    return records
+
+
 def reconcile_semantic_history(config: ReviewerConfig, repository: str,
                                conversation_ids: list[str] | None = None) -> list[dict[str, Any]]:
     """Recover exact dispatched responses from read-only ChatGPT history.
@@ -310,32 +365,34 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
     A conversation is accepted only when SHA-256 of its complete User message
     equals the journaled prompt hash. No fuzzy title/time matching is allowed.
     """
-    recovered=[]
-    for attempt in discover_unfinished(config.state_root):
-        if attempt.get("state") != DISPATCHING or attempt.get("review_identity", [None])[0] != repository:
-            continue
-        profile=str(attempt.get("browser_profile") or "")
+    recovered = []
+    for attempt in _discover_reconcilable_attempts(config.state_root, repository):
+        profile = str(attempt.get("browser_profile") or "")
         if not profile:
             continue
         if conversation_ids:
-            history=[{"Id": value} for value in conversation_ids]
+            history = [{"Id": value} for value in conversation_ids]
         else:
             try:
-                history=_opencli_json(config.opencli_executable,profile,
-                                      ["chatgpt","history","--limit","20","--site-session","ephemeral"])
+                history = _opencli_json(config.opencli_executable, profile,
+                                      ["chatgpt", "history", "--limit", "20", "--site-session", "ephemeral"])
             except Exception:
                 continue
-        match=None
-        for row in history if isinstance(history,list) else []:
-            conversation=row.get("Id") or row.get("id")
-            if not conversation: continue
-            try: detail=_opencli_json(config.opencli_executable,profile,["chatgpt","detail",str(conversation),"--site-session","ephemeral"])
-            except Exception: detail=[]
-            user=next((x.get("Text") for x in detail if x.get("Role")=="User"),None) if isinstance(detail,list) else None
-            assistant=next((x.get("Text") for x in reversed(detail) if x.get("Role")=="Assistant" and not x.get("Generating")),None) if isinstance(detail,list) else None
-            if (isinstance(user,str) and isinstance(assistant,str)
-                    and hashlib.sha256(user.encode()).hexdigest()==attempt.get("prompt_sha256")):
-                match=(str(conversation),assistant);break
+        match = None
+        for row in history if isinstance(history, list) else []:
+            conversation = row.get("Id") or row.get("id")
+            if not conversation:
+                continue
+            try:
+                detail = _opencli_json(config.opencli_executable, profile, ["chatgpt", "detail", str(conversation), "--site-session", "ephemeral"])
+            except Exception:
+                detail = []
+            user = next((x.get("Text") for x in detail if x.get("Role") == "User"), None) if isinstance(detail, list) else None
+            assistant = next((x.get("Text") for x in reversed(detail) if x.get("Role") == "Assistant" and not x.get("Generating")), None) if isinstance(detail, list) else None
+            if (isinstance(user, str) and isinstance(assistant, str)
+                    and hashlib.sha256(user.encode()).hexdigest() == attempt.get("prompt_sha256")):
+                match = (str(conversation), assistant)
+                break
             try:
                 assistant = _browser_exact_response(
                     config.opencli_executable, profile, str(conversation),
@@ -344,41 +401,71 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
             except Exception:
                 assistant = None
             if isinstance(assistant, str):
-                match=(str(conversation),assistant);break
-        if match is None: continue
-        try: parsed=parse_response(match[1])
-        except SemanticParseError: continue
-        identity=attempt["review_identity"]
-        _,observed,items,_=scan(repository,GhCliTransport())
-        item=next((x for x in items if list(x.review_identity)==identity),None)
-        attempt_path=config.state_root/"reviews"/"attempts"/f"{attempt['attempt_id']}.json"
-        if item is None:
-            finish_attempt(
-                attempt_path, "FAILED",
-                result={"transport_result":"REVIEW_COMPLETED","parse_result":"PARSED",
-                        "reconciled":True,"context_result":"STALE_CONTEXT_AFTER_COMPLETION"},
-                retry_safe=False,
-            )
-            recovered.append({"attempt_id":attempt["attempt_id"],"identity":identity,
-                              "terminal":"STALE_CONTEXT_AFTER_COMPLETION","receipt":None,
-                              "path":str(attempt_path)})
+                match = (str(conversation), assistant)
+                break
+        if match is None:
             continue
-        raw_sha=hashlib.sha256(match[1].encode()).hexdigest()
-        receipt_id=hashlib.sha256(json.dumps({"identity":identity,"context":attempt["context_pack_sha256"],"prompt":attempt["prompt_sha256"],"raw":raw_sha},sort_keys=True,separators=(",",":" )).encode()).hexdigest()
-        receipt={"schema":"reviewer.pre_review.v1","receipt_id":receipt_id,"repository":repository,
-                 "pr_number":identity[1],"head_sha":identity[2],"base_sha":identity[3],"current_main_sha":identity[4],
-                 "review_identity":identity,"source_observed_at":observed,"source_identity":item.snapshot.source_identity,
-                 "deterministic_findings":item.findings,"risk":item.risk,"changed_files":list(item.snapshot.changed_files),
-                 "context_pack_sha256":attempt["context_pack_sha256"],"prompt_sha256":attempt["prompt_sha256"],
-                 "opencli_executable":attempt.get("opencli_executable"),"opencli_version":attempt.get("opencli_version"),
-                 "browser_profile":profile,"session_mode":attempt.get("session_mode","ephemeral"),"safe_argv":attempt.get("safe_argv",[]),
-                 "invocation_started_at":attempt.get("dispatching_at"),"invocation_finished_at":datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"),
-                 "transport_result":"REVIEW_COMPLETED","outcome_unknown":False,"retry_safe":False,
-                 "raw_response_sha256":raw_sha,"parse_result":"PARSED","semantic_result":parsed,
-                 "conversation_id":match[0],"reconciliation":"opencli_history_exact_prompt_sha256","claim_ceiling":"PRE_REVIEW_ONLY"}
-        receipt_path=persist_receipt(config.state_root,receipt)
-        finish_attempt(attempt_path,COMPLETED,result={"transport_result":"REVIEW_COMPLETED","parse_result":"PARSED","reconciled":True})
-        recovered.append({"attempt_id":attempt["attempt_id"],"identity":identity,"receipt":receipt,"path":str(receipt_path)})
+        try:
+            parsed = parse_response(match[1])
+        except SemanticParseError:
+            continue
+        identity = attempt["review_identity"]
+        _, observed, items, _ = scan(repository, GhCliTransport())
+        item = next((x for x in items if list(x.review_identity) == identity), None)
+        attempt_path = config.state_root / "reviews" / "attempts" / f"{attempt['attempt_id']}.json"
+        if item is None:
+            if attempt.get("state") == DISPATCHING:
+                finish_attempt(
+                    attempt_path, "FAILED",
+                    result={"transport_result": "REVIEW_COMPLETED", "parse_result": "PARSED",
+                            "reconciled": True, "context_result": "STALE_CONTEXT_AFTER_COMPLETION"},
+                    retry_safe=False,
+                )
+            else:
+                attempt["reconciled"] = True
+                attempt["reconciled_result"] = {
+                    "transport_result": "REVIEW_COMPLETED",
+                    "parse_result": "PARSED",
+                    "reconciled": True,
+                    "context_result": "STALE_CONTEXT_AFTER_COMPLETION",
+                }
+                _atomic_json(attempt_path, attempt)
+            recovered.append({"attempt_id": attempt["attempt_id"], "identity": identity,
+                              "terminal": "STALE_CONTEXT_AFTER_COMPLETION", "receipt": None,
+                              "path": str(attempt_path)})
+            continue
+        raw_sha = hashlib.sha256(match[1].encode()).hexdigest()
+        receipt_id = hashlib.sha256(json.dumps({"identity": identity, "context": attempt["context_pack_sha256"], "prompt": attempt["prompt_sha256"], "raw": raw_sha}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        ci_evidence = None
+        if hasattr(getattr(item, "snapshot", None), "checks") and getattr(item.snapshot, "checks", None):
+            try:
+                ci_evidence = _ci_evidence_for(item)
+            except Exception:
+                ci_evidence = None
+        receipt = {"schema": "reviewer.pre_review.v1", "receipt_id": receipt_id, "repository": repository,
+                   "pr_number": identity[1], "head_sha": identity[2], "base_sha": identity[3], "current_main_sha": identity[4],
+                   "review_identity": identity, "source_observed_at": observed, "source_identity": item.snapshot.source_identity,
+                   "deterministic_findings": item.findings, "risk": item.risk, "changed_files": list(item.snapshot.changed_files),
+                   "context_pack_sha256": attempt["context_pack_sha256"], "prompt_sha256": attempt["prompt_sha256"],
+                   "opencli_executable": attempt.get("opencli_executable"), "opencli_version": attempt.get("opencli_version"),
+                   "browser_profile": profile, "session_mode": attempt.get("session_mode", "ephemeral"), "safe_argv": attempt.get("safe_argv", []),
+                   "invocation_started_at": attempt.get("dispatching_at") or attempt.get("started_at"),
+                   "invocation_finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                   "transport_result": "REVIEW_COMPLETED", "outcome_unknown": False, "retry_safe": False,
+                   "raw_response_sha256": raw_sha, "parse_result": "PARSED", "semantic_result": parsed,
+                   "ci_failure_evidence": ci_evidence,
+                   "conversation_id": match[0], "reconciliation": "opencli_history_exact_prompt_sha256", "claim_ceiling": "PRE_REVIEW_ONLY"}
+        service_record = UnattendedReviewService._record(item)
+        queue_key = service_record.get("identity_key")
+        receipt_path = persist_receipt(config.state_root, receipt)
+        if attempt.get("state") == DISPATCHING:
+            finish_attempt(attempt_path, COMPLETED, result={"transport_result": "REVIEW_COMPLETED", "parse_result": "PARSED", "reconciled": True})
+        else:
+            attempt["state"] = COMPLETED
+            attempt["reconciled"] = True
+            attempt["reconciled_result"] = {"transport_result": "REVIEW_COMPLETED", "parse_result": "PARSED", "reconciled": True}
+            _atomic_json(attempt_path, attempt)
+        recovered.append({"attempt_id": attempt["attempt_id"], "identity": identity, "identity_key": queue_key, "receipt": receipt, "path": str(receipt_path)})
     return recovered
 
 
@@ -432,17 +519,25 @@ def build_service(config: ReviewerConfig, repository: str, *, bootstrap_canary: 
 def _apply_recovered(service: UnattendedReviewService, recovered: list[dict[str, Any]]) -> None:
     if not recovered:
         return
-    state=service.store.load()
+    state = service.store.load()
+    queue = state.get("queue", {})
     for value in recovered:
-        for item in state.get("queue",{}).values():
-            if item.get("review_identity")==value["identity"]:
-                if value.get("receipt") is not None:
-                    item["semantic_result"]=value["receipt"]
-                    item["state"]="publication_pending"
-                else:
-                    item["state"]="semantic_failed"
-                    item["last_error"]=value.get("terminal","RECONCILIATION_FAILED")
-                item["retry_safe"]=False
+        target_item = None
+        key = value.get("identity_key")
+        if key and key in queue:
+            target_item = queue[key]
+        elif value.get("identity"):
+            matching = [item for item in queue.values() if item.get("review_identity") == value["identity"]]
+            if len(matching) == 1:
+                target_item = matching[0]
+        if target_item is not None:
+            if value.get("receipt") is not None:
+                target_item["semantic_result"] = value["receipt"]
+                target_item["state"] = "publication_pending"
+            else:
+                target_item["state"] = "semantic_failed"
+                target_item["last_error"] = value.get("terminal", "RECONCILIATION_FAILED")
+            target_item["retry_safe"] = False
     service.store.save(state)
 
 
