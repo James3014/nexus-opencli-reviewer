@@ -329,6 +329,24 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
+def _has_journal_conversation(record: dict[str, Any]) -> bool:
+    res = record.get("result")
+    conv = res.get("conversation_id") if isinstance(res, dict) else record.get("conversation_id")
+    return bool(isinstance(conv, str) and conv)
+
+
+def _attempt_reconciliation_sort_key(record: dict[str, Any]) -> tuple[int, str, str]:
+    has_journal = 0 if _has_journal_conversation(record) else 1
+    timestamp = str(
+        record.get("dispatching_at")
+        or record.get("started_at")
+        or record.get("created_at")
+        or ""
+    )
+    attempt_id = str(record.get("attempt_id") or "")
+    return (has_journal, timestamp, attempt_id)
+
+
 def _discover_reconcilable_attempts(root: Path, repository: str) -> list[dict[str, Any]]:
     directory = root / "reviews" / "attempts"
     if not directory.exists():
@@ -355,23 +373,30 @@ def _discover_reconcilable_attempts(root: Path, repository: str) -> list[dict[st
                 and not record.get("reconciled")
             ):
                 records.append(record)
+    records.sort(key=_attempt_reconciliation_sort_key)
     return records
 
 
 def reconcile_semantic_history(config: ReviewerConfig, repository: str,
-                               conversation_ids: list[str] | None = None) -> list[dict[str, Any]]:
+                               conversation_ids: list[str] | None = None,
+                               *, max_attempts: int | None = None) -> list[dict[str, Any]]:
     """Recover exact dispatched responses from read-only ChatGPT history.
 
     A conversation is accepted only when SHA-256 of its complete User message
     equals the journaled prompt hash. No fuzzy title/time matching is allowed.
     """
+    effective_limit = max_attempts if max_attempts is not None else (None if conversation_ids else 1)
+    attempts = _discover_reconcilable_attempts(config.state_root, repository)
+    if effective_limit is not None and effective_limit >= 0:
+        attempts = attempts[:effective_limit]
+
     recovered = []
-    for attempt in _discover_reconcilable_attempts(config.state_root, repository):
+    for attempt in attempts:
         profile = str(attempt.get("browser_profile") or "")
         if not profile:
             continue
         journal_conversation = ((attempt.get("result") or {}).get("conversation_id")
-                                if isinstance(attempt.get("result"), dict) else None)
+                                if isinstance(attempt.get("result"), dict) else attempt.get("conversation_id"))
         if conversation_ids:
             history = [{"Id": value} for value in conversation_ids]
         elif isinstance(journal_conversation, str) and journal_conversation:
