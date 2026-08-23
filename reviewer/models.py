@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any
 import re
@@ -8,6 +8,14 @@ class Disposition(str, Enum):
 @dataclass(frozen=True)
 class CheckObservation:
     name:str; status:str; expected_failure:bool=False
+    check_run_id:int|None=None; run_id:int|None=None; external_id:str|None=None
+    details_url:str|None=None; html_url:str|None=None; node_id:str|None=None
+    workflow_name:str|None=None; head_sha:str|None=None; check_suite_id:int|None=None
+    started_at:str|None=None; completed_at:str|None=None; artifact_identity:str|None=None
+    annotation_count:int|None=None; app_slug:str|None=None
+    job_identity:str|None=None; log_sha256:str|None=None; log_truncated:bool=False
+    artifact_sha256:str|None=None; artifact_truncated:bool=False
+    run_attempt:int|None=None
 @dataclass(frozen=True)
 class PRSnapshot:
     repository:str; pr_number:int; title:str; state:str; draft:bool; mergeable:bool|None; base_branch:str; base_sha:str; head_branch:str; head_sha:str; current_main_sha:str; changed_files:tuple[str,...]=(); issue_numbers:tuple[int,...]=(); labels:tuple[str,...]=(); body:str=''; checks:tuple[CheckObservation,...]=(); observed_at:str=''; source_identity:str='fixture'; declared_base_sha:str|None=None; declared_head_sha:str|None=None; declared_main_sha:str|None=None; expected_failure:bool=False; do_not_merge:bool=False; collection_complete:bool=True; collection_errors:tuple[str,...]=(); created_at:str=''; updated_at:str=''
@@ -27,4 +35,4 @@ class Classification:
         s=self.snapshot; return (s.repository,s.pr_number,s.head_sha,s.base_sha,s.current_main_sha)
     def to_dict(self):
         s=self.snapshot
-        return {'pr_number':s.pr_number,'repository':s.repository,'title':s.title,'disposition':self.disposition.value,'findings':self.findings,'reasons':self.reasons,'risk':self.risk,'overlaps':self.overlaps,'review_identity':list(self.review_identity),'base_sha':s.base_sha,'head_sha':s.head_sha,'current_main_sha':s.current_main_sha,'changed_files':list(s.changed_files),'issue_numbers':list(s.issue_numbers),'labels':list(s.labels),'observed_at':s.observed_at,'source_identity':s.source_identity,'collection_complete':s.collection_complete,'collection_errors':list(s.collection_errors),'declared_base_sha':s.declared_base_sha,'declared_head_sha':s.declared_head_sha,'declared_main_sha':s.declared_main_sha}
+        return {'pr_number':s.pr_number,'repository':s.repository,'title':s.title,'disposition':self.disposition.value,'findings':self.findings,'reasons':self.reasons,'risk':self.risk,'overlaps':self.overlaps,'review_identity':list(self.review_identity),'base_sha':s.base_sha,'head_sha':s.head_sha,'current_main_sha':s.current_main_sha,'changed_files':list(s.changed_files),'issue_numbers':list(s.issue_numbers),'labels':list(s.labels),'checks':[asdict(check) for check in s.checks],'observed_at':s.observed_at,'source_identity':s.source_identity,'collection_complete':s.collection_complete,'collection_errors':list(s.collection_errors),'declared_base_sha':s.declared_base_sha,'declared_head_sha':s.declared_head_sha,'declared_main_sha':s.declared_main_sha}

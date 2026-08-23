@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, re, subprocess
+import json, re, selectors, subprocess, time
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -10,6 +10,13 @@ class GitHubTransport(Protocol):
     def list_open_prs(self, repo:str)->list[dict[str,Any]]: ...
     def list_files(self, repo:str, number:int)->list[dict[str,Any]]: ...
     def list_checks(self, repo:str, sha:str)->list[dict[str,Any]]: ...
+    def list_check_annotations(self, repo:str, check_run_id:int)->list[dict[str,Any]]: ...
+    def get_workflow_run(self, repo:str, run_id:int)->dict[str,Any]: ...
+    def list_workflow_runs_for_suite(self, repo:str, check_suite_id:int)->list[dict[str,Any]]: ...
+    def list_workflow_artifacts(self, repo:str, run_id:int)->list[dict[str,Any]]: ...
+    def list_workflow_jobs(self, repo:str, run_id:int)->list[dict[str,Any]]: ...
+    def get_job_log(self, repo:str, job_id:int)->bytes: ...
+    def get_artifact_archive(self, repo:str, artifact_id:int)->bytes: ...
     def get_patch(self, repo:str, number:int)->str: ...
     def get_pr(self, repo:str, number:int)->dict[str,Any]: ...
     def get_issue(self, repo:str, number:int)->dict[str,Any]: ...
@@ -57,6 +64,91 @@ class GhCliTransport:
             rows=value['check_runs']; out.extend(rows)
             if len(rows)<100:return out
         raise GitHubError('check-runs pagination exceeded safety bound')
+    def list_check_annotations(self, repo, check_run_id):
+        self._validate(repo)
+        return self._paginate(f'repos/{repo}/check-runs/{int(check_run_id)}/annotations')
+    def get_workflow_run(self, repo, run_id):
+        self._validate(repo)
+        return self._get(f'repos/{repo}/actions/runs/{int(run_id)}')
+    def list_workflow_runs_for_suite(self, repo, check_suite_id):
+        self._validate(repo)
+        out=[]
+        for page in range(1,101):
+            value=self._get(f'repos/{repo}/actions/runs',check_suite_id=int(check_suite_id),per_page=100,page=page)
+            if not isinstance(value,dict) or not isinstance(value.get('workflow_runs'),list):
+                raise GitHubError('expected workflow-runs page')
+            rows=value['workflow_runs']; out.extend(rows)
+            if len(rows)<100:return out
+        raise GitHubError('workflow-runs pagination exceeded safety bound')
+    def list_workflow_artifacts(self, repo, run_id):
+        self._validate(repo); out=[]
+        for page in range(1,101):
+            value=self._get(f'repos/{repo}/actions/runs/{int(run_id)}/artifacts',per_page=100,page=page)
+            if not isinstance(value,dict) or not isinstance(value.get('artifacts'),list):
+                raise GitHubError('expected workflow-artifacts page')
+            rows=value['artifacts']; out.extend(rows)
+            if len(rows)<100:return out
+        raise GitHubError('workflow-artifacts pagination exceeded safety bound')
+    def list_workflow_jobs(self, repo, run_id):
+        self._validate(repo)
+        out=[]
+        for page in range(1,101):
+            value=self._get(f'repos/{repo}/actions/runs/{int(run_id)}/jobs',per_page=100,page=page)
+            if not isinstance(value,dict) or not isinstance(value.get('jobs'),list):
+                raise GitHubError('expected workflow-jobs page')
+            rows=value['jobs']; out.extend(rows)
+            if len(rows)<100:return out
+        raise GitHubError('workflow-jobs pagination exceeded safety bound')
+    def _get_bytes(self, endpoint, *, max_bytes=1024 * 1024):
+        self._validate_endpoint(endpoint)
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError('invalid byte limit')
+        process = None
+        try:
+            process = subprocess.Popen([self.gh, 'api', endpoint], stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+            assert process.stdout is not None
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            output = bytearray()
+            deadline = time.monotonic() + 30
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired([self.gh, 'api', endpoint], 30)
+                events = selector.select(remaining)
+                if not events:
+                    raise subprocess.TimeoutExpired([self.gh, 'api', endpoint], 30)
+                chunk = process.stdout.read1(min(65536, max_bytes + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > max_bytes:
+                    raise GitHubError('response exceeds byte limit')
+            returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            stderr = process.stderr.read(8192) if process.stderr is not None else b''
+        except (OSError, subprocess.TimeoutExpired) as e:
+            if process is not None:
+                process.kill()
+                process.wait()
+            raise GitHubError(str(e)) from e
+        except Exception:
+            if process is not None:
+                process.kill()
+                process.wait()
+            raise
+        if returncode:
+            raise GitHubError(stderr.decode(errors='replace').strip() or 'gh api failed')
+        return bytes(output)
+    def _validate_endpoint(self, endpoint):
+        if not isinstance(endpoint,str) or endpoint.startswith(('/', 'http:', 'https:')):
+            raise ValueError('invalid GitHub endpoint')
+    def get_job_log(self, repo, job_id):
+        self._validate(repo)
+        return self._get_bytes(f'repos/{repo}/actions/jobs/{int(job_id)}/logs')
+    def get_artifact_archive(self, repo, artifact_id):
+        self._validate(repo)
+        return self._get_bytes(f'repos/{repo}/actions/artifacts/{int(artifact_id)}/zip')
     def get_pr(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/pulls/{int(number)}')
     def create_comment(self, repo, pr_number, body):
         self._validate(repo)

@@ -3,6 +3,7 @@ import json
 import pytest
 
 from reviewer.publication import PublicationError, publish_review, reconcile_publication, _content_hash
+from reviewer.receipt import build_ci_failure_evidence
 
 
 def receipt(status="PASS"):
@@ -17,6 +18,16 @@ def receipt(status="PASS"):
         "semantic_result": {"schema": "reviewer.semantic_response.v1", "status": status,
                              "summary": "summary", "findings": [], "evidence_gaps": []},
     }
+
+
+def ci_evidence(head="h"):
+    return build_ci_failure_evidence(
+        repository="o/r", pr_number=7, base_sha="b", head_sha=head,
+        current_main_sha="m", canonical_disposition="NEW_REGRESSION",
+        expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact",
+        checks=[{"name": "exact", "status": "failure", "check_run_id": 1,
+                 "run_id": 2, "external_id": "artifact", "head_sha": head}],
+    )
 
 
 class Fake:
@@ -167,3 +178,27 @@ def test_tampered_semantic_shape_never_publishes(tmp_path):
     with pytest.raises(PublicationError,match='SEMANTIC_RESULT_INVALID'):
         publish_review(tmp_path,t,value)
     assert t.writes==0
+
+
+def test_publication_wires_valid_ci_evidence_and_rejects_foreign_or_tampered(tmp_path):
+    valid = receipt(); valid["ci_failure_evidence"] = ci_evidence()
+    t = Fake()
+    publish_review(tmp_path, t, valid, attempt_id="ci-valid")
+    assert "CI Failure Intelligence" in t.comments[0]["body"]
+    foreign = receipt(); foreign["ci_failure_evidence"] = ci_evidence("foreign")
+    with pytest.raises(PublicationError):
+        publish_review(tmp_path, Fake(), foreign, attempt_id="ci-foreign")
+    tampered = receipt(); tampered["ci_failure_evidence"] = ci_evidence()
+    tampered["ci_failure_evidence"]["trigger"] = "ATTACKER"
+    with pytest.raises(PublicationError):
+        publish_review(tmp_path, Fake(), tampered, attempt_id="ci-tampered")
+
+
+@pytest.mark.parametrize("identity", [
+    ["o/r", True, "h", "b", "m"], [[], 7, "h", "b", "m"],
+    ["", 7, "h", "b", "m"], ["o/r", 7, None, "b", "m"],
+])
+def test_publication_identity_never_coerces_malformed_values(tmp_path, identity):
+    value = receipt(); value["review_identity"] = identity
+    with pytest.raises(PublicationError, match="IDENTITY"):
+        publish_review(tmp_path, Fake(), value, attempt_id="identity-bad")

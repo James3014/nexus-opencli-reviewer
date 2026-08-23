@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from .render import render_advisory
 from .semantic import parse_response, SemanticParseError
+from .receipt import ci_failure_evidence_manifest
 
 
 class PublicationError(RuntimeError):
@@ -69,7 +70,10 @@ def _identity(receipt: dict[str, Any]) -> tuple[str, int, str, str, str]:
     try:
         value = receipt["review_identity"]
         repo, number, head, base, main = value
-        return str(repo), int(number), str(head), str(base), str(main)
+        if (type(repo) is not str or not repo or type(number) is not int or number <= 0
+                or any(type(item) is not str or not item for item in (head, base, main))):
+            raise ValueError("identity domain")
+        return repo, number, head, base, main
     except (KeyError, TypeError, ValueError) as exc:
         raise PublicationError("INVALID_PRE_REVIEW_IDENTITY") from exc
 
@@ -99,6 +103,14 @@ def _validate_receipt(receipt: dict[str, Any]) -> tuple[str, int, str, str, str]
         parse_response(json.dumps(result, sort_keys=True, separators=(",", ":")))
     except SemanticParseError as exc:
         raise PublicationError("PUBLICATION_SEMANTIC_RESULT_INVALID") from exc
+    ci = receipt.get("ci_failure_evidence")
+    if ci is not None:
+        try:
+            ci_failure_evidence_manifest(ci)
+        except ValueError as exc:
+            raise PublicationError("PUBLICATION_CI_EVIDENCE_INVALID") from exc
+        if ci.get("review_identity") != list(identity):
+            raise PublicationError("PUBLICATION_CI_EVIDENCE_IDENTITY_MISMATCH")
     return identity
 
 
@@ -106,7 +118,9 @@ def render_body(receipt: dict[str, Any], *, attempt_id: str, content_hash: str |
     identity = _identity(receipt)
     result = receipt["semantic_result"]
     return render_advisory(result, reviewed_head=identity[2], attempt_id=attempt_id,
-                           content_hash=content_hash or "pending")
+                           content_hash=content_hash or "pending",
+                           ci_failure_evidence=receipt.get("ci_failure_evidence"),
+                           review_identity=identity)
 
 
 def _content_hash(receipt: dict[str, Any], attempt_id: str) -> tuple[str, str]:
@@ -123,7 +137,8 @@ def _stable_attempt_id(receipt: dict[str, Any]) -> str:
     material = json.dumps(
         {"review_identity": receipt["review_identity"], "receipt_id": receipt["receipt_id"],
          "context_pack_sha256": receipt["context_pack_sha256"],
-         "prompt_sha256": receipt["prompt_sha256"], "semantic_result": receipt["semantic_result"]},
+         "prompt_sha256": receipt["prompt_sha256"], "semantic_result": receipt["semantic_result"],
+         "ci_failure_evidence": receipt.get("ci_failure_evidence")},
         sort_keys=True, separators=(",", ":"),
     ).encode()
     return hashlib.sha256(material).hexdigest()[:32]

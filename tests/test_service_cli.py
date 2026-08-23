@@ -1,10 +1,12 @@
-import json
 import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from reviewer.config import ReviewerConfig, save_config
+import pytest
+
 from reviewer import service_cli
+from reviewer.config import ReviewerConfig, save_config
 from reviewer.opencli import TransportResult
 from reviewer.preflight import PreflightResult
 
@@ -46,6 +48,293 @@ def test_bounded_bootstrap_config_admits_exactly_one_canary(monkeypatch,tmp_path
     monkeypatch.setattr(service_cli,"UnattendedReviewService",lambda **kwargs:captured.update(kwargs) or object())
     service_cli.build_service(cfg,"James3014/Nexus-new")
     assert captured["policy"].bootstrap_canary is True
+
+
+def test_metadata_canary_is_get_only_and_rejects_artifact_head_mismatch(monkeypatch):
+    head = "f" * 40
+    calls = []
+
+    class FakeGh:
+        def _get(self, endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith("check-suites/11"):
+                return {"id": 11, "head_sha": head}
+            if endpoint.endswith("check-runs/12"):
+                return {"id": 12, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("actions/runs/13"):
+                return {"id": 13, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("jobs?per_page=100&page=1"):
+                return {"jobs": [{"id": 14, "head_sha": head}]}
+            if endpoint.endswith("artifacts?per_page=100&page=1"):
+                return {"artifacts": [{"id": 15, "name": "exact-base-impact-" + "a" * 40}]}
+            if endpoint.endswith("actions/artifacts/15"):
+                return {"id": 15, "name": "exact-base-impact-" + "a" * 40,
+                        "expired": False, "workflow_run": {"id": 13, "head_sha": head}}
+            raise AssertionError(endpoint)
+
+        def get_pr(self, repo, number):
+            return {
+                "number": number,
+                "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
+                "head": {"sha": head, "repo": {"full_name": repo}},
+            }
+
+        def get_job_log(self, *args):
+            raise AssertionError("job logs are forbidden")
+
+        def get_artifact_archive(self, *args):
+            raise AssertionError("artifact archives are forbidden")
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository="James3014/Nexus-new", pr_number=380, head_sha=head,
+        check_suite_id=11, check_run_id=12, run_id=13, job_id=14, artifact_id=15)
+    assert value["status"] == "CANARY_REJECTED"
+    assert "CANARY_ARTIFACT_NAME_HEAD_MISMATCH" in value["evidence_gaps"]
+    assert len(calls) == 6 and all("logs" not in call and not call.endswith("/zip") for call in calls)
+
+
+def test_metadata_canary_valid_binds_six_endpoints_without_side_effects(monkeypatch):
+    repository = "James3014/Nexus-new"
+    pr_number = 380
+    head = "f" * 40
+    base = "b" * 40
+    artifact_name = "exact-base-impact-" + head
+    calls = []
+    forbidden = {"logs": 0, "archives": 0, "providers": 0, "config": 0, "runtime": 0}
+
+    class FakeGh:
+        def _get(self, endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith("check-suites/11"):
+                return {"id": 11, "head_sha": head}
+            if endpoint.endswith("check-runs/12"):
+                return {"id": 12, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("actions/runs/13"):
+                return {"id": 13, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("jobs?per_page=100&page=1"):
+                return {"jobs": [{"id": 14, "head_sha": head, "run_id": 13}]}
+            if endpoint.endswith("artifacts?per_page=100&page=1"):
+                return {"artifacts": [{"id": 15, "name": artifact_name}]}
+            if endpoint.endswith("actions/artifacts/15"):
+                return {
+                    "id": 15,
+                    "name": artifact_name,
+                    "expired": False,
+                    "workflow_run": {"id": 13, "head_sha": head},
+                }
+            raise AssertionError(endpoint)
+
+        def get_pr(self, repo, number):
+            return {
+                "number": number,
+                "base": {"sha": base, "repo": {"full_name": repo}},
+                "head": {"sha": head, "repo": {"full_name": repo}},
+            }
+
+        def get_job_log(self, *args):
+            forbidden["logs"] += 1
+            raise AssertionError("job logs are forbidden")
+
+        def get_artifact_archive(self, *args):
+            forbidden["archives"] += 1
+            raise AssertionError("artifact archives are forbidden")
+
+        def invoke_provider(self, *args):
+            forbidden["providers"] += 1
+            raise AssertionError("provider calls are forbidden")
+
+        def load_config(self, *args):
+            forbidden["config"] += 1
+            raise AssertionError("config calls are forbidden")
+
+        def start_runtime(self, *args):
+            forbidden["runtime"] += 1
+            raise AssertionError("runtime calls are forbidden")
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository=repository, pr_number=pr_number, head_sha=head,
+        check_suite_id=11, check_run_id=12, run_id=13, job_id=14,
+        artifact_id=15, max_bytes=65536, max_records=100)
+
+    assert value == {
+        "status": "CANARY_METADATA_BOUND",
+        "schema": "reviewer.ci_failure_evidence.v1",
+        "repository": repository,
+        "pr_number": pr_number,
+        "head_sha": head,
+        "base_sha": base,
+        "check_suite_id": 11,
+        "check_run_id": 12,
+        "run_id": 13,
+        "job_id": 14,
+        "artifact_id": 15,
+        "evidence_gaps": [],
+        "claim_ceiling": "CI_EVIDENCE_ONLY",
+    }
+    assert calls == [
+        f"repos/{repository}/check-suites/11",
+        f"repos/{repository}/check-runs/12",
+        f"repos/{repository}/actions/runs/13",
+        f"repos/{repository}/actions/runs/13/jobs?per_page=100&page=1",
+        f"repos/{repository}/actions/runs/13/artifacts?per_page=100&page=1",
+        f"repos/{repository}/actions/artifacts/15",
+    ]
+    assert len(calls) == 6
+    assert forbidden == {
+        "logs": 0, "archives": 0, "providers": 0, "config": 0, "runtime": 0,
+    }
+
+
+def test_metadata_canary_rejects_pagination_limit(monkeypatch):
+    head = "a" * 40
+    class FakeGh:
+        def get_pr(self, repo, number):
+            return {
+                "number": number,
+                "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
+                "head": {"sha": head, "repo": {"full_name": repo}},
+            }
+
+        def _get(self, endpoint):
+            if endpoint.endswith("check-suites/11"):
+                return {"id": 11, "head_sha": head}
+            if endpoint.endswith("check-runs/12"):
+                return {"id": 12, "head_sha": head}
+            if endpoint.endswith("actions/runs/13"):
+                return {"id": 13, "head_sha": head, "conclusion": "failure"}
+            if endpoint.endswith("jobs?per_page=1&page=1"):
+                return {"jobs": [{"id": 14}]}
+            return {"artifacts": []}
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository="o/r", pr_number=1, head_sha=head, check_suite_id=11,
+        check_run_id=12, run_id=13, job_id=14, artifact_id=15, max_records=1)
+    assert value["status"] == "CANARY_REJECTED"
+    assert "CANARY_PAGINATION_OR_RECORD_LIMIT" in value["evidence_gaps"]
+
+
+def test_metadata_canary_rejects_huge_byte_budget_without_transport(monkeypatch):
+    class NoCalls:
+        def __init__(self):
+            self.called = False
+
+        def get_pr(self, *args):
+            self.called = True
+            raise AssertionError("transport forbidden")
+
+    fake = NoCalls()
+    monkeypatch.setattr(service_cli, "GhCliTransport", lambda: fake)
+    value = service_cli.run_metadata_canary(
+        repository="o/r", pr_number=1, head_sha="a" * 40,
+        check_suite_id=1, check_run_id=2, run_id=3, job_id=4, artifact_id=5,
+        max_bytes=service_cli.MAX_CANARY_BYTES + 1)
+    assert value["reason"] == "CANARY_INPUT_INVALID" and fake.called is False
+
+
+@pytest.mark.parametrize("head", ["A" * 40, "a" * 39, "a" * 41, "not-a-sha"])
+def test_metadata_canary_rejects_malformed_head_sha(monkeypatch, head):
+    monkeypatch.setattr(
+        service_cli,
+        "GhCliTransport",
+        lambda: (_ for _ in ()).throw(AssertionError("transport forbidden")),
+    )
+    value = service_cli.run_metadata_canary(
+        repository="o/r", pr_number=1, head_sha=head,
+        check_suite_id=1, check_run_id=2, run_id=3, job_id=4, artifact_id=5)
+    assert value["reason"] == "CANARY_INPUT_INVALID"
+
+
+def test_metadata_canary_rejects_pr_number_and_head_mismatch(monkeypatch):
+    head = "a" * 40
+
+    class FakeGh:
+        def get_pr(self, repo, number):
+            return {
+                "number": number + 1,
+                "base": {"sha": "b" * 40, "repo": {"full_name": repo}},
+                "head": {"sha": "c" * 40, "repo": {"full_name": repo}},
+            }
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository="o/r", pr_number=1, head_sha=head,
+        check_suite_id=1, check_run_id=2, run_id=3, job_id=4, artifact_id=5)
+    assert value["status"] == "CANARY_REJECTED"
+    assert {"CANARY_PR_NUMBER_MISMATCH", "CANARY_PR_HEAD_MISMATCH"} <= set(
+        value["evidence_gaps"]
+    )
+
+
+def test_metadata_canary_rejects_foreign_pr_repository(monkeypatch):
+    head = "a" * 40
+
+    class FakeGh:
+        def get_pr(self, repo, number):
+            return {
+                "number": number,
+                "base": {
+                    "sha": "b" * 40,
+                    "repo": {"full_name": "foreign/repo"},
+                },
+                "head": {
+                    "sha": head,
+                    "repo": {"full_name": "foreign/repo"},
+                },
+            }
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository="o/r", pr_number=1, head_sha=head,
+        check_suite_id=1, check_run_id=2, run_id=3, job_id=4, artifact_id=5)
+    assert value["evidence_gaps"] == ["CANARY_PR_REPOSITORY_MISMATCH"]
+
+
+def test_metadata_canary_redacts_long_secret_like_transport_error(monkeypatch):
+    head = "a" * 40
+    secret = "token_" + "x" * 5000
+
+    class FakeGh:
+        def get_pr(self, *args): raise RuntimeError(secret)
+
+    monkeypatch.setattr(service_cli, "GhCliTransport", FakeGh)
+    value = service_cli.run_metadata_canary(
+        repository="o/r", pr_number=1, head_sha=head,
+        check_suite_id=1, check_run_id=2, run_id=3, job_id=4, artifact_id=5)
+    assert value["evidence_gaps"] == ["CANARY_METADATA_READ_FAILED"]
+    assert secret not in json.dumps(value)
+
+
+def test_metadata_canary_rejection_is_a_failed_cli_exit(monkeypatch):
+    monkeypatch.setattr(service_cli, "run_metadata_canary", lambda **_: {
+        "status": "CANARY_REJECTED", "claim_ceiling": "CI_EVIDENCE_ONLY"
+    })
+    assert service_cli.main(["ci-metadata-canary", "--json"]) == 2
+
+
+def test_github_binary_read_rejects_oversized_archive_before_materializing(monkeypatch):
+    import tempfile
+    from reviewer.github import GhCliTransport, GitHubError
+
+    payload = tempfile.TemporaryFile()
+    payload.write(b"x" * 17)
+    payload.seek(0)
+
+    class Process:
+        stdout = payload
+        stderr = tempfile.TemporaryFile()
+
+        def wait(self, **_):
+            return 0
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr("reviewer.github.subprocess.Popen", lambda *a, **k: Process())
+    with pytest.raises(GitHubError, match="byte limit"):
+        GhCliTransport("gh")._get_bytes("repos/o/r/actions/artifacts/1/zip", max_bytes=16)
 
 
 def test_status_reports_launch_and_durable_queue(monkeypatch,tmp_path):

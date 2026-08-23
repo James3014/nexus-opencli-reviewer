@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Mapping
+from .receipt import ci_failure_evidence_manifest
 
 MAX_FIELD = 2_000
 MAX_BODY = 12_000
@@ -31,6 +32,8 @@ def render_advisory(
     reviewed_head: str,
     attempt_id: str,
     content_hash: str = "pending",
+    ci_failure_evidence: Mapping[str, Any] | None = None,
+    review_identity: tuple[Any, ...] | list[Any] | None = None,
 ) -> str:
     """Render an advisory-only comment from parser-validated semantic data."""
     if not isinstance(semantic_result, Mapping):
@@ -58,16 +61,50 @@ def render_advisory(
                     _safe(finding.get("reason", "")),
                 ])
             )
+    if ci_failure_evidence is not None:
+        try:
+            manifest = ci_failure_evidence_manifest(ci_failure_evidence)
+            if ci_failure_evidence.get("review_identity", [None, None, None])[2] != reviewed_head:
+                raise ValueError("CI_FAILURE_EVIDENCE_REVIEW_IDENTITY_MISMATCH")
+            if review_identity is None:
+                raise ValueError("CI_FAILURE_EVIDENCE_REVIEW_IDENTITY_REQUIRED")
+            if ci_failure_evidence.get("review_identity") != list(review_identity):
+                raise ValueError("CI_FAILURE_EVIDENCE_REVIEW_IDENTITY_MISMATCH")
+        except ValueError:
+            lines.extend(["", "CI Failure Intelligence", "State: UNKNOWN",
+                          "Evidence gap: CI evidence unavailable or untrusted."])
+            manifest = None
+        if manifest is not None:
+            lines.extend([
+                "",
+                "CI Failure Intelligence",
+                f"State: {_safe(ci_failure_evidence.get('state', 'UNKNOWN'), 32)}",
+                f"Trigger: {_safe(ci_failure_evidence.get('trigger') or 'none', 64)}",
+                f"Evidence capsule: {_safe(manifest.get('content_sha256', 'missing'), 128)}",
+                f"Claim ceiling: {_safe(ci_failure_evidence.get('claim_ceiling', 'CI_EVIDENCE_ONLY'), 128)}",
+            ])
+            gaps = ci_failure_evidence.get("evidence_gaps") or []
+            if gaps:
+                lines.append("Evidence gaps:")
+                lines.extend(f"- {_safe(gap, MAX_FIELD)}" for gap in gaps[:20])
     # Repeat the claim boundary after all untrusted text, so it cannot be
     # visually displaced by a field containing markdown/HTML controls.
-    lines.extend([
-        "",
+    terminal = "\n\n".join([
         "ADVISORY ONLY — NOT APPROVAL, ACCEPTANCE, VERIFICATION, OR MERGE AUTHORIZATION.",
         f"Publication identity: {_safe(attempt_id, 128)}",
         f"Publication marker: reviewer-publication-v1:{_safe(attempt_id, 128)}:{_safe(content_hash, 128)}",
-    ])
+    ]) + "\n"
     body = "\n".join(lines) + "\n"
-    return body[:MAX_BODY]
+    # Reserve the fixed terminal boundary before truncating any untrusted
+    # semantic/evidence fields.  This keeps the repeated claim and marker
+    # physically present even for a maximum-size valid response.
+    available = MAX_BODY - len(terminal) - 1
+    if available <= 0:
+        return terminal[-MAX_BODY:]
+    prefix = body[:available].rstrip()
+    if prefix:
+        prefix += "\n"
+    return prefix + terminal
 
 
 __all__ = ["render_advisory", "MAX_BODY", "MAX_FIELD"]

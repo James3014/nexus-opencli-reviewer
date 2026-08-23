@@ -56,6 +56,23 @@ def test_new_identity_and_head_update_are_discovered_automatically(tmp_path):
     assert service.run_once()["status"] == "COMPLETE"
     assert calls[0][0] == "review" and calls[0][1][2] == "h2"
 
+def test_same_head_terminal_failure_is_enqueued_once_and_new_attempt_is_distinct(tmp_path):
+    current = [item("h1")]
+    calls = []
+    service = UnattendedReviewService(repository="repo", discover=lambda: current,
+        review=lambda identity: calls.append(identity) or {"receipt": identity},
+        publish=lambda identity, result: True, root=tmp_path / "state")
+    assert service.run_once()["status"] == "IDLE"
+    current[0] = {**item("h1"), "checks": [{"name": "CI", "status": "pending"}]}
+    assert service.run_once()["status"] == "IDLE"
+    current[0] = {**item("h1"), "checks": [{"name": "CI", "status": "failure", "check_run_id": 7, "run_id": 9}]}
+    assert service.run_once()["status"] == "COMPLETE"
+    assert len(calls) == 1
+    assert service.run_once()["status"] == "IDLE"
+    current[0] = {**item("h1"), "checks": [{"name": "CI", "status": "failure", "check_run_id": 7, "run_id": 10}]}
+    assert service.run_once()["status"] == "COMPLETE"
+    assert len(calls) == 2
+
 
 def test_draft_to_ready_transition_is_queued(tmp_path):
     current = [item("h1", disposition="DRAFT")]

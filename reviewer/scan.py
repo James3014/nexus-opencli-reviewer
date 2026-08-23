@@ -6,6 +6,140 @@ from .queue import ReviewQueue
 from pathlib import Path
 import hashlib
 import json, os, re, tempfile, time
+import io, zipfile
+from dataclasses import asdict, replace
+from .models import CheckObservation
+
+_TERMINAL_FAILURES={'failure','failed','error','cancelled','timed_out','action_required'}
+_MAX_EVIDENCE_BYTES = 1024 * 1024
+
+def _bounded_evidence(value, limit=_MAX_EVIDENCE_BYTES):
+    """Hash only a bounded byte prefix; never interpret it as executable data."""
+    raw = value.encode() if isinstance(value, str) else bytes(value)
+    captured = raw[:limit]
+    return hashlib.sha256(captured).hexdigest(), len(captured), len(raw) > limit
+
+def _safe_archive_evidence(value, limit=_MAX_EVIDENCE_BYTES, max_members=256):
+    """Inspect a ZIP manifest without extraction or execution."""
+    digest, size, truncated = _bounded_evidence(value, limit)
+    if truncated:
+        return digest, size, True
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(bytes(value)))
+        members = archive.infolist()
+        if len(members) > max_members:
+            raise ValueError('artifact archive member bound exceeded')
+        for member in members:
+            parts = member.filename.replace('\\', '/').split('/')
+            if member.filename.startswith(('/', '\\')) or '..' in parts:
+                raise ValueError('unsafe artifact archive path')
+            if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError('unsafe artifact archive symlink')
+        return digest, size, False
+    except zipfile.BadZipFile as exc:
+        raise ValueError('invalid artifact archive') from exc
+
+def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
+    """Enrich failed checks with immutable, read-only GitHub evidence."""
+    enriched=[]; errors=[]
+    for check in check_rows:
+        row=dict(check)
+        status=str(row.get('conclusion') or row.get('status') or row.get('state','unknown')).lower()
+        if status not in _TERMINAL_FAILURES or row.get('expected_failure'):
+            enriched.append(row); continue
+        check_id=row.get('id') or row.get('check_run_id')
+        suite=row.get('check_suite') or {}
+        suite_id=row.get('check_suite_id') or suite.get('id')
+        run_id=None
+        if type(check_id) is not int or check_id<=0:
+            errors.append('check annotations: check run identity unavailable')
+        else:
+            try:
+                annotations=transport.list_check_annotations(repo,check_id)
+                row['annotation_count']=len(annotations)
+            except Exception as exc:
+                errors.append(f'check annotations: {type(exc).__name__}: {exc}')
+        if type(suite_id) is not int or suite_id<=0:
+            errors.append('workflow run: check-suite identity unavailable')
+        elif not hasattr(transport,'list_workflow_runs_for_suite'):
+            errors.append('workflow run: check-suite resolver unavailable')
+        else:
+            try:
+                runs=transport.list_workflow_runs_for_suite(repo,suite_id)
+                matching=[candidate for candidate in runs
+                          if type(candidate.get('id')) is int and candidate.get('head_sha') == pr_head_sha]
+                if len(matching) != 1:
+                    errors.append('workflow run: missing or ambiguous exact-head relationship')
+                    enriched.append(row)
+                    continue
+                run=transport.get_workflow_run(repo,matching[0]['id'])
+                run_id=run.get('id')
+                row['run_id']=run_id
+                run_head=run.get('head_sha')
+                if type(run_id) is not int or run_id<=0 or not run_head:
+                    errors.append('workflow run: exact identity incomplete')
+                elif run_head != pr_head_sha:
+                    errors.append('workflow run: foreign head identity')
+                row['workflow_name']=row.get('workflow_name') or run.get('name')
+                row['head_sha']=row.get('head_sha') or run_head
+                if not row.get('details_url'):
+                    row['details_url']=run.get('html_url') or run.get('logs_url')
+                row['run_attempt']=run.get('run_attempt')
+            except Exception as exc:
+                errors.append(f'workflow run: {type(exc).__name__}: {exc}')
+            try:
+                artifacts=transport.list_workflow_artifacts(repo,run_id)
+                identities=[str(x.get('id')) for x in artifacts if x.get('id') is not None]
+                if identities:
+                    row['artifact_identity']='|'.join(sorted(identities))
+                else:
+                    errors.append('workflow artifacts: artifact identity unavailable')
+                if identities and hasattr(transport, 'get_artifact_archive'):
+                    try:
+                        artifact_blob=transport.get_artifact_archive(repo, int(identities[0]))
+                        row['artifact_sha256'], _, row['artifact_truncated'] = _safe_archive_evidence(artifact_blob)
+                    except Exception as exc:
+                        errors.append(f'workflow artifacts: bounded content unavailable: {type(exc).__name__}: {exc}')
+            except Exception as exc:
+                errors.append(f'workflow artifacts: {type(exc).__name__}: {exc}')
+            if hasattr(transport, 'list_workflow_jobs'):
+                try:
+                    jobs=transport.list_workflow_jobs(repo, int(run_id))
+                    exact=[job for job in jobs if job.get('head_sha') == pr_head_sha
+                           and (job.get('run_id') in (None, run_id))]
+                    named=[job for job in exact if job.get('name') == row.get('name')]
+                    candidates=named or exact
+                    if len(candidates) != 1 or type(candidates[0].get('id')) is not int:
+                        errors.append('workflow job: missing or ambiguous exact-run relationship')
+                    else:
+                        job=candidates[0]
+                        row['job_identity']=str(job['id'])
+                        if hasattr(transport, 'get_job_log'):
+                            log_sha, _, log_truncated = _bounded_evidence(transport.get_job_log(repo, job['id']))
+                            row['log_sha256']=log_sha; row['log_truncated']=log_truncated
+                except Exception as exc:
+                    errors.append(f'workflow job: {type(exc).__name__}: {exc}')
+        enriched.append(row)
+    return enriched, errors
+
+def _ci_evidence_for(classification):
+    from .receipt import build_ci_failure_evidence
+    snapshot=classification.snapshot
+    failed=[asdict(x) for x in snapshot.checks
+            if x.status.lower() in _TERMINAL_FAILURES and not x.expected_failure]
+    if not failed:
+        return None
+    selected=failed[0]
+    return build_ci_failure_evidence(
+        repository=snapshot.repository, pr_number=snapshot.pr_number,
+        base_sha=snapshot.base_sha, head_sha=snapshot.head_sha,
+        current_main_sha=snapshot.current_main_sha, checks=failed,
+        collection_complete=snapshot.collection_complete,
+        collection_errors=snapshot.collection_errors,
+        expected_check_run_id=selected.get('check_run_id'),
+        expected_run_id=selected.get('run_id'),
+        expected_artifact_identity=selected.get('artifact_identity'),
+        canonical_disposition='NOT_AVAILABLE')
 
 def _atomic_json(path, value):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
@@ -32,9 +166,25 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
         errors=[]
         try: files=transport.list_files(repo,raw['number'])
         except Exception as e: files=[]; errors.append(f'changed_files: {e}')
-        try: checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
+        try:
+            checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
+            checks, enrichment_errors=_collect_check_evidence(
+                repo, checks, transport, raw.get('head',{}).get('sha',''))
+            errors.extend(enrichment_errors)
         except Exception as e: checks=[]; errors.append(f'checks: {e}')
         p=snapshot_from_github(repo,raw,main_sha,files,checks,observed,errors)
+        # Keep the normalizer's stable input contract while retaining additive
+        # evidence fields collected by this bounded CI enrichment pass.
+        if checks:
+            merged=[]
+            for current_check, row in zip(p.checks, checks):
+                values=asdict(current_check)
+                for field in ('job_identity', 'log_sha256', 'log_truncated',
+                              'artifact_sha256', 'artifact_truncated', 'run_attempt'):
+                    if field in row:
+                        values[field]=row[field]
+                merged.append(CheckObservation(**values))
+            p=replace(p, checks=tuple(merged))
         out.append(classify(p,authority_patterns) if authority_patterns else classify(p))
     detect(out); q=ReviewQueue();q.ingest(out)
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)
@@ -139,6 +289,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
             'raw_response_sha256':hashlib.sha256((result.raw or '').encode()).hexdigest() if result.raw else None,
             'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
         raise SemanticReviewError(f'{result.status} evidence={path}')
-    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result)
+    receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result,
+                         ci_failure_evidence=_ci_evidence_for(current))
     path=persist_receipt(state_root,receipt)
     return receipt,path
