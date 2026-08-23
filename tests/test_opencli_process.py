@@ -13,6 +13,7 @@ if command=='ask':
         print(json.dumps([{'conversationId':'c-'+mode,'response':response}]), flush=True)
     elif mode=='malformed': print('not-json', flush=True)
     elif mode=='nonzero': print('failure', flush=True); sys.exit(3)
+    elif mode=='nonzero-envelope': print(json.dumps([{'conversationId':'c-nonzero-envelope','response':'snapshot'}]), flush=True); sys.exit(3)
     elif mode=='partial': print('{"partial":', end='', flush=True); time.sleep(30)
     elif mode=='descendant': subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); time.sleep(30)
     elif mode=='ignore-term': signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)
@@ -39,6 +40,9 @@ def test_real_process_valid_malformed_nonzero(tmp_path):
     assert call(p,'ask-invalid-stable-valid').status=='REVIEW_COMPLETED'
     assert call(p,'malformed').status=='OPENCLI_PROCESS_FAILURE'
     assert call(p,'nonzero').status=='OPENCLI_PROCESS_FAILURE'
+    r=call(p,'nonzero-envelope')
+    assert r.status=='OPENCLI_PROCESS_FAILURE'
+    assert r.envelope['conversationId']=='c-nonzero-envelope'
 
 
 def test_stable_read_failures_do_not_fall_back_to_ask_snapshot(tmp_path):
