@@ -351,7 +351,7 @@ def _discover_reconcilable_attempts(root: Path, repository: str) -> list[dict[st
             if (
                 record.get("retry_safe") is False
                 and isinstance(result, dict)
-                and result.get("transport_result") == "OPENCLI_PROCESS_FAILURE"
+                and result.get("transport_result") in {"OPENCLI_PROCESS_FAILURE", "OPENCLI_STABLE_READ_FAILURE"}
                 and not record.get("reconciled")
             ):
                 records.append(record)
@@ -370,8 +370,12 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
         profile = str(attempt.get("browser_profile") or "")
         if not profile:
             continue
+        journal_conversation = ((attempt.get("result") or {}).get("conversation_id")
+                                if isinstance(attempt.get("result"), dict) else None)
         if conversation_ids:
             history = [{"Id": value} for value in conversation_ids]
+        elif isinstance(journal_conversation, str) and journal_conversation:
+            history = [{"Id": journal_conversation}]
         else:
             try:
                 history = _opencli_json(config.opencli_executable, profile,

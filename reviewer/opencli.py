@@ -132,8 +132,18 @@ class OpenCLITransport:
                           outcome_unknown=True, retry_safe=False,
                           started_at=started, finished_at=now())
         if returncode:
-            return result('OPENCLI_PROCESS_FAILURE', stdout or stderr, argv=redacted,
-                          started_at=started, finished_at=now())
+            envelope = None
+            try:
+                ask_rows = json.loads(stdout)
+                if (isinstance(ask_rows, list) and len(ask_rows) == 1
+                        and isinstance(ask_rows[0], dict)
+                        and isinstance(ask_rows[0].get('conversationId'), str)
+                        and ask_rows[0].get('conversationId')):
+                    envelope = ask_rows[0]
+            except (ValueError, json.JSONDecodeError, TypeError):
+                pass
+            return result('OPENCLI_PROCESS_FAILURE', stdout or stderr, envelope=envelope,
+                          argv=redacted, started_at=started, finished_at=now())
         try:
             ask_rows = json.loads(stdout)
             if (not isinstance(ask_rows, list) or len(ask_rows) != 1 or

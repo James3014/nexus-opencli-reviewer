@@ -274,7 +274,11 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
         except SemanticParseError: parse_result='REVIEW_PARSE_FAILED'
     terminal = (COMPLETED if result.status == 'REVIEW_COMPLETED' and parse_result == 'PARSED'
                 else (OUTCOME_UNKNOWN if getattr(result, 'outcome_unknown', False) or result.status == 'OPENCLI_OUTCOME_UNKNOWN' else FAILED))
-    finish_attempt(attempt_path, terminal, result={'transport_result': result.status, 'parse_result': parse_result}, retry_safe=False)
+    terminal_result={'transport_result': result.status, 'parse_result': parse_result}
+    envelope=getattr(result, 'envelope', None)
+    if isinstance(envelope, dict) and isinstance(envelope.get('conversationId'), str) and envelope.get('conversationId'):
+        terminal_result['conversation_id']=envelope['conversationId']
+    finish_attempt(attempt_path, terminal, result=terminal_result, retry_safe=False)
     if parse_result == 'REVIEW_PARSE_FAILED':
         path=persist_failure(state_root,attempt['attempt_id'],{
             'review_identity':list(context.review_identity),'context_pack_sha256':context.context_sha256,
@@ -287,6 +291,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
             'review_identity':list(context.review_identity),'context_pack_sha256':context.context_sha256,
             'prompt_sha256':prompt_sha,'transport_result':result.status,'parse_result':parse_result,
             'raw_response_sha256':hashlib.sha256((result.raw or '').encode()).hexdigest() if result.raw else None,
+            'conversation_id':terminal_result.get('conversation_id'),
             'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
         raise SemanticReviewError(f'{result.status} evidence={path}')
     receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result,

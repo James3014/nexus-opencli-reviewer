@@ -613,6 +613,45 @@ def test_reconcile_recovers_failed_opencli_process_failure_with_exact_prompt(mon
     assert fail_record["transport_result"] == "OPENCLI_PROCESS_FAILURE"
 
 
+def test_reconcile_uses_journaled_conversation_id_when_history_is_empty(monkeypatch, tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    identity = ["James3014/Nexus-new", 7, "h", "b", "m"]
+    prompt = "exact user prompt for journal recovery"
+    prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+    _, path = prepare_attempt(cfg.state_root, identity, "context-pack", prompt_sha, {},
+                              attempt_id="journal-conversation-attempt", browser_profile="profile-p")
+    mark_dispatching(path)
+    finish_attempt(path, "FAILED", result={
+        "transport_result": "OPENCLI_PROCESS_FAILURE",
+        "parse_result": "NOT_ATTEMPTED",
+        "conversation_id": "conv-journaled",
+    }, retry_safe=False)
+
+    semantic = json.dumps({"schema": "reviewer.semantic_response.v1", "status": "PASS", "summary": "ok", "findings": [], "evidence_gaps": []})
+    calls = []
+    def read_opencli(*a, **k):
+        calls.append(a[2])
+        assert "history" not in a[2]
+        assert "conv-journaled" in a[2]
+        return [
+            {"Role": "User", "Text": prompt},
+            {"Role": "Assistant", "Text": semantic, "Generating": False},
+        ]
+    monkeypatch.setattr(service_cli, "_opencli_json", read_opencli)
+    class Item:
+        review_identity = tuple(identity); findings = []; risk = "LOW"; snapshot = SimpleNamespace(source_identity="github", changed_files=())
+    monkeypatch.setattr(service_cli, "scan", lambda *a, **k: (None, "observed", [Item()], None))
+
+    recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new")
+    assert len(recovered) == 1
+    assert recovered[0]["receipt"]["conversation_id"] == "conv-journaled"
+    assert recovered[0]["receipt"]["semantic_result"]["status"] == "PASS"
+    assert all("history" not in call for call in calls)
+    assert json.loads(path.read_text())["state"] == "COMPLETED"
+
+
 def test_reconcile_negative_cases_for_failed_attempts(monkeypatch, tmp_path):
     import hashlib
     from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
