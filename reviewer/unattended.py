@@ -157,6 +157,26 @@ class UnattendedReviewService:
             ident = _identity(getattr(value, "review_identity", None))
             disposition = str(getattr(getattr(value, "disposition", ""), "value", getattr(value, "disposition", "")))
             record = {"review_identity": list(ident), "disposition": disposition}
+            snapshot = getattr(value, "snapshot", None)
+            raw_checks = getattr(snapshot, "checks", None)
+            if raw_checks is None:
+                raw_checks = getattr(value, "checks", None)
+            if raw_checks is not None:
+                checks = []
+                for check in raw_checks:
+                    if isinstance(check, Mapping):
+                        checks.append(dict(check))
+                    else:
+                        checks.append({
+                            "check_run_id": getattr(check, "check_run_id", None),
+                            "name": getattr(check, "name", None),
+                            "status": getattr(check, "status", None),
+                            "run_id": getattr(check, "run_id", None),
+                            "run_attempt": getattr(check, "run_attempt", None),
+                            "job_identity": getattr(check, "job_identity", None),
+                            "expected_failure": bool(getattr(check, "expected_failure", False)),
+                        })
+                record["checks"] = checks
         record["review_identity"] = list(ident)
         record["failure_fingerprint"] = _failure_fingerprint(record)
         record["identity_key"] = _key(ident, str(record.get("context_pack_sha256", "")),
