@@ -652,6 +652,76 @@ def test_reconcile_uses_journaled_conversation_id_when_history_is_empty(monkeypa
     assert json.loads(path.read_text())["state"] == "COMPLETED"
 
 
+def test_default_reconcile_bounds_legacy_history_work_and_preserves_skipped_attempts(monkeypatch, tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    paths = []
+    for index in range(3):
+        identity = ["James3014/Nexus-new", 100 + index, f"h{index}", "b", "m"]
+        prompt_sha = hashlib.sha256(f"prompt-{index}".encode()).hexdigest()
+        _, path = prepare_attempt(cfg.state_root, identity, "c", prompt_sha, {},
+                                  attempt_id=f"legacy-{index}", browser_profile="p")
+        mark_dispatching(path)
+        finish_attempt(path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE", "parse_result": "NOT_ATTEMPTED"}, retry_safe=False)
+        paths.append(path)
+
+    history_calls = []
+    def read_opencli(*a, **k):
+        if "history" in a[2]:
+            history_calls.append(a[2])
+            return []
+        raise AssertionError("detail must not be called without a history match")
+    monkeypatch.setattr(service_cli, "_opencli_json", read_opencli)
+
+    assert service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new") == []
+    assert len(history_calls) == 1
+    for path in paths:
+        record = json.loads(path.read_text())
+        assert record["state"] == "FAILED"
+        assert not record.get("reconciled")
+
+
+def test_default_reconcile_prioritizes_journaled_conversation_over_legacy(monkeypatch, tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    legacy_identity = ["James3014/Nexus-new", 101, "legacy-h", "b", "m"]
+    journal_identity = ["James3014/Nexus-new", 102, "journal-h", "b", "m"]
+    legacy_prompt = "legacy prompt"
+    journal_prompt = "journal prompt"
+
+    _, legacy_path = prepare_attempt(cfg.state_root, legacy_identity, "c1", hashlib.sha256(legacy_prompt.encode()).hexdigest(), {},
+                                     attempt_id="aaa-legacy", browser_profile="p", now="2026-01-01T00:00:00Z")
+    mark_dispatching(legacy_path, now="2026-01-01T00:00:01Z")
+    finish_attempt(legacy_path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE", "parse_result": "NOT_ATTEMPTED"}, retry_safe=False, now="2026-01-01T00:00:02Z")
+
+    _, journal_path = prepare_attempt(cfg.state_root, journal_identity, "c2", hashlib.sha256(journal_prompt.encode()).hexdigest(), {},
+                                      attempt_id="zzz-journal", browser_profile="p", now="2026-01-02T00:00:00Z")
+    mark_dispatching(journal_path, now="2026-01-02T00:00:01Z")
+    finish_attempt(journal_path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE", "parse_result": "NOT_ATTEMPTED", "conversation_id": "conv-exact"}, retry_safe=False, now="2026-01-02T00:00:02Z")
+
+    semantic = json.dumps({"schema": "reviewer.semantic_response.v1", "status": "PASS", "summary": "ok", "findings": [], "evidence_gaps": []})
+    calls = []
+    def read_opencli(*a, **k):
+        calls.append(a[2])
+        assert "history" not in a[2]
+        assert "conv-exact" in a[2]
+        return [{"Role": "User", "Text": journal_prompt}, {"Role": "Assistant", "Text": semantic, "Generating": False}]
+    monkeypatch.setattr(service_cli, "_opencli_json", read_opencli)
+    class Item:
+        review_identity = tuple(journal_identity); findings = []; risk = "LOW"; snapshot = SimpleNamespace(source_identity="github", changed_files=())
+    monkeypatch.setattr(service_cli, "scan", lambda *a, **k: (None, "observed", [Item()], None))
+
+    recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new")
+    assert [value["attempt_id"] for value in recovered] == ["zzz-journal"]
+    assert all("history" not in args for args in calls)
+    assert json.loads(journal_path.read_text())["state"] == "COMPLETED"
+    legacy = json.loads(legacy_path.read_text())
+    assert legacy["state"] == "FAILED"
+    assert not legacy.get("reconciled")
+
+
 def test_reconcile_negative_cases_for_failed_attempts(monkeypatch, tmp_path):
     import hashlib
     from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
