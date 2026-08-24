@@ -326,26 +326,29 @@ def test_ci_artifact_identity_only_is_valid_and_conflicts_are_unknown():
         current_main_sha="main", checks=[matching], canonical_disposition="NEW_REGRESSION",
         expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
     assert matching_evidence["state"] == "TRIGGERED"
-    provider_and_artifact = dict(base, external_id="provider-check")
-    separated = build_ci_failure_evidence(
+    # ``external_id`` is the provider's opaque check identifier (GitHub Actions
+    # uses a UUID) and lives in a different namespace from the Actions artifact
+    # identity; its presence must never invalidate exact artifact binding.
+    live_shape = dict(base, external_id="5b58ae80-d984-5173-ba6d-00dc0014718c")
+    live_evidence = build_ci_failure_evidence(
         repository="o/r", pr_number=1, base_sha="base", head_sha="head",
-        current_main_sha="main", checks=[provider_and_artifact], canonical_disposition="NEW_REGRESSION",
+        current_main_sha="main", checks=[live_shape], canonical_disposition="NEW_REGRESSION",
         expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
-    assert separated["state"] == "UNKNOWN"
-    assert "conflicting artifact identities" in separated["evidence_gaps"]
+    assert live_evidence["state"] == "TRIGGERED"
+    ci_failure_evidence_manifest(live_evidence)
     missing = dict(base); missing.pop("artifact_identity")
     missing_evidence = build_ci_failure_evidence(
         repository="o/r", pr_number=1, base_sha="base", head_sha="head",
         current_main_sha="main", checks=[missing], canonical_disposition="NEW_REGRESSION",
         expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
     assert missing_evidence["state"] == "UNKNOWN"
-    conflict = dict(base, external_id="other")
+    conflict = dict(base, external_id="other", artifact_identity="other-artifact")
     conflict_evidence = build_ci_failure_evidence(
         repository="o/r", pr_number=1, base_sha="base", head_sha="head",
         current_main_sha="main", checks=[conflict], canonical_disposition="NEW_REGRESSION",
         expected_check_run_id=1, expected_run_id=2, expected_artifact_identity="artifact")
     assert conflict_evidence["state"] == "UNKNOWN"
-    assert "conflicting artifact identities" in conflict_evidence["evidence_gaps"]
+    assert "foreign check artifact identity" in conflict_evidence["evidence_gaps"]
     with pytest.raises(ValueError, match="CI_FAILURE_EVIDENCE_IDENTITY_MISMATCH"):
         ci_failure_evidence_manifest(conflict_evidence)
 
@@ -400,10 +403,69 @@ def test_collected_failure_is_adapted_to_identity_bound_receipt_capsule():
     snapshot=snapshot_from_github(
         "o/r", {"number": 7, "base": {"sha": "base"}, "head": {"sha": "head"}},
         "main", [], [{"name": "CI", "conclusion": "failure", "id": 1,
-                       "run_id": 2, "external_id": "artifact", "head_sha": "head"}],
+                       "run_id": 2, "external_id": "artifact",
+                       "artifact_identity": "artifact", "head_sha": "head"}],
     )
     capsule=_ci_evidence_for(classify(snapshot))
     assert capsule["schema"] == "reviewer.ci_failure_evidence.v1"
     assert capsule["review_identity"] == ["o/r", 7, "head", "base", "main"]
     assert capsule["state"] == "UNKNOWN"
     assert "collection" not in " ".join(capsule["evidence_gaps"])
+
+
+def test_live_github_actions_failure_shape_produces_valid_capsule():
+    """Regression: real GitHub Actions checks carry a UUID ``external_id``
+    distinct from the numeric Actions artifact identity.  The live PR #537
+    failing-check shape must produce a capsule that passes its own manifest
+    instead of being rejected with CI_FAILURE_EVIDENCE_IDENTITY_MISMATCH."""
+    from reviewer.models import CheckObservation, Classification, Disposition, PRSnapshot
+    snapshot = PRSnapshot(
+        repository="James3014/Nexus-new", pr_number=537,
+        title="canary", state="OPEN", draft=False, mergeable=True,
+        base_branch="main", base_sha="35a18e91", head_branch="feature",
+        head_sha="4b6fa2bf", current_main_sha="6e261f22",
+        checks=(CheckObservation(
+            name="Exact-base impact gate", status="failure", expected_failure=False,
+            check_run_id=97237033874, run_id=32656935066, run_attempt=1,
+            external_id="5b58ae80-d984-5173-ba6d-00dc0014718c",
+            artifact_identity="9497704193", job_identity="97237033874",
+            head_sha="4b6fa2bf",
+        ),),
+    )
+    classification = Classification(snapshot=snapshot, disposition=Disposition.REVIEW_READY)
+    capsule = _ci_evidence_for(classification)
+    assert capsule is not None
+    assert ci_failure_evidence_manifest(capsule)["state"] == "UNKNOWN"
+    # And it must be bindable by make_receipt without raising ValueError.
+    from reviewer.receipt import make_receipt
+
+    class Context:
+        review_identity = ("James3014/Nexus-new", 537, "4b6fa2bf", "35a18e91", "6e261f22")
+        context_sha256 = "ctx"
+
+    class Transport:
+        raw = "response"
+        status = "REVIEW_COMPLETED"
+
+    receipt = make_receipt(Context(), classification, Transport(), "prompt", "observed",
+                           parsed={"schema": "reviewer.semantic_response.v1", "status": "BLOCKED",
+                                   "summary": "s", "findings": [], "evidence_gaps": []},
+                           parse_result="PARSED", ci_failure_evidence=capsule)
+    assert receipt["ci_failure_evidence"] == capsule
+
+
+def test_incomplete_enrichment_drops_evidence_instead_of_raising():
+    """When workflow-run/artifact enrichment cannot bind exact identities the
+    capsule would fail its own manifest; _ci_evidence_for must drop it (None)
+    rather than poison a completed semantic result with a post-invocation
+    ValueError."""
+    from reviewer.models import CheckObservation, Classification, Disposition, PRSnapshot
+    snapshot = PRSnapshot(
+        repository="o/r", pr_number=1, title="t", state="OPEN", draft=False,
+        mergeable=True, base_branch="main", base_sha="base", head_branch="feature",
+        head_sha="head", current_main_sha="main",
+        collection_errors=("workflow run: missing or ambiguous exact-head relationship",),
+        checks=(CheckObservation(name="CI", status="failure", check_run_id=1),),
+    )
+    assert _ci_evidence_for(Classification(snapshot=snapshot,
+                                           disposition=Disposition.REVIEW_READY)) is None
