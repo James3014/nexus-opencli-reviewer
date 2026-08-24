@@ -84,6 +84,7 @@ def prepare_attempt(
     version: str | None = None,
     browser_profile: str | None = None,
     session_mode: str = "ephemeral",
+    prompt_normalized_sha256: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Create a PREPARED record, refusing accidental attempt-id reuse."""
     ident = list(review_identity)
@@ -101,6 +102,7 @@ def prepare_attempt(
         "review_identity": ident,
         "context_pack_sha256": context_pack_sha256,
         "prompt_sha256": prompt_sha256,
+        "prompt_normalized_sha256": prompt_normalized_sha256,
         "provenance": provenance,
         "safe_argv": list(safe_argv or []),
         "opencli_executable": executable or provenance.get("executable", ""),
