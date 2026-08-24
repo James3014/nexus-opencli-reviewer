@@ -333,6 +333,9 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 RECONCILE_MAX_MISSES = 3
+# Automatic reconciliation is wall-time bounded per service cycle so read-only
+# recovery of old attempts can never starve actionable scheduler work.
+RECONCILE_CYCLE_BUDGET_SECONDS = 150.0
 
 
 def _has_journal_conversation(record: dict[str, Any]) -> bool:
@@ -410,12 +413,21 @@ def _record_reconcile_miss(root: Path, attempt: dict[str, Any]) -> None:
 
 def reconcile_semantic_history(config: ReviewerConfig, repository: str,
                                conversation_ids: list[str] | None = None,
-                               *, max_attempts: int | None = None) -> list[dict[str, Any]]:
+                               *, max_attempts: int | None = None,
+                               budget_seconds: float | None = RECONCILE_CYCLE_BUDGET_SECONDS) -> list[dict[str, Any]]:
     """Recover exact dispatched responses from read-only ChatGPT history.
 
     A conversation is accepted only when SHA-256 of its complete User message
     equals the journaled prompt hash. No fuzzy title/time matching is allowed.
+    Automatic passes are wall-time bounded so recovery of old attempts can
+    never starve actionable scheduler work; unreconciled attempts simply stay
+    pending for later cycles.
     """
+    deadline = (time.monotonic() + budget_seconds) if budget_seconds else None
+
+    def expired() -> bool:
+        return deadline is not None and time.monotonic() > deadline
+
     effective_limit = max_attempts if max_attempts is not None else (None if conversation_ids else 1)
     attempts = _discover_reconcilable_attempts(config.state_root, repository)
     if not conversation_ids:
@@ -429,6 +441,8 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
 
     recovered = []
     for attempt in attempts:
+        if expired():
+            break
         profile = str(attempt.get("browser_profile") or "")
         if not profile:
             continue
@@ -446,6 +460,8 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
                 continue
         match = None
         for row in history if isinstance(history, list) else []:
+            if expired():
+                break
             conversation = row.get("Id") or row.get("id")
             if not conversation:
                 continue
