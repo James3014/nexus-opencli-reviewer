@@ -223,6 +223,8 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
         if identity!=context.review_identity: raise ContextError('REVIEW_CONTEXT_STALE')
     prompt=envelope(context)
     prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+    from .semantic import canonical_message_text
+    prompt_normalized_sha = hashlib.sha256(canonical_message_text(prompt).encode()).hexdigest()
     old=reusable_receipt(state_root,context.review_identity,
                          context_sha256=context.context_sha256,
                          prompt_sha256=prompt_sha)
@@ -263,7 +265,8 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
                                           safe_argv=(semantic_transport.safe_argv() if hasattr(semantic_transport, 'safe_argv') else []),
                                           executable=provenance['executable'], version=provenance['version'],
                                           browser_profile=getattr(semantic_transport, 'profile', None),
-                                          session_mode='ephemeral')
+                                          session_mode='ephemeral',
+                                          prompt_normalized_sha256=prompt_normalized_sha)
     if dispatch_gate:
         gate=Path(dispatch_gate);deadline=time.monotonic()+120
         while not gate.exists():

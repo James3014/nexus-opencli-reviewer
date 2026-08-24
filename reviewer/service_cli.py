@@ -266,32 +266,58 @@ def _opencli_browser(executable: str, profile: str, args: list[str]) -> Any:
     return json.loads(result.stdout)
 
 
-def _browser_exact_response(executable: str, profile: str, conversation: str,
-                            expected_prompt_sha256: str) -> str | None:
-    """Recover a response only when a rendered User node hashes exactly.
+def _accepted_prompt_shas(record: dict[str, Any]) -> dict[str, list[str]]:
+    """Raw and renderer-canonicalized prompt SHAs accepted for recovery."""
+    raw = str(record.get("prompt_sha256") or "")
+    accepted = {"raw": [raw] if raw else [], "canonical": []}
+    normalized = record.get("prompt_normalized_sha256")
+    if isinstance(normalized, str) and normalized:
+        accepted["canonical"].append(normalized)
+    return accepted
 
-    ChatGPT's history/detail surface can truncate long messages.  The Browser
-    Bridge DOM retains the complete rendered message, but its outer container
-    may add UI labels.  Hash every User container/descendant and return the
-    Assistant text only after an exact journal-bound SHA-256 match.
+
+def _strip_ui_labels(text: str) -> str:
+    from .semantic import CHATGPT_UI_LABELS
+    for label in CHATGPT_UI_LABELS:
+        text = text.replace(label, "")
+    return text
+
+
+def _browser_exact_response(executable: str, profile: str, conversation: str,
+                            accepted_shas: dict[str, list[str]]) -> str | None:
+    """Recover a response only when a rendered User node is identity-bound.
+
+    ChatGPT's rendered surfaces collapse whitespace and append fixed UI
+    labels.  Each User container/descendant is therefore matched against the
+    journaled prompt SHA either byte-exactly or after the shared canonical
+    normalization (``_strip_ui_labels`` + whitespace removal).  Title/time or
+    other fuzzy matching is never used.
     """
     session = "reviewer-reconcile"
     _opencli_browser(executable, profile, [
         session, "open", f"https://chatgpt.com/c/{conversation}",
         "--window", "background",
     ])
-    expected = json.dumps(str(expected_prompt_sha256))
+    expected_raw = json.dumps([str(value) for value in accepted_shas.get("raw", [])])
+    expected_canonical = json.dumps([str(value) for value in accepted_shas.get("canonical", [])])
     script = f'''(async()=>{{
       const user=document.querySelector('[data-message-author-role="user"]');
       const assistant=document.querySelector('[data-message-author-role="assistant"]');
       if(!user||!assistant)return null;
-      const candidates=[user,...user.querySelectorAll('*')];
+      const expectedRaw={expected_raw};
+      const expectedCanonical={expected_canonical};
+      const clean=t=>t.replace(/顯示更多|顯示較少/g,'').replace(/\\s+/g,'');
+      async function sha(t){{
+        const bytes=new TextEncoder().encode(t);
+        const digest=await crypto.subtle.digest('SHA-256',bytes);
+        return Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,'0')).join('');
+      }}
+      const candidates=[user,...user.querySelectorAll('*')].slice(0,200);
       for(const node of candidates){{
         const text=node.textContent||'';
-        const bytes=new TextEncoder().encode(text);
-        const digest=await crypto.subtle.digest('SHA-256',bytes);
-        const sha=Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,'0')).join('');
-        if(sha==={expected}){{
+        if(!text)continue;
+        if(expectedCanonical.includes(await sha(clean(text)))
+           || expectedRaw.includes(await sha(text))){{
           const response=new TextEncoder().encode(assistant.textContent||'');
           return {{response_b64:btoa(String.fromCharCode(...response))}};
         }}
@@ -302,7 +328,7 @@ def _browser_exact_response(executable: str, profile: str, conversation: str,
     if not isinstance(value, dict) or not isinstance(value.get("response_b64"), str):
         return None
     try:
-        return base64.b64decode(value["response_b64"], validate=True).decode("utf-8")
+        return _strip_ui_labels(base64.b64decode(value["response_b64"], validate=True).decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         return None
 
@@ -446,6 +472,7 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
         profile = str(attempt.get("browser_profile") or "")
         if not profile:
             continue
+        accepted_shas = _accepted_prompt_shas(attempt)
         journal_conversation = ((attempt.get("result") or {}).get("conversation_id")
                                 if isinstance(attempt.get("result"), dict) else attempt.get("conversation_id"))
         if conversation_ids:
@@ -471,14 +498,17 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
                 detail = []
             user = next((x.get("Text") for x in detail if x.get("Role") == "User"), None) if isinstance(detail, list) else None
             assistant = next((x.get("Text") for x in reversed(detail) if x.get("Role") == "Assistant" and not x.get("Generating")), None) if isinstance(detail, list) else None
-            if (isinstance(user, str) and isinstance(assistant, str)
-                    and hashlib.sha256(user.encode()).hexdigest() == attempt.get("prompt_sha256")):
-                match = (str(conversation), assistant)
-                break
+            if isinstance(user, str) and isinstance(assistant, str):
+                from .semantic import message_identity_shas
+                observed_shas = message_identity_shas(user)
+                if (observed_shas["raw"] in accepted_shas["raw"]
+                        or observed_shas["canonical"] in accepted_shas["canonical"]):
+                    match = (str(conversation), _strip_ui_labels(assistant))
+                    break
             try:
                 assistant = _browser_exact_response(
                     config.opencli_executable, profile, str(conversation),
-                    str(attempt.get("prompt_sha256") or ""),
+                    accepted_shas,
                 )
             except Exception:
                 assistant = None

@@ -404,10 +404,83 @@ def test_browser_reconciliation_requires_exact_dom_hash(monkeypatch):
         calls.append(args)
         return {} if "open" in args else {"response_b64":base64.b64encode(b'{"schema":"reviewer.semantic_response.v1"}').decode()}
     monkeypatch.setattr(service_cli,"_opencli_browser",browser)
-    value=service_cli._browser_exact_response("opencli","profile","conversation","a"*64)
+    accepted={"raw":["a"*64],"canonical":[]}
+    value=service_cli._browser_exact_response("opencli","profile","conversation",accepted)
     assert value=='{"schema":"reviewer.semantic_response.v1"}'
     assert calls[0][0:3]==["reviewer-reconcile","open","https://chatgpt.com/c/conversation"]
-    assert "a"*64 in calls[1][-1]
+    assert ("a"*64) in calls[1][-1]
+
+
+def test_browser_reconciliation_accepts_renderer_canonicalized_prompt(monkeypatch):
+    """Regression (live PR #546): ChatGPT renders the prompt with collapsed
+    whitespace plus fixed UI labels, so byte-exact DOM hashing never matches a
+    completed remote response. Canonical SHA recovery must accept it."""
+    calls=[]
+    prompt={"schema":"reviewer.semantic_response.v1"}
+    dom_text='REVIEWER INSTRUCTIONS\nReview  only\tthe supplied data.顯示更多顯示較少'
+    canonical=service_cli and __import__("reviewer.semantic",fromlist=["canonical_message_text"]).canonical_message_text(dom_text)
+    import hashlib as _h
+    canon_sha=_h.sha256(canonical.encode()).hexdigest()
+    def browser(executable,profile,args):
+        calls.append(args)
+        if "open" in args: return {}
+        return {"response_b64":base64.b64encode(json.dumps(prompt).encode()).decode()}
+    monkeypatch.setattr(service_cli,"_opencli_browser",browser)
+    accepted={"raw":["b"*64],"canonical":[canon_sha]}
+    value=service_cli._browser_exact_response("opencli","profile","conversation",accepted)
+    assert value==json.dumps(prompt)
+
+
+def test_browser_reconciliation_strips_ui_labels_from_response(monkeypatch):
+    body='{"schema":"reviewer.semantic_response.v1"}顯示較少'
+    def browser(executable,profile,args):
+        if "open" in args: return {}
+        return {"response_b64":base64.b64encode(body.encode()).decode()}
+    monkeypatch.setattr(service_cli,"_opencli_browser",browser)
+    value=service_cli._browser_exact_response("opencli","profile","c",{"raw":["a"*64],"canonical":[]})
+    assert value=='{"schema":"reviewer.semantic_response.v1"}'
+
+
+def test_history_reconciliation_accepts_renderer_canonicalized_user_text(monkeypatch,tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching
+    from reviewer.semantic import canonical_message_text
+    cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","m"]
+    raw_prompt="line one\nline   two\tthree"
+    _,path=prepare_attempt(cfg.state_root,identity,"context",
+                           hashlib.sha256(raw_prompt.encode()).hexdigest(),{},
+                           attempt_id="canon",browser_profile="p",
+                           prompt_normalized_sha256=hashlib.sha256(canonical_message_text(raw_prompt).encode()).hexdigest())
+    mark_dispatching(path)
+    semantic=json.dumps({"schema":"reviewer.semantic_response.v1","status":"PASS","summary":"ok","findings":[],"evidence_gaps":[]})
+    rendered="line one line two three顯示更多"  # whitespace-collapsed + UI label
+    monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:
+        [{"Id":"c"}] if "history" in a[2]
+        else [{"Role":"User","Text":rendered},{"Role":"Assistant","Text":semantic+"顯示較少","Generating":False}])
+    class Item:
+        review_identity=tuple(identity); findings=[]; risk="LOW"; snapshot=SimpleNamespace(source_identity="github",changed_files=())
+    monkeypatch.setattr(service_cli,"scan",lambda *a,**k:(None,"observed",[Item()],None))
+    recovered=service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")
+    assert len(recovered)==1 and recovered[0]["receipt"]["semantic_result"]["status"]=="PASS"
+
+
+def test_history_reconciliation_rejects_wrong_prompt_even_canonically(monkeypatch,tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching
+    from reviewer.semantic import canonical_message_text
+    cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","m"]
+    _,path=prepare_attempt(cfg.state_root,identity,"context",
+                           hashlib.sha256("real prompt".encode()).hexdigest(),{},
+                           attempt_id="wrong",browser_profile="p",
+                           prompt_normalized_sha256=hashlib.sha256(canonical_message_text("real prompt").encode()).hexdigest())
+    mark_dispatching(path)
+    semantic=json.dumps({"schema":"reviewer.semantic_response.v1","status":"PASS","summary":"ok","findings":[],"evidence_gaps":[]})
+    monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:
+        [{"Id":"c"}] if "history" in a[2]
+        else [{"Role":"User","Text":"totally different attacker prompt"},{"Role":"Assistant","Text":semantic,"Generating":False}])
+    monkeypatch.setattr(service_cli,"_browser_exact_response",lambda *a,**k:None)
+    assert service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")==[]
+    assert json.loads(path.read_text())["state"]=="DISPATCHING"
 
 
 def test_history_reconciliation_uses_bounded_ephemeral_session(monkeypatch,tmp_path):
