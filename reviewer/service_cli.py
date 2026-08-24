@@ -43,7 +43,7 @@ SEMANTIC_TIMEOUT_SECONDS = 240
 # other local agents) `opencli chatgpt status` regularly needs 4-15s; the
 # previous 10s preflight timeout classified a healthy bridge as unhealthy and
 # blocked every dispatch.
-SEMANTIC_PREFLIGHT_TIMEOUT_SECONDS = 25
+SEMANTIC_PREFLIGHT_TIMEOUT_SECONDS = 45
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 

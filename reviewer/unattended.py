@@ -415,8 +415,11 @@ class UnattendedReviewService:
                 state["status"] = "RETRY_WAIT"
             else:
                 item["state"] = "semantic_failed"; state["status"] = "SEMANTIC_FAILED"
-            item["last_error"] = type(exc).__name__; item["updated_at"] = _now(); self.store.save(state)
-            return {"status": state["status"], "identity": list(identity), "error": type(exc).__name__}
+            item["last_error"] = type(exc).__name__
+            item["last_error_detail"] = str(exc)[:200]
+            item["updated_at"] = _now(); self.store.save(state)
+            return {"status": state["status"], "identity": list(identity), "error": type(exc).__name__,
+                    "detail": str(exc)[:200]}
         item["semantic_result"] = result
         if (self._semantic_status(result) == "BLOCKED"
                 and not self._is_publishable_cfi_blocked(result, identity)):
