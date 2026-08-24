@@ -100,6 +100,11 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
     if canonical_disposition not in dispositions:
         gaps.append("canonical disposition unavailable")
         canonical_disposition = "IMPACT_UNKNOWN"
+    elif canonical_disposition == "NOT_AVAILABLE":
+        # An explicitly unavailable canonical impact classification is itself
+        # an evidence gap; it must keep the capsule coherently in UNKNOWN
+        # state instead of producing a gap-less UNKNOWN capsule.
+        gaps.append("canonical disposition unavailable")
     if type(expected_check_run_id) is not int or expected_check_run_id <= 0:
         gaps.append("check run identity unavailable")
     if type(expected_run_id) is not int or expected_run_id <= 0:
@@ -131,12 +136,12 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
             gaps.append("foreign check identity")
         if item.get("run_id") != expected_run_id:
             gaps.append("foreign check run identity")
-        external = item.get("external_id")
+        # ``external_id`` is the provider's opaque check identifier; it is a
+        # distinct namespace from the Actions artifact identity and must never
+        # be compared against it.
         artifact = item.get("artifact_identity")
-        if ((external is not None and external != expected_artifact_identity)
-                or (artifact is not None and artifact != expected_artifact_identity)):
-            gaps.append("conflicting artifact identities" if external is not None and artifact is not None
-                        else "foreign check artifact identity")
+        if artifact is not None and artifact != expected_artifact_identity:
+            gaps.append("foreign check artifact identity")
     normalized.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
     if not collection_complete:
         state = "UNKNOWN"
@@ -214,12 +219,10 @@ def ci_failure_evidence_manifest(evidence):
     for check in checks:
         if not _valid_check_shape(check):
             raise ValueError("CI_FAILURE_EVIDENCE_CHECK_SHAPE_INVALID")
-        external = check.get("external_id")
         artifact = check.get("artifact_identity")
         if (check.get("head_sha") != identity[2]
                 or check.get("check_run_id") != expected_check
                 or check.get("run_id") != expected_run
-                or (external is not None and external != expected_artifact)
                 or (artifact is not None and artifact != expected_artifact)):
             raise ValueError("CI_FAILURE_EVIDENCE_IDENTITY_MISMATCH")
     allowed = {"NEW_REGRESSION", "EXACT_BASELINE_DEBT", "CI_BOOTSTRAP_DEFECT",

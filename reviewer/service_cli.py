@@ -36,6 +36,9 @@ MAX_CANARY_BYTES = 1024 * 1024
 MAX_EVIDENCE_GAPS = 32
 STOP_READBACK_TIMEOUT_SECONDS = 5.0
 STOP_READBACK_INTERVAL_SECONDS = 0.1
+# Live transport evidence: successful ChatGPT responses regularly need more
+# than the previous 120s default, and aborted asks cluster at ~127-138s.
+SEMANTIC_TIMEOUT_SECONDS = 240
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -329,22 +332,33 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
+RECONCILE_MAX_MISSES = 3
+
+
 def _has_journal_conversation(record: dict[str, Any]) -> bool:
     res = record.get("result")
     conv = res.get("conversation_id") if isinstance(res, dict) else record.get("conversation_id")
     return bool(isinstance(conv, str) and conv)
 
 
-def _attempt_reconciliation_sort_key(record: dict[str, Any]) -> tuple[int, str, str]:
-    has_journal = 0 if _has_journal_conversation(record) else 1
-    timestamp = str(
+def _attempt_timestamp(record: dict[str, Any]) -> str:
+    return str(
         record.get("dispatching_at")
         or record.get("started_at")
         or record.get("created_at")
         or ""
     )
-    attempt_id = str(record.get("attempt_id") or "")
-    return (has_journal, timestamp, attempt_id)
+
+
+def _order_reconcilable_attempts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Journaled-conversation attempts first, then newest failures first.
+
+    A live failure must never starve behind old attempts whose conversation
+    no longer exists; recency is the best available recovery prior.
+    """
+    records.sort(key=_attempt_timestamp, reverse=True)
+    records.sort(key=lambda record: 0 if _has_journal_conversation(record) else 1)
+    return records
 
 
 def _discover_reconcilable_attempts(root: Path, repository: str) -> list[dict[str, Any]]:
@@ -373,8 +387,25 @@ def _discover_reconcilable_attempts(root: Path, repository: str) -> list[dict[st
                 and not record.get("reconciled")
             ):
                 records.append(record)
-    records.sort(key=_attempt_reconciliation_sort_key)
-    return records
+    return _order_reconcilable_attempts(records)
+
+
+def _record_reconcile_miss(root: Path, attempt: dict[str, Any]) -> None:
+    """Count one bounded read-only recovery pass that found no exact match."""
+    if attempt.get("reconciled"):
+        return
+    attempt["reconcile_misses"] = int(attempt.get("reconcile_misses", 0)) + 1
+    attempt["last_reconcile_at"] = datetime.now(timezone.utc).replace(
+        microsecond=0).isoformat().replace("+00:00", "Z")
+    path = Path(root) / "reviews" / "attempts" / f"{attempt['attempt_id']}.json"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+        if current.get("attempt_id") != attempt.get("attempt_id"):
+            return
+        current.update({key: attempt[key] for key in ("reconcile_misses", "last_reconcile_at")})
+        _atomic_json(path, current)
+    except (OSError, ValueError):
+        pass
 
 
 def reconcile_semantic_history(config: ReviewerConfig, repository: str,
@@ -387,6 +418,12 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
     """
     effective_limit = max_attempts if max_attempts is not None else (None if conversation_ids else 1)
     attempts = _discover_reconcilable_attempts(config.state_root, repository)
+    if not conversation_ids:
+        # Automatic reconciliation retires attempts after a bounded number of
+        # full read-only passes found nothing; an explicit operator-provided
+        # conversation id always overrides the retirement.
+        attempts = [a for a in attempts
+                    if int(a.get("reconcile_misses") or 0) < RECONCILE_MAX_MISSES]
     if effective_limit is not None and effective_limit >= 0:
         attempts = attempts[:effective_limit]
 
@@ -433,6 +470,7 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
                 match = (str(conversation), assistant)
                 break
         if match is None:
+            _record_reconcile_miss(config.state_root, attempt)
             continue
         try:
             parsed = parse_response(match[1])
@@ -518,7 +556,8 @@ def build_service(config: ReviewerConfig, repository: str, *, bootstrap_canary: 
         profile = (health.profile or {}).get("id") or (health.profile or {}).get("contextId") or (health.profile or {}).get("name")
         if not profile:
             raise RuntimeError("PROFILE_SELECTION_AMBIGUOUS")
-        transport = OpenCLITransport(executable=config.opencli_executable, profile=str(profile))
+        transport = OpenCLITransport(executable=config.opencli_executable, profile=str(profile),
+                                     timeout=SEMANTIC_TIMEOUT_SECONDS)
         receipt, path = review_ready(
             repository, gh, int(identity[1]), semantic_transport=transport,
             state_root=config.state_root, profile_resolver=lambda: str(profile),

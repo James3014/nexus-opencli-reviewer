@@ -532,7 +532,7 @@ def test_build_service_end_to_end_persists_receipts_and_deduplicates(monkeypatch
 
     class FakeSemanticTransport:
         calls = 0
-        def __init__(self, executable="opencli", profile=None):
+        def __init__(self, executable="opencli", profile=None, **kwargs):
             self.executable, self.profile = executable, profile
             self.session_mode = "ephemeral"
         def version(self): return "fake-1"
@@ -862,3 +862,190 @@ def test_apply_recovered_legacy_ambiguity_fails_closed(tmp_path):
     service_cli._apply_recovered(fake, [{"identity": identity, "receipt": {"dummy": "receipt"}}])
     assert fake.store.value["queue"]["k1"]["state"] == "semantic_failed"
     assert fake.store.value["queue"]["k2"]["state"] == "outcome_unknown"
+
+
+def test_reconcile_prefers_newest_failed_attempt(tmp_path, monkeypatch):
+    """A live failure must be recovered before older unrecoverable attempts."""
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    old_prompt, new_prompt = "old prompt", "new prompt"
+    _, old_path = prepare_attempt(cfg.state_root, ["James3014/Nexus-new", 1, "h1", "b", "m"],
+                                  "c", hashlib.sha256(old_prompt.encode()).hexdigest(), {},
+                                  attempt_id="aaa-old", browser_profile="p",
+                                  now="2026-01-01T00:00:00Z")
+    mark_dispatching(old_path)
+    finish_attempt(old_path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE"}, retry_safe=False)
+    _, new_path = prepare_attempt(cfg.state_root, ["James3014/Nexus-new", 2, "h2", "b", "m"],
+                                  "c", hashlib.sha256(new_prompt.encode()).hexdigest(), {},
+                                  attempt_id="zzz-new", browser_profile="p",
+                                  now="2026-02-01T00:00:00Z")
+    mark_dispatching(new_path)
+    finish_attempt(new_path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE"}, retry_safe=False)
+
+    semantic = json.dumps({"schema": "reviewer.semantic_response.v1", "status": "PASS",
+                           "summary": "ok", "findings": [], "evidence_gaps": []})
+    probed = []
+
+    def read(*a, **k):
+        probed.append(a[2])
+        if "history" in a[2]:
+            return [{"Id": "conv"}]
+        return [{"Role": "User", "Text": new_prompt},
+                {"Role": "Assistant", "Text": semantic, "Generating": False}]
+
+    monkeypatch.setattr(service_cli, "_opencli_json", read)
+
+    class Item:
+        review_identity = ("James3014/Nexus-new", 2, "h2", "b", "m")
+        findings = []
+        risk = "LOW"
+        snapshot = SimpleNamespace(source_identity="github", changed_files=())
+
+    monkeypatch.setattr(service_cli, "scan", lambda *a, **k: (None, "observed", [Item()], None))
+    recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new")
+    assert [r["attempt_id"] for r in recovered] == ["zzz-new"]
+    assert json.loads(old_path.read_text())["state"] == "FAILED"
+
+
+def test_reconcile_retires_attempt_after_bounded_misses_but_operator_overrides(tmp_path, monkeypatch):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    prompt = "user prompt"
+    _, path = prepare_attempt(cfg.state_root, ["James3014/Nexus-new", 7, "h", "b", "m"],
+                              "c", hashlib.sha256(prompt.encode()).hexdigest(), {},
+                              attempt_id="stuck", browser_profile="p")
+    mark_dispatching(path)
+    finish_attempt(path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE"}, retry_safe=False)
+
+    history_calls = []
+
+    def read(*a, **k):
+        if "history" in a[2]:
+            history_calls.append(a[2])
+            return []
+        return [{"Role": "User", "Text": "unrelated"},
+                {"Role": "Assistant", "Text": "{}", "Generating": False}]
+
+    monkeypatch.setattr(service_cli, "_opencli_json", read)
+    for _ in range(service_cli.RECONCILE_MAX_MISSES):
+        assert service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new") == []
+    record = json.loads(path.read_text())
+    assert record["reconcile_misses"] == service_cli.RECONCILE_MAX_MISSES
+    assert record["state"] == "FAILED"
+    history_calls.clear()
+    # Retired: automatic reconciliation no longer burns reads on it.
+    assert service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new") == []
+    assert history_calls == []
+    # Operator override with an explicit conversation id still works.
+    commands = []
+    monkeypatch.setattr(service_cli, "_opencli_json",
+                        lambda *a, **k: commands.append(a[2]) or [])
+    service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new", ["conv-x"])
+    assert any("conv-x" in command for command in commands)
+
+
+def test_semantic_transport_timeout_is_extended_for_live_responses():
+    from reviewer.opencli import OpenCLITransport
+    assert service_cli.SEMANTIC_TIMEOUT_SECONDS >= 240
+    transport = OpenCLITransport(executable="opencli", profile="p",
+                                 timeout=service_cli.SEMANTIC_TIMEOUT_SECONDS)
+    assert "--timeout" in transport.safe_argv()
+    argv = [a for a in transport.safe_argv()]
+    assert argv[argv.index("--timeout") + 1] == str(service_cli.SEMANTIC_TIMEOUT_SECONDS)
+    assert transport.process_timeout > transport.timeout
+
+
+def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monkeypatch):
+    """End-to-end hostile check: a BLOCKED CFI result bound to live-shape
+    evidence reaches publication; the same fingerprint cycle does not run a
+    second semantic ask or create a second comment."""
+    from reviewer.models import CheckObservation, Classification, Disposition, PRSnapshot
+    from reviewer.unattended import UnattendedReviewService
+
+    def classification(pending=False):
+        return Classification(
+            snapshot=PRSnapshot(
+                repository="repo", pr_number=1, title="canary", state="OPEN",
+                draft=False, mergeable=True, base_branch="main", base_sha="base",
+                head_branch="feature", head_sha="head", current_main_sha="main",
+                checks=() if pending else (CheckObservation(
+                    name="Exact-base impact gate", status="failure",
+                    expected_failure=False, check_run_id=11, run_id=22,
+                    run_attempt=1, external_id="uuid-external",
+                    artifact_identity="333", job_identity="44",
+                    head_sha="head",
+                ),),
+            ),
+            disposition=Disposition.REVIEW_READY,
+        )
+
+    from reviewer.receipt import build_ci_failure_evidence
+    ci = build_ci_failure_evidence(
+        repository="repo", pr_number=1, base_sha="base", head_sha="head",
+        current_main_sha="main", canonical_disposition="NOT_AVAILABLE",
+        expected_check_run_id=11, expected_run_id=22,
+        expected_artifact_identity="333",
+        checks=[{"name": "Exact-base impact gate", "status": "failure",
+                 "check_run_id": 11, "run_id": 22, "run_attempt": 1,
+                 "external_id": "uuid-external", "artifact_identity": "333",
+                 "job_identity": "44", "head_sha": "head"}])
+    blocked_receipt = {
+        "schema": "reviewer.pre_review.v1",
+        "receipt_id": "r1",
+        "review_identity": ["repo", 1, "head", "base", "main"],
+        "claim_ceiling": "PRE_REVIEW_ONLY",
+        "context_pack_sha256": "ctx", "prompt_sha256": "prompt",
+        "outcome_unknown": False, "retry_safe": False,
+        "transport_result": "REVIEW_COMPLETED", "parse_result": "PARSED",
+        "ci_failure_evidence": ci,
+        "semantic_result": {"schema": "reviewer.semantic_response.v1",
+                            "status": "BLOCKED", "summary": "intentional canary failure diagnosed",
+                            "findings": [], "evidence_gaps": []},
+    }
+    comments = []
+    writes = []
+
+    class Gh:
+        def get_pr(self, repo, number):
+            return {"head": {"sha": "head"}, "base": {"sha": "base"}}
+
+        def get_ref(self, repo, branch):
+            return {"object": {"sha": "main"}}
+
+        def list_comments(self, repo, number):
+            return list(comments)
+
+        def create_comment(self, repo, number, body):
+            comment = {"id": len(comments) + 1, "body": body}
+            comments.append(comment)
+            writes.append(body)
+            return comment
+
+    reviews = []
+    current = [classification(pending=True)]
+    service = UnattendedReviewService(
+        repository="repo",
+        discover=lambda: current,
+        review=lambda identity: (reviews.append(identity), blocked_receipt)[1],
+        publish=lambda identity, receipt: (
+            lambda: (_ for _ in ()).throw(SystemExit("publish must route through publish_review"))
+        )() if False else service_publish(identity, receipt),
+        root=tmp_path / "state",
+    )
+
+    def service_publish(identity, receipt):
+        from reviewer.publication import publish_review
+        path = publish_review(tmp_path / "pub", Gh(), dict(receipt))
+        return {"status": "PUBLISHED", "evidence_path": str(path)}
+
+    assert service.run_once()["status"] == "IDLE"  # bootstrap cycle
+    current[0] = classification()  # terminal CI failure appears on same head
+    assert service.run_once()["status"] == "COMPLETE"
+    assert "PRE_REVIEW" in writes[0].upper()
+    # Same exact PR head + same failure fingerprint on later cycles: no new
+    # semantic invocation, no duplicate publication.
+    for _ in range(2):
+        assert service.run_once()["status"] == "IDLE"
+    assert len(reviews) == 1 and len(writes) == 1 and len(comments) == 1

@@ -123,23 +123,31 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
     return enriched, errors
 
 def _ci_evidence_for(classification):
-    from .receipt import build_ci_failure_evidence
+    from .receipt import build_ci_failure_evidence, ci_failure_evidence_manifest
     snapshot=classification.snapshot
     failed=[asdict(x) for x in snapshot.checks
             if x.status.lower() in _TERMINAL_FAILURES and not x.expected_failure]
     if not failed:
         return None
     selected=failed[0]
-    return build_ci_failure_evidence(
-        repository=snapshot.repository, pr_number=snapshot.pr_number,
-        base_sha=snapshot.base_sha, head_sha=snapshot.head_sha,
-        current_main_sha=snapshot.current_main_sha, checks=failed,
-        collection_complete=snapshot.collection_complete,
-        collection_errors=snapshot.collection_errors,
-        expected_check_run_id=selected.get('check_run_id'),
-        expected_run_id=selected.get('run_id'),
-        expected_artifact_identity=selected.get('artifact_identity'),
-        canonical_disposition='NOT_AVAILABLE')
+    try:
+        capsule=build_ci_failure_evidence(
+            repository=snapshot.repository, pr_number=snapshot.pr_number,
+            base_sha=snapshot.base_sha, head_sha=snapshot.head_sha,
+            current_main_sha=snapshot.current_main_sha, checks=failed,
+            collection_complete=snapshot.collection_complete,
+            collection_errors=snapshot.collection_errors,
+            expected_check_run_id=selected.get('check_run_id'),
+            expected_run_id=selected.get('run_id'),
+            expected_artifact_identity=selected.get('artifact_identity'),
+            canonical_disposition='NOT_AVAILABLE')
+        # Fail closed: an evidence capsule that cannot pass its own manifest
+        # is never bound to a receipt.  This must never discard an already
+        # completed semantic result with a post-invocation ValueError.
+        ci_failure_evidence_manifest(capsule)
+    except ValueError:
+        return None
+    return capsule
 
 def _atomic_json(path, value):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
