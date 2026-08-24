@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1049,3 +1050,62 @@ def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monk
     for _ in range(2):
         assert service.run_once()["status"] == "IDLE"
     assert len(reviews) == 1 and len(writes) == 1 and len(comments) == 1
+
+
+def test_reconcile_cycle_budget_stops_before_starving_work(monkeypatch, tmp_path):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    for index in range(2):
+        _, path = prepare_attempt(cfg.state_root, ["James3014/Nexus-new", 7 + index, f"h{index}", "b", "m"],
+                                  "c", hashlib.sha256(f"p{index}".encode()).hexdigest(), {},
+                                  attempt_id=f"budget-{index}", browser_profile="p")
+        mark_dispatching(path)
+        finish_attempt(path, "FAILED", result={"transport_result": "OPENCLI_PROCESS_FAILURE"}, retry_safe=False)
+
+    calls = []
+
+    def slow_read(*a, **k):
+        calls.append(a[2])
+        time.sleep(0.05)
+        return [] if "history" in a[2] else []
+
+    monkeypatch.setattr(service_cli, "_opencli_json", slow_read)
+    monkeypatch.setattr(service_cli, "_browser_exact_response", lambda *a, **k: None)
+    recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new",
+                                                       budget_seconds=0.06,
+                                                       max_attempts=None)
+    assert recovered == []
+    # The budget stopped the loop before both attempts were fully processed.
+    assert len(calls) <= 4
+
+
+def test_reconcile_budget_disabled_for_explicit_operator_pass(tmp_path, monkeypatch):
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching, finish_attempt
+    cfg = config(tmp_path)
+    prompt = "operator prompt"
+    _, path = prepare_attempt(cfg.state_root, ["James3014/Nexus-new", 7, "h", "b", "m"],
+                              "c", hashlib.sha256(prompt.encode()).hexdigest(), {},
+                              attempt_id="op-1", browser_profile="p")
+    mark_dispatching(path)
+    finish_attempt(path, "FAILED",
+                   result={"transport_result": "OPENCLI_PROCESS_FAILURE", "conversation_id": "conv-op"},
+                   retry_safe=False)
+    semantic = json.dumps({"schema": "reviewer.semantic_response.v1", "status": "PASS",
+                           "summary": "ok", "findings": [], "evidence_gaps": []})
+
+    class Item:
+        review_identity = ("James3014/Nexus-new", 7, "h", "b", "m")
+        findings = []
+        risk = "LOW"
+        snapshot = SimpleNamespace(source_identity="github", changed_files=())
+
+    monkeypatch.setattr(service_cli, "_opencli_json",
+                        lambda *a, **k: [{"Role": "User", "Text": prompt},
+                                         {"Role": "Assistant", "Text": semantic, "Generating": False}])
+    monkeypatch.setattr(service_cli, "scan", lambda *a, **k: (None, "observed", [Item()], None))
+    time.sleep(0.2)  # exceed any default budget slice before the single call
+    recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new", ["conv-op"],
+                                                       budget_seconds=0.01)
+    assert [r["attempt_id"] for r in recovered] == ["op-1"]
