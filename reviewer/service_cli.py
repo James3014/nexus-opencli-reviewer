@@ -39,6 +39,11 @@ STOP_READBACK_INTERVAL_SECONDS = 0.1
 # Live transport evidence: successful ChatGPT responses regularly need more
 # than the previous 120s default, and aborted asks cluster at ~127-138s.
 SEMANTIC_TIMEOUT_SECONDS = 240
+# Under concurrent Browser Bridge load (read-only reconciliation sessions,
+# other local agents) `opencli chatgpt status` regularly needs 4-15s; the
+# previous 10s preflight timeout classified a healthy bridge as unhealthy and
+# blocked every dispatch.
+SEMANTIC_PREFLIGHT_TIMEOUT_SECONDS = 25
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -592,7 +597,8 @@ def build_service(config: ReviewerConfig, repository: str, *, bootstrap_canary: 
 
     def review(identity):
         supervisor = RuntimeSupervisor(
-            lambda: preflight_opencli(config.opencli_executable),
+            lambda: preflight_opencli(config.opencli_executable,
+                                      timeout=SEMANTIC_PREFLIGHT_TIMEOUT_SECONDS),
             lambda: _daemon_restart(config.opencli_executable),
             base_backoff=30, max_backoff=1800,
         )
