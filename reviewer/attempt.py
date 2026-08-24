@@ -85,6 +85,7 @@ def prepare_attempt(
     browser_profile: str | None = None,
     session_mode: str = "ephemeral",
     prompt_normalized_sha256: str | None = None,
+    prompt_text: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Create a PREPARED record, refusing accidental attempt-id reuse."""
     ident = list(review_identity)
@@ -103,6 +104,7 @@ def prepare_attempt(
         "context_pack_sha256": context_pack_sha256,
         "prompt_sha256": prompt_sha256,
         "prompt_normalized_sha256": prompt_normalized_sha256,
+        "prompt_text_path": None,
         "provenance": provenance,
         "safe_argv": list(safe_argv or []),
         "opencli_executable": executable or provenance.get("executable", ""),
@@ -115,6 +117,26 @@ def prepare_attempt(
         "finished_at": None,
         "retry_safe": True,
     }
+    if prompt_text is not None:
+        # Persist the exact dispatched prompt bytes for forensic verification
+        # of renderer-transformed recovery candidates.  Local state only.
+        prompt_dir = Path(root) / "reviews" / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = prompt_dir / f"{aid}.txt"
+        data = prompt_text.encode("utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=f".{prompt_path.name}.", suffix=".tmp", dir=prompt_dir)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, prompt_path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+        record["prompt_text_path"] = str(prompt_path)
     _atomic_write(path, record)
     return record, path
 

@@ -266,7 +266,8 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
                                           executable=provenance['executable'], version=provenance['version'],
                                           browser_profile=getattr(semantic_transport, 'profile', None),
                                           session_mode='ephemeral',
-                                          prompt_normalized_sha256=prompt_normalized_sha)
+                                          prompt_normalized_sha256=prompt_normalized_sha,
+                                          prompt_text=prompt)
     if dispatch_gate:
         gate=Path(dispatch_gate);deadline=time.monotonic()+120
         while not gate.exists():
