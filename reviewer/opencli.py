@@ -70,7 +70,12 @@ class OpenCLITransport:
                 partial_out += self._text(getattr(expired_after_term, 'output', None))
                 partial_err += self._text(getattr(expired_after_term, 'stderr', None))
                 self._stop_group(process, signal.SIGKILL)
-                out, err = process.communicate()
+                try:
+                    # Even after SIGKILL a detached descendant may hold the
+                    # pipes; the final read must never block the daemon.
+                    out, err = process.communicate(timeout=self.terminate_grace)
+                except subprocess.TimeoutExpired:
+                    out, err = '', ''
             return self._text(out) or partial_out, self._text(err) or partial_err, True
 
     def _run_process(self, args, env):

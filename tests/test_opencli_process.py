@@ -16,6 +16,9 @@ if command=='ask':
     elif mode=='nonzero-envelope': print(json.dumps([{'conversationId':'c-nonzero-envelope','response':'snapshot'}]), flush=True); sys.exit(3)
     elif mode=='partial': print('{"partial":', end='', flush=True); time.sleep(30)
     elif mode=='descendant': subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); time.sleep(30)
+    elif mode=='setsid-descendant':
+        subprocess.Popen([sys.executable,'-c','import os,time; os.setsid(); time.sleep(30)'])
+        time.sleep(30)
     elif mode=='ignore-term': signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)
 elif command=='detail':
     mode=value.removeprefix('c-')
@@ -62,3 +65,16 @@ def test_real_process_kills_ignored_term_and_descendant(tmp_path):
     p=shim(tmp_path)
     assert call(p,'ignore-term',process_timeout=.15,terminate_grace=.05).outcome_unknown
     assert call(p,'descendant',process_timeout=.15,terminate_grace=.05).outcome_unknown
+
+
+def test_timeout_final_read_is_bounded_when_setsid_descendant_holds_pipes(tmp_path):
+    """Regression (live 18-min daemon stall): after SIGTERM/SIGKILL a detached
+    setsid descendant can still hold the stdout pipes; the final read must be
+    bounded instead of blocking the service cycle."""
+    import time as _time
+    p=shim(tmp_path)
+    started=_time.monotonic()
+    r=call(p,'setsid-descendant',process_timeout=.15,terminate_grace=.05)
+    elapsed=_time.monotonic()-started
+    assert r.outcome_unknown
+    assert elapsed < 10, f"transport blocked for {elapsed:.1f}s"
