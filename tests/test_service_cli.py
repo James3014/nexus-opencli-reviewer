@@ -623,7 +623,7 @@ def test_build_service_end_to_end_persists_receipts_and_deduplicates(monkeypatch
     monkeypatch.setattr(service_cli, "GhCliTransport", lambda: gh)
     monkeypatch.setattr(service_cli, "OpenCLITransport", FakeSemanticTransport)
     monkeypatch.setattr(service_cli, "preflight_opencli",
-                        lambda executable: PreflightResult("READY", profile={"id": "profile-1"}))
+                        lambda executable, **kwargs: PreflightResult("READY", profile={"id": "profile-1"}))
     monkeypatch.setattr(service_cli, "_daemon_restart", lambda executable: True)
     cfg = ReviewerConfig(repositories=("owner/repo",), poll_interval_seconds=5,
                          state_root=tmp_path / "state", log_path=tmp_path / "service.log",
@@ -1246,3 +1246,15 @@ def test_markdown_canonicalization_rejects_content_substitution(tmp_path, monkey
     monkeypatch.setattr(service_cli,"_browser_exact_response",lambda *a,**k:None)
     assert service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")==[]
     assert json.loads(path.read_text())["state"]=="DISPATCHING"
+
+
+def test_preflight_health_check_budget_accommodates_loaded_bridge():
+    """Regression (live PR #553 observation): under concurrent Browser Bridge
+    load the read-only status probe needs 4-15s; a 10s preflight timeout
+    classified healthy bridges as OPENCLI_TRANSPORT_FAILURE and blocked every
+    semantic dispatch with RuntimeError retry storms."""
+    from reviewer.preflight import preflight_opencli
+    import inspect
+    assert service_cli.SEMANTIC_PREFLIGHT_TIMEOUT_SECONDS >= 25
+    src = inspect.getsource(service_cli.build_service)
+    assert "SEMANTIC_PREFLIGHT_TIMEOUT_SECONDS" in src
