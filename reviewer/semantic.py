@@ -3,14 +3,20 @@ import hashlib
 import json
 MAX_TEXT=10_000; MAX_ITEMS=50
 # ChatGPT's rendered conversation surfaces append fixed UI chrome to message
-# text ("show more"/"show less") and collapse whitespace.  Canonicalization
-# removes exactly these known renderer artifacts so a recovered conversation
-# can be verified against the journaled prompt without ever fuzzy-matching.
+# text ("show more"/"show less"), collapse whitespace, and swallow Markdown
+# markup characters (live witness: paired backticks around SHAs disappear).
+# Canonicalization removes exactly these known renderer artifacts so a
+# recovered conversation can be verified against the journaled prompt without
+# ever fuzzy-matching.
 CHATGPT_UI_LABELS=("顯示更多","顯示較少")
+CHATGPT_MARKDOWN_SWALLOWED_CHARS="`*_~#>|"
 def canonical_message_text(text):
     for label in CHATGPT_UI_LABELS:
         text=text.replace(label,"")
-    return "".join(text.split())
+    text="".join(text.split())
+    for ch in CHATGPT_MARKDOWN_SWALLOWED_CHARS:
+        text=text.replace(ch,"")
+    return text
 def message_identity_shas(text):
     return {
         "raw":hashlib.sha256(text.encode()).hexdigest(),

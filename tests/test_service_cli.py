@@ -1182,3 +1182,67 @@ def test_reconcile_budget_disabled_for_explicit_operator_pass(tmp_path, monkeypa
     recovered = service_cli.reconcile_semantic_history(cfg, "James3014/Nexus-new", ["conv-op"],
                                                        budget_seconds=0.01)
     assert [r["attempt_id"] for r in recovered] == ["op-1"]
+
+
+def test_history_reconciliation_accepts_markdown_rendered_prompt(tmp_path, monkeypatch):
+    """Regression on the exact live fcff230d witness (canary PR #547): ChatGPT
+    rendering swallows Markdown backticks inside the message and appends UI
+    labels. The journaled v2 canonical SHA must still bind the rendered
+    conversation; the recovered assistant text must be label-stripped."""
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching
+    from reviewer.semantic import canonical_message_text
+    cfg=config(tmp_path); identity=["James3014/Nexus-new",547,"h","b","m"]
+    raw_prompt=("REVIEWER INSTRUCTIONS\nBEGIN_UNTRUSTED_PR_DATA\n"
+                'exact-bound to current main `055f232b72463fc069b9b59845c06abb97e33f98`, '
+                "line two with  spaces\nEND_UNTRUSTED_PR_DATA return json")
+    _,path=prepare_attempt(cfg.state_root,identity,"ctx",
+                           hashlib.sha256(raw_prompt.encode()).hexdigest(),{},
+                           attempt_id="md-render",browser_profile="p",
+                           prompt_normalized_sha256=hashlib.sha256(canonical_message_text(raw_prompt).encode()).hexdigest(),
+                           prompt_text=raw_prompt)
+    mark_dispatching(path)
+    # ChatGPT rendering: backticks swallowed, whitespace collapsed, label appended.
+    rendered=raw_prompt.replace("`","").replace("\n"," ").replace("  "," ")+"顯示更多"
+    semantic=json.dumps({"schema":"reviewer.semantic_response.v1","status":"BLOCKED",
+                         "summary":"intentional canary failure diagnosed","findings":[],"evidence_gaps":[]})
+    monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:
+        [{"Id":"c"}] if "history" in a[2]
+        else [{"Role":"User","Text":rendered},
+              {"Role":"Assistant","Text":semantic+"顯示較少","Generating":False}])
+    class Item:
+        review_identity=tuple(identity); findings=[]; risk="LOW"; snapshot=SimpleNamespace(source_identity="github",changed_files=())
+    monkeypatch.setattr(service_cli,"scan",lambda *a,**k:(None,"observed",[Item()],None))
+    recovered=service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")
+    assert len(recovered)==1
+    receipt=recovered[0]["receipt"]
+    assert receipt["semantic_result"]["status"]=="BLOCKED"
+    assert "顯示較少" not in receipt["semantic_result"]["summary"]
+    # Exact dispatched prompt bytes are journaled for forensic verification.
+    record=json.loads(path.read_text())
+    stored=open(record["prompt_text_path"]).read()
+    assert hashlib.sha256(stored.encode()).hexdigest()==record["prompt_sha256"]
+
+
+def test_markdown_canonicalization_rejects_content_substitution(tmp_path, monkeypatch):
+    """A foreign conversation that only shares the renderer shape (backtick
+    stripping, labels) but different content must never match."""
+    import hashlib
+    from reviewer.attempt import prepare_attempt, mark_dispatching
+    from reviewer.semantic import canonical_message_text
+    cfg=config(tmp_path); identity=["James3014/Nexus-new",7,"h","b","m"]
+    raw_prompt="bind to `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` exact content"
+    _,path=prepare_attempt(cfg.state_root,identity,"ctx",
+                           hashlib.sha256(raw_prompt.encode()).hexdigest(),{},
+                           attempt_id="foreign",browser_profile="p",
+                           prompt_normalized_sha256=hashlib.sha256(canonical_message_text(raw_prompt).encode()).hexdigest())
+    mark_dispatching(path)
+    attacker="bind to `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` exact content"
+    rendered=attacker.replace("`","")+"顯示更多"
+    semantic=json.dumps({"schema":"reviewer.semantic_response.v1","status":"PASS","summary":"x","findings":[],"evidence_gaps":[]})
+    monkeypatch.setattr(service_cli,"_opencli_json",lambda *a,**k:
+        [{"Id":"c"}] if "history" in a[2]
+        else [{"Role":"User","Text":rendered},{"Role":"Assistant","Text":semantic,"Generating":False}])
+    monkeypatch.setattr(service_cli,"_browser_exact_response",lambda *a,**k:None)
+    assert service_cli.reconcile_semantic_history(cfg,"James3014/Nexus-new")==[]
+    assert json.loads(path.read_text())["state"]=="DISPATCHING"
