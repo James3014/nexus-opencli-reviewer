@@ -1,9 +1,11 @@
 from __future__ import annotations
-import json, re, selectors, subprocess, time
+import json, os, re, selectors, socket, subprocess, time
+import urllib.error, urllib.request
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 REPO_RE=re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+READ_TIMEOUTS=(30,15)
 class GitHubError(RuntimeError): pass
 class GitHubTransport(Protocol):
     def get_ref(self, repo:str, branch:str)->dict[str,Any]: ...
@@ -25,25 +27,77 @@ class GitHubTransport(Protocol):
     def list_comments(self, repo:str, pr_number:int)->list[dict[str,Any]]: ...
 
 class GhCliTransport:
-    def __init__(self, gh='gh'): self.gh=gh
+    def __init__(self, gh='gh'):
+        self.gh=gh
+        self._token=None
     def _validate(self,repo):
         if not REPO_RE.fullmatch(repo): raise ValueError('repository must be owner/name')
+    def _env(self):
+        if not self._token:
+            return None
+        env=os.environ.copy();env['GH_TOKEN']=self._token
+        return env
+    def _http_get(self,endpoint,*,accept='application/vnd.github+json'):
+        self._validate_endpoint(endpoint)
+        if not self._token:
+            self.auth_preflight()
+        request=urllib.request.Request(
+            f'https://api.github.com/{endpoint}',
+            headers={
+                'Authorization': f'Bearer {self._token}',
+                'Accept': accept,
+                'X-GitHub-Api-Version': '2022-11-28',
+                'User-Agent': 'nexus-opencli-reviewer',
+            },
+            method='GET',
+        )
+        last_error=None
+        for index,timeout in enumerate(READ_TIMEOUTS):
+            try:
+                with urllib.request.urlopen(request,timeout=timeout) as response:
+                    return response.read()
+            except urllib.error.HTTPError as exc:
+                try: detail=exc.read(8192).decode(errors='replace').strip()
+                except Exception: detail=''
+                raise GitHubError(detail or f'GitHub HTTP {exc.code}') from exc
+            except (urllib.error.URLError,TimeoutError,socket.timeout,OSError) as exc:
+                last_error=exc
+                if index+1 < len(READ_TIMEOUTS):
+                    time.sleep(.25)
+                    continue
+                raise GitHubError(str(exc)) from exc
+        raise GitHubError(str(last_error) if last_error else 'GitHub read failed')
     def _get(self, endpoint, **params):
         if params:
             sep='&' if '?' in endpoint else '?'
             endpoint += sep + '&'.join(f'{k}={v}' for k,v in params.items())
-        args=[self.gh,'api',endpoint]
-        try: p=subprocess.run(args,check=False,capture_output=True,text=True,timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as e: raise GitHubError(str(e)) from e
-        if p.returncode: raise GitHubError(p.stderr.strip() or 'gh api failed')
-        try:return json.loads(p.stdout)
-        except json.JSONDecodeError as e:raise GitHubError('invalid GitHub JSON') from e
+        raw=self._http_get(endpoint)
+        try:return json.loads(raw.decode())
+        except (UnicodeDecodeError,json.JSONDecodeError) as e:raise GitHubError('invalid GitHub JSON') from e
     def auth_preflight(self):
-        try:
-            p=subprocess.run([self.gh,'auth','status'],check=False,capture_output=True,text=True,timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            raise GitHubError(f'GitHub auth/read access unavailable: {e}') from e
-        if p.returncode: raise GitHubError('GitHub auth/read access unavailable')
+        if self._token:
+            return
+        last_timeout=None
+        for index,timeout in enumerate(READ_TIMEOUTS):
+            try:
+                p=subprocess.run([self.gh,'auth','token','--hostname','github.com'],check=False,
+                                 capture_output=True,text=True,timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                last_timeout=exc
+                if index+1 < len(READ_TIMEOUTS):
+                    time.sleep(.25)
+                    continue
+                raise GitHubError(f'GitHub auth credential unavailable: {exc}') from exc
+            except OSError as exc:
+                raise GitHubError(f'GitHub auth credential unavailable: {exc}') from exc
+            if p.returncode:
+                raise GitHubError('GitHub auth credential unavailable')
+            token=p.stdout.strip()
+            if not token:
+                raise GitHubError('GitHub auth credential unavailable')
+            self._token=token
+            return
+        raise GitHubError(f'GitHub auth credential unavailable: {last_timeout}')
     def get_ref(self,repo,branch):
         self._validate(repo); return self._get(f'repos/{repo}/git/ref/heads/{branch}')
     def _paginate(self, endpoint):
@@ -106,7 +160,7 @@ class GhCliTransport:
         process = None
         try:
             process = subprocess.Popen([self.gh, 'api', endpoint], stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE)
+                                       stderr=subprocess.PIPE, env=self._env())
             assert process.stdout is not None
             selector = selectors.DefaultSelector()
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -164,16 +218,19 @@ class GhCliTransport:
         except Exception as e:raise GitHubError('task card acquisition failed') from e
     def get_patch(self,repo,number):
         self._validate(repo)
-        args=[self.gh,'api',f'repos/{repo}/pulls/{int(number)}','-H','Accept: application/vnd.github.v3.patch']
-        try:p=subprocess.run(args,check=False,capture_output=True,text=True,timeout=30)
-        except (OSError,subprocess.TimeoutExpired) as e:raise GitHubError(str(e)) from e
-        if p.returncode:raise GitHubError(p.stderr.strip() or 'patch acquisition failed')
-        return p.stdout
+        try:
+            return self._http_get(
+                f'repos/{repo}/pulls/{int(number)}',
+                accept='application/vnd.github.v3.patch',
+            ).decode()
+        except UnicodeDecodeError as exc:
+            raise GitHubError('patch acquisition failed') from exc
 
     def _post(self, endpoint, payload):
         args=[self.gh,'api',endpoint,'--method','POST','--input','-']
         try:
-            p=subprocess.run(args,input=json.dumps(payload),check=False,capture_output=True,text=True,timeout=30)
+            p=subprocess.run(args,input=json.dumps(payload),check=False,capture_output=True,text=True,
+                             timeout=30,env=self._env())
         except (OSError, subprocess.TimeoutExpired) as e:
             raise GitHubError(str(e)) from e
         if p.returncode: raise GitHubError(p.stderr.strip() or 'gh api POST failed')
