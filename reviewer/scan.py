@@ -174,6 +174,16 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
         errors=[]
         try: files=transport.list_files(repo,raw['number'])
         except Exception as e: files=[]; errors.append(f'changed_files: {e}')
+        raw_base_sha=(raw.get('base') or {}).get('sha','')
+        if raw_base_sha and raw_base_sha != main_sha:
+            # A stale-base PR can never enter semantic review on this scan.
+            # Preserve its changed-file/Issue context for overlap detection,
+            # but do not pay for check/run/job/artifact collection that cannot
+            # affect its STALE disposition.  A later rebase to current main
+            # automatically takes the full evidence path below.
+            p=snapshot_from_github(repo,raw,main_sha,files,[],observed,errors)
+            out.append(classify(p,authority_patterns) if authority_patterns else classify(p))
+            continue
         try:
             checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
             checks, enrichment_errors=_collect_check_evidence(
