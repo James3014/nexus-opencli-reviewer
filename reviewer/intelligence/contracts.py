@@ -10,7 +10,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from reviewer.models import Disposition
+from .models import Disposition
 
 CLAIM_CEILING = "PR_INTELLIGENCE_ONLY"
 CI_EVIDENCE_CLAIM_CEILING = "CI_EVIDENCE_ONLY"

@@ -1,4 +1,4 @@
-from .models import Classification, Disposition
+from .models import *
 
 DEFAULT_AUTHORITY_PATTERNS = ("AGENTS.md", "docs/agents/", "docs/governance/", "policy/")
 
