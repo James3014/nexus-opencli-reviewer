@@ -147,7 +147,7 @@ def test_g7_webmcp_page_declares_exact_adapter_claim_boundaries():
 
 def test_g7_v11_adapter_scope_keeps_cli_and_webmcp_boundary():
     reviewer_dir = Path(__file__).resolve().parent.parent / "reviewer"
-    assert cli.OPERATIONS == frozenset({"revision", "readiness", "overlap", "ci", "impact"})
+    assert cli.OPERATIONS == frozenset({"revision", "readiness", "overlap", "ci", "impact", "cfi", "eia"})
     assert hasattr(webmcp, "WebMCPServer")
     assert not (reviewer_dir / "mcp_server.py").exists()
     assert not (reviewer_dir / "github_action.py").exists()
