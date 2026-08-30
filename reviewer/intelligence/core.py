@@ -13,9 +13,9 @@ import json
 from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
-from reviewer.classifier import classify
-from reviewer.models import CheckObservation, Classification, Disposition, PRSnapshot
-from reviewer.overlap import detect
+from .classifier import classify
+from .models import CheckObservation, Classification, Disposition, PRSnapshot
+from .overlap import detect
 
 from .contracts import (
     CLAIM_CEILING,

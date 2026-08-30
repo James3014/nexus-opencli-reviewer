@@ -4,7 +4,7 @@ Pure, deterministic, transport-neutral advisory intelligence facade.
 """
 from __future__ import annotations
 
-from reviewer.models import Disposition
+from .models import Disposition
 
 from .contracts import (
     CLAIM_CEILING,
