@@ -23,9 +23,9 @@ def test_legacy_primitives_forward_to_canonical_authority():
     import reviewer.classifier as legacy_classifier
     import reviewer.models as legacy_models
     import reviewer.overlap as legacy_overlap
-    import reviewer.intelligence.classifier as canonical_classifier
-    import reviewer.intelligence.models as canonical_models
-    import reviewer.intelligence.overlap as canonical_overlap
+    import repository_intelligence.classifier as canonical_classifier
+    import repository_intelligence.models as canonical_models
+    import repository_intelligence.overlap as canonical_overlap
 
     assert legacy_models.PRSnapshot is canonical_models.PRSnapshot
     assert legacy_models.CheckObservation is canonical_models.CheckObservation
