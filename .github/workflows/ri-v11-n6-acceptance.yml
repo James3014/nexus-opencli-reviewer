@@ -1,0 +1,62 @@
+name: RI V1.1 N6 acceptance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ri-v11-n6-acceptance.yml"
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+env:
+  ACCEPTED_MAIN_SHA: aab512ff738650cbffcbc44532b9d99f3787d138
+
+jobs:
+  integrated-acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact integrated V1.1 subject
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ACCEPTED_MAIN_SHA }}
+          fetch-depth: 1
+
+      - name: Bind exact subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$ACCEPTED_MAIN_SHA"
+          git diff --check
+
+      - name: Full repository test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q
+
+      - name: N6 product-boundary assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import reviewer.intelligence as ri
+          import reviewer.intelligence_cli as cli
+          import reviewer.github_action as gha
+
+          root = Path('.')
+          assert hasattr(ri, 'analyze_change_impact')
+          assert hasattr(ri, 'analyze_ci_failure_intelligence')
+          assert hasattr(ri, 'plan_external_intelligence_automation')
+          assert {'impact', 'cfi', 'eia'} <= set(cli.OPERATIONS)
+          assert gha.CLOUD_CLAIM_CEILING == 'ADVISORY_EVIDENCE_ONLY'
+          assert (root / 'action.yml').exists()
+          assert (root / '.github/workflows/ri-n4-live-smoke.yml').exists()
+          assert not (root / 'repository-intelligence-engine').exists()
+          assert not (root / 'reviewer/mcp_server.py').exists()
+          text = (root / 'README.md').read_text(encoding='utf-8')
+          assert 'EXTRACT_AFTER_V1_1_ACCEPTANCE' not in text or 'DEFER_REPO_EXTRACTION_TO_POST_V1' in text
+          print('N6_BOUNDARY_PASS')
+          PY
