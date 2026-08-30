@@ -145,12 +145,14 @@ def test_g7_webmcp_page_declares_exact_adapter_claim_boundaries():
     assert "PRE_REVIEW_ONLY" not in webmcp._BROWSER_PAGE_TEMPLATE
 
 
-def test_g7_v11_adapter_scope_keeps_cli_and_webmcp_boundary():
-    reviewer_dir = Path(__file__).resolve().parent.parent / "reviewer"
+def test_g7_v11_adapter_scope_keeps_cli_webmcp_and_cloud_boundary():
+    root = Path(__file__).resolve().parent.parent
+    reviewer_dir = root / "reviewer"
     assert cli.OPERATIONS == frozenset({"revision", "readiness", "overlap", "ci", "impact", "cfi", "eia"})
     assert hasattr(webmcp, "WebMCPServer")
     assert not (reviewer_dir / "mcp_server.py").exists()
-    assert not (reviewer_dir / "github_action.py").exists()
+    assert (reviewer_dir / "github_action.py").exists()
+    assert (root / "action.yml").exists()
     assert not (reviewer_dir / "action.py").exists()
 
 

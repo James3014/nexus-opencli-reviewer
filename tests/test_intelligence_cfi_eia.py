@@ -236,10 +236,13 @@ def test_cli_exposes_cfi_and_eia_with_exact_claim_ceilings():
     assert eia["result"]["decision"] == "READY"
 
 
-def test_n3_does_not_add_cloud_or_direct_mcp_authority():
+def test_n4_adds_read_only_cloud_adapter_without_direct_mcp_authority():
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    assert not (root / "action.yml").exists()
-    assert not (root / "reviewer" / "github_action.py").exists()
+    assert (root / "action.yml").exists()
+    assert (root / "reviewer" / "github_action.py").exists()
     assert not (root / "reviewer" / "mcp_server.py").exists()
+    action_text = (root / "action.yml").read_text(encoding="utf-8")
+    assert "actions/checkout" not in action_text
+    assert "pull_request_target" not in action_text
