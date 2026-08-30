@@ -69,7 +69,7 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 - **Canonical product**: `reviewer.intelligence` Python Core API. Adapters acquire/transport/serialize evidence; they do not own or reimplement intelligence decisions.
 - **V1 adapters**: (1) structured local CLI (`reviewer.intelligence_cli`) as the reference JSON adapter, and (2) WebMCP (`reviewer.webmcp`) as the browser-facing compatibility adapter. WebMCP uses the legacy scan path only to acquire snapshots, then recomputes PR decisions through the canonical Core.
 - **Next adapter**: a direct MCP adapter is the highest-priority post-V1 adapter because it can expose the same Core operations directly to agent/controller surfaces without requiring a browser page. It is not a V1 completion blocker.
-- **Deferred adapter**: GitHub Action / unattended Repository Intelligence publication remains deferred to N4; N3 adds no cloud execution or repository-write authority.
+- **GitHub Action / cloud adapter (N4)**: implemented as a read-only acquisition/transport surface. It reads PR metadata, changed-file names, default-branch identity, and check-run evidence through GitHub REST, never checks out or executes PR code, and emits only a hash-bound advisory bundle plus Step Summary/outputs.
 - **Claim ceilings**: PR intelligence output is bounded by `PR_INTELLIGENCE_ONLY`; CI failure evidence is bounded by `CI_EVIDENCE_ONLY`. The semantic reviewer/publication workflow remains a separate product surface with its existing `PRE_REVIEW_ONLY` ceiling.
 - **WebMCP compatibility**: native ChatGPT Site-tool projection remains a separately tracked OpenAI Desktop compatibility concern; Browser WebMCP support is not promoted into proof of native-chat projection and the compatibility gap does not block Core/V1.
 - **Change Impact V1.1**: implemented as language-neutral normalized dependency-graph evidence. `reviewer.intelligence` owns deterministic direct/transitive closure and tamper-bound reporting; language parsers, GitNexus, or other CodeIntel systems remain upstream graph producers rather than Core authority.
@@ -81,7 +81,7 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 - **Package authority**: `reviewer.intelligence` is the canonical deterministic Core; `reviewer.intelligence_cli` and `reviewer.webmcp` are adapters; `reviewer.semantic`, `reviewer.opencli`, and `reviewer.publication` remain separate semantic/application surfaces.
 - **Legacy compatibility seam**: `reviewer.scan` remains a brownfield application/acquisition consumer. Adapters may reuse it for acquisition, but its legacy classification is not canonical Repository Intelligence authority.
 - **Extraction timing**: `DEFER_REPO_EXTRACTION_TO_POST_V1`. A dedicated `repository-intelligence` repository/package may be reconsidered after V1 acceptance and post-merge verification, when migration can be evaluated against an immutable accepted surface.
-- **V1.1 expansion boundary**: Change Impact and CFI/EIA are additive deterministic advisory surfaces. Direct standalone MCP, GitHub Action/cloud publication, semantic-reviewer redesign, automatic repair, comments, approval, merge, release, and production authority remain outside N3.
+- **V1.1 expansion boundary**: Change Impact, CFI/EIA, and the read-only GitHub Action/cloud adapter are additive advisory surfaces. Direct standalone MCP, automatic repair, comments, approval, merge, release, and production authority remain outside Repository Intelligence.
 
 ## Repository Intelligence Core V1 Operations
 
@@ -126,6 +126,35 @@ python -m reviewer.intelligence_cli --operation eia --input automation-evidence.
 # Read from stdin
 cat snapshot.json | python -m reviewer.intelligence_cli --operation readiness --input -
 ```
+
+## GitHub Action / cloud execution (N4)
+
+The root `action.yml` exposes Repository Intelligence to generic GitHub repositories without checking out pull-request code. It uses GitHub REST to acquire only PR metadata, changed-file names, current default-branch identity, and check-run evidence, then invokes the same canonical Core used by the local CLI.
+
+```yaml
+name: repository-intelligence
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  intelligence:
+    runs-on: ubuntu-latest
+    steps:
+      - id: ri
+        uses: James3014/nexus-opencli-reviewer@<immutable-commit>
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repository-intelligence
+          path: ${{ steps.ri.outputs.report-path }}
+```
+
+The generated `reviewer.repository_intelligence_cloud.v1` bundle is exact-identity-bound and hash-bound, includes readiness + CFI + EIA reports, and has top-level `ADVISORY_EVIDENCE_ONLY`. Outputs include the report path/hash, readiness, CFI status, EIA decision, and claim ceiling. The action does not comment, approve, merge, dispatch workers, or execute pull-request source.
 
 ## Unattended service configuration
 
