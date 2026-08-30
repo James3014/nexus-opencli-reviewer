@@ -213,7 +213,8 @@ def analyze_change_impact(data: Mapping[str, Any]) -> ChangeImpactReportV1:
           "snapshot": {repository/pr_number/base_sha/head_sha/current_main_sha/...},
           "covered_files": ["src/a.ts", ...],
           "dependency_edges": [{"consumer": "src/b.ts", "dependency": "src/a.ts"}],
-          "changed_files": ["src/a.ts"],              # optional; defaults snapshot.changed_files
+          # changed files are authoritative inside snapshot.changed_files
+          # an optional top-level changed_files copy must match exactly
           "observed_symbols": {"src/a.ts": ["A"]},  # optional upstream evidence
           "graph_complete": true,
           "graph_errors": []
@@ -242,12 +243,26 @@ def analyze_change_impact(data: Mapping[str, Any]) -> ChangeImpactReportV1:
     if not covered_files:
         gaps.append("no covered_files provided")
 
-    changed_raw = data.get("changed_files")
-    if changed_raw is None and isinstance(snapshot, Mapping):
-        changed_raw = snapshot.get("changed_files", ())
-    changed_files = _normalize_path_sequence(
-        changed_raw if changed_raw is not None else (), label="changed_files", gaps=gaps
+    snapshot_changed_raw = (
+        snapshot.get("changed_files") if isinstance(snapshot, Mapping) else None
     )
+    if snapshot_changed_raw is None:
+        gaps.append("snapshot.changed_files missing")
+        snapshot_changed_files: tuple[str, ...] = ()
+    else:
+        snapshot_changed_files = _normalize_path_sequence(
+            snapshot_changed_raw, label="snapshot.changed_files", gaps=gaps
+        )
+
+    explicit_changed_raw = data.get("changed_files")
+    if explicit_changed_raw is None:
+        changed_files = snapshot_changed_files
+    else:
+        changed_files = _normalize_path_sequence(
+            explicit_changed_raw, label="changed_files", gaps=gaps
+        )
+        if changed_files != snapshot_changed_files:
+            gaps.append("changed_files do not match snapshot.changed_files")
     if not changed_files:
         gaps.append("no changed_files provided")
     for path in changed_files:
@@ -293,7 +308,10 @@ def analyze_change_impact(data: Mapping[str, Any]) -> ChangeImpactReportV1:
         "snapshot must be a mapping",
         "covered_files",
         "no covered_files provided",
+        "snapshot.changed_files",
+        "snapshot.changed_files missing",
         "changed_files",
+        "changed_files do not match snapshot.changed_files",
         "no changed_files provided",
         "changed file not covered by graph",
         "dependency_edges",
@@ -442,6 +460,13 @@ def verify_change_impact_report(payload: Mapping[str, Any]) -> bool:
     is_complete = payload.get("is_complete") is True
     if is_complete != (completeness == EvidenceCompleteness.COMPLETE.value):
         return False
-    if is_complete and (gaps or payload.get("graph_complete") is not True or identity.get("is_valid") is not True):
+    if is_complete and (
+        gaps
+        or graph_errors
+        or payload.get("graph_complete") is not True
+        or identity.get("is_valid") is not True
+        or identity.get("stale_evidence") is True
+        or bool(identity.get("evidence_gaps"))
+    ):
         return False
     return True

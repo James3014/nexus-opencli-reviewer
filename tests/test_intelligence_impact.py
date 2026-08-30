@@ -133,6 +133,16 @@ def test_change_impact_changed_file_outside_coverage_fails_closed():
     assert "changed file not covered by graph: missing.ts" in report.evidence_gaps
 
 
+def test_change_impact_changed_files_must_match_snapshot_evidence():
+    report = ri.analyze_change_impact(_input(
+        changed_files=["src/unrelated.ts"],
+    ))
+
+    assert report.is_complete is False
+    assert report.evidence_completeness == ri.EvidenceCompleteness.INCOMPLETE
+    assert "changed_files do not match snapshot.changed_files" in report.evidence_gaps
+
+
 def test_change_impact_stale_identity_evidence_fails_closed():
     data = _input()
     data["snapshot"] = dict(data["snapshot"], declared_head_sha="c" * 40)
@@ -177,6 +187,35 @@ def test_change_impact_tamper_detection_catches_graph_and_impact_mutation():
     tampered = copy.deepcopy(payload)
     tampered["claim_ceiling"] = "MERGE_READY"
     assert ri.verify_change_impact_report(tampered) is False
+
+
+def test_change_impact_verifier_rejects_forged_complete_with_graph_errors():
+    payload = ri.analyze_change_impact(_input(
+        graph_complete=True,
+        graph_errors=["provider omitted subtree"],
+    )).to_dict()
+    assert payload["evidence_completeness"] == ri.EvidenceCompleteness.PARTIAL.value
+
+    payload["evidence_gaps"] = []
+    payload["evidence_completeness"] = ri.EvidenceCompleteness.COMPLETE.value
+    payload["is_complete"] = True
+    _rehash(payload)
+
+    assert ri.verify_change_impact_report(payload) is False
+
+
+def test_change_impact_verifier_rejects_forged_complete_with_stale_identity():
+    data = _input()
+    data["snapshot"] = dict(data["snapshot"], declared_head_sha="c" * 40)
+    payload = ri.analyze_change_impact(data).to_dict()
+    assert payload["identity"]["stale_evidence"] is True
+
+    payload["evidence_gaps"] = []
+    payload["evidence_completeness"] = ri.EvidenceCompleteness.COMPLETE.value
+    payload["is_complete"] = True
+    _rehash(payload)
+
+    assert ri.verify_change_impact_report(payload) is False
 
 
 def test_change_impact_observed_symbols_are_not_called_modified_symbols():
