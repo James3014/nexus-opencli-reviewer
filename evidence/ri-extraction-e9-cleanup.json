@@ -1,0 +1,49 @@
+{
+  "schema": "repository_intelligence.legacy_cleanup.v1",
+  "status": "PASS",
+  "claim": "CLEANUP_COMPLETE",
+  "cleanup_commit": "d2671519970b1f35ba6fb74bda226b425b08dd49",
+  "cleanup_tree": "1148005571337b538c6800b700c885e995083fff",
+  "e8_acceptance_commit": "1b5e024c74305a95ac28abf3db6aa7ce578b60a0",
+  "e8_receipt_sha256": "13a28188bf53c393155002a54932ec68f93cde145e0f06b6dc9cb0fcb6fe0815",
+  "e7_compatibility_commit": "7af1748031e014662da6ad9f2cb369dbbade4794",
+  "e6_dev_mcp_commit": "2eab3f1293c9ec437e7dbb6c3fed998c7f6a3d8a",
+  "engine_head": "693ae7cf59e3b090ee873b7196ee330b30e26221",
+  "engine_wheel_sha256": "1e57b4fe4f742ef304d901850e80dea4af13f95e5e31f8eb12c10d5937ad1aa7",
+  "verification": {
+    "legacy_full_suite": "405 passed",
+    "engine_full_suite": "35 passed",
+    "e9_targeted_suite": "73 passed",
+    "production_legacy_submodule_imports": 0,
+    "legacy_implementation_definitions": 0,
+    "stale_productization_markers": 0,
+    "git_diff_check": "PASS"
+  },
+  "legacy_modules": {
+    "reviewer.intelligence": "forwarding-only",
+    "reviewer.intelligence.classifier": "forwarding-only",
+    "reviewer.intelligence.models": "forwarding-only",
+    "reviewer.intelligence.contracts": "forwarding-only",
+    "reviewer.intelligence.core": "forwarding-only",
+    "reviewer.intelligence.overlap": "forwarding-only",
+    "reviewer.intelligence.impact": "forwarding-only",
+    "reviewer.intelligence.cfi": "forwarding-only",
+    "reviewer.intelligence.eia": "forwarding-only",
+    "reviewer.intelligence_cli": "forwarding-only"
+  },
+  "removed_duplicate_tests": [
+    "tests/test_intelligence_core.py",
+    "tests/test_intelligence_g4_contract.py",
+    "tests/test_intelligence_impact.py",
+    "tests/test_intelligence_cfi_eia.py"
+  ],
+  "authority_boundary": {
+    "canonical_namespace": "repository_intelligence",
+    "advisory_only": true,
+    "approve": false,
+    "merge": false,
+    "release": false,
+    "publication": false
+  },
+  "remote_publication": "PARKED_NON_BLOCKING"
+}

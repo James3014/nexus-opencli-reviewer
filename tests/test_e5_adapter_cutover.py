@@ -39,6 +39,10 @@ def test_provenance_and_wheel_integrity():
     computed_sha = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
     assert provenance["wheel_sha256"] == computed_sha
     assert provenance["source_commit"] == "693ae7cf59e3b090ee873b7196ee330b30e26221"
+    assert provenance["source_tree"] == "f5f8496ed16e775e8767827f66d1fa35355d2968"
+    assert provenance["source_repository"] == "https://github.com/James3014/repository-intelligence-engine"
+    assert provenance["source_ref"] == "refs/heads/main"
+    assert provenance["publication_status"] == "PUBLIC_MAIN_VERIFIED"
     assert provenance["prior_e4_parity_subject"] == "da96b51f04faf6705280f7b7214b496ab74d1e5b"
     assert provenance["claim_ceiling"] == "DISTRIBUTION_ARTIFACT_ONLY"
     assert provenance["package_name"] == "repository-intelligence-engine"

@@ -1,2 +1,2 @@
-"""Compatibility projection to canonical Repository Intelligence classifier."""
-from .intelligence.classifier import *
+"""Compatibility projection to the canonical extracted classifier."""
+from repository_intelligence.classifier import *  # noqa: F401,F403

@@ -1,2 +1,2 @@
-"""Compatibility projection to canonical Repository Intelligence overlap logic."""
-from .intelligence.overlap import *
+"""Compatibility projection to the canonical extracted overlap engine."""
+from repository_intelligence.overlap import *  # noqa: F401,F403
