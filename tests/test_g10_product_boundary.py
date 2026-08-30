@@ -29,11 +29,11 @@ def test_g10_v1_stays_in_current_repository_without_second_package_authority():
     assert not (ROOT / "repository_intelligence").exists()
 
 
-def test_g10_core_public_surface_excludes_v11_impact():
-    assert not hasattr(ri, "analyze_static_impact")
-    assert not hasattr(ri, "StaticImpactReport")
-    assert "impact" not in cli.OPERATIONS
-    assert not (ROOT / "reviewer" / "intelligence" / "impact.py").exists()
+def test_g10_v11_change_impact_stays_inside_canonical_core_boundary():
+    assert hasattr(ri, "analyze_change_impact")
+    assert hasattr(ri, "ChangeImpactReportV1")
+    assert "impact" in cli.OPERATIONS
+    assert (ROOT / "reviewer" / "intelligence" / "impact.py").exists()
 
 
 def test_g10_core_has_no_transport_semantic_or_governance_dependencies():
@@ -54,8 +54,8 @@ def test_g10_core_has_no_transport_semantic_or_governance_dependencies():
         assert not any(fragment in module for fragment in forbidden_fragments), module
 
 
-def test_g10_v1_adapter_boundary_is_exact():
-    assert cli.OPERATIONS == frozenset({"revision", "readiness", "overlap", "ci"})
+def test_g10_v11_adapter_boundary_is_exact():
+    assert cli.OPERATIONS == frozenset({"revision", "readiness", "overlap", "ci", "impact"})
     assert hasattr(webmcp, "WebMCPServer")
     assert not (ROOT / "reviewer" / "mcp_server.py").exists()
     assert not (ROOT / "reviewer" / "github_action.py").exists()

@@ -305,6 +305,93 @@ class CIFailureFingerprint:
 
 
 @dataclass(frozen=True)
+class ChangeImpactReportV1:
+    """Hash-bound language-neutral downstream change-impact evidence."""
+
+    identity: RevisionIdentity
+    covered_files: tuple[str, ...]
+    changed_files: tuple[str, ...]
+    dependency_edges: tuple[tuple[str, str], ...] = ()
+    observed_symbols: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    direct_impacted_files: tuple[str, ...] = ()
+    transitive_impacted_files: tuple[str, ...] = ()
+    all_impacted_files: tuple[str, ...] = ()
+    graph_complete: bool = False
+    graph_errors: tuple[str, ...] = ()
+    edge_count: int = 0
+    graph_sha256: str = ""
+    evidence_gaps: tuple[str, ...] = ()
+    evidence_completeness: EvidenceCompleteness = EvidenceCompleteness.INCOMPLETE
+    is_complete: bool = False
+    content_sha256: str = ""
+    schema: str = "reviewer.change_impact.v1"
+    claim_ceiling: str = CLAIM_CEILING
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "covered_files", tuple(self.covered_files))
+        object.__setattr__(self, "changed_files", tuple(self.changed_files))
+        object.__setattr__(self, "dependency_edges", tuple(tuple(edge) for edge in self.dependency_edges))
+        if isinstance(self.observed_symbols, Mapping):
+            frozen = MappingProxyType({
+                str(path): tuple(symbols)
+                for path, symbols in self.observed_symbols.items()
+            })
+        else:
+            frozen = MappingProxyType({})
+        object.__setattr__(self, "observed_symbols", frozen)
+        object.__setattr__(self, "direct_impacted_files", tuple(self.direct_impacted_files))
+        object.__setattr__(self, "transitive_impacted_files", tuple(self.transitive_impacted_files))
+        object.__setattr__(self, "all_impacted_files", tuple(self.all_impacted_files))
+        object.__setattr__(self, "graph_errors", tuple(self.graph_errors))
+        object.__setattr__(self, "evidence_gaps", tuple(self.evidence_gaps))
+
+    @property
+    def direct_impacted_count(self) -> int:
+        return len(self.direct_impacted_files)
+
+    @property
+    def transitive_impacted_count(self) -> int:
+        return len(self.transitive_impacted_files)
+
+    @property
+    def total_impacted_count(self) -> int:
+        return len(self.all_impacted_files)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "identity": self.identity.to_dict(),
+            "covered_files": list(self.covered_files),
+            "changed_files": list(self.changed_files),
+            "dependency_edges": [
+                {"consumer": consumer, "dependency": dependency}
+                for consumer, dependency in self.dependency_edges
+            ],
+            "observed_symbols": {
+                path: list(symbols)
+                for path, symbols in sorted(self.observed_symbols.items())
+            },
+            "direct_impacted_files": list(self.direct_impacted_files),
+            "transitive_impacted_files": list(self.transitive_impacted_files),
+            "all_impacted_files": list(self.all_impacted_files),
+            "direct_impacted_count": self.direct_impacted_count,
+            "transitive_impacted_count": self.transitive_impacted_count,
+            "total_impacted_count": self.total_impacted_count,
+            "graph_complete": self.graph_complete,
+            "graph_errors": list(self.graph_errors),
+            "edge_count": self.edge_count,
+            "graph_sha256": self.graph_sha256,
+            "evidence_gaps": list(self.evidence_gaps),
+            "evidence_completeness": self.evidence_completeness.value,
+            "is_complete": self.is_complete,
+            "claim_ceiling": self.claim_ceiling,
+            "content_sha256": self.content_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class RepositoryIntelligenceReportV1:
     """Canonical hash-bound V1 repository intelligence report."""
 

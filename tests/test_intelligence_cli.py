@@ -19,6 +19,7 @@ import reviewer.intelligence_cli as cli
 from reviewer.intelligence import (
     CLAIM_CEILING,
     CI_EVIDENCE_CLAIM_CEILING,
+    analyze_change_impact,
     analyze_cross_pr_overlap,
     classify_readiness,
     fingerprint_ci_failures,
@@ -133,16 +134,26 @@ class TestIntelligenceCliOperations:
         assert output["claim_ceiling"] == CI_EVIDENCE_CLAIM_CEILING
         assert output["result"] == fingerprint_ci_failures(sample_snapshot_dict).to_dict()
 
-    def test_impact_operation_is_deferred_from_v1(self, tmp_path: Path):
+    def test_impact_operation_file(self, tmp_path: Path, sample_snapshot_dict: dict[str, Any]):
+        impact_input = {
+            "snapshot": sample_snapshot_dict,
+            "covered_files": ["foo/bar.py", "foo/service.py", "tests/test_bar.py"],
+            "dependency_edges": [
+                {"consumer": "foo/service.py", "dependency": "foo/bar.py"},
+            ],
+            "graph_complete": True,
+            "graph_errors": [],
+        }
         infile = tmp_path / "impact.json"
-        infile.write_text(json.dumps({"sources": {}, "changed_files": []}))
+        infile.write_text(json.dumps(impact_input))
         stdout_buf = io.StringIO()
         with patch("sys.stdout", stdout_buf):
             code = cli.main(["--operation", "impact", "--input", str(infile)])
-        assert code != 0
+        assert code == 0
         output = json.loads(stdout_buf.getvalue())
-        assert output["status"] == "ERROR"
+        assert output["operation"] == "impact"
         assert output["claim_ceiling"] == CLAIM_CEILING
+        assert output["result"] == analyze_change_impact(impact_input).to_dict()
 
     def test_subprocess_module_execution(self, tmp_path: Path, sample_snapshot_dict: dict[str, Any]):
         infile = tmp_path / "snap.json"

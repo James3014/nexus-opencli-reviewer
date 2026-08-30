@@ -46,6 +46,7 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 │  - classify_readiness: Advisory readiness classification    │
 │  - analyze_cross_pr_overlap: Peer conflict / WAIT_REBIND    │
 │  - fingerprint_ci_failures: Hash-bound CI failure evidence  │
+│  - analyze_change_impact: V1.1 graph-bound blast radius      │
 └──────────────────────────────┬──────────────────────────────┘
                                │
                                ▼
@@ -71,7 +72,7 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 - **Deferred adapter**: GitHub Action / unattended Repository Intelligence publication is deferred until operational-reliability behavior is closed.
 - **Claim ceilings**: PR intelligence output is bounded by `PR_INTELLIGENCE_ONLY`; CI failure evidence is bounded by `CI_EVIDENCE_ONLY`. The semantic reviewer/publication workflow remains a separate product surface with its existing `PRE_REVIEW_ONLY` ceiling.
 - **WebMCP compatibility**: native ChatGPT Site-tool projection remains a separately tracked OpenAI Desktop compatibility concern; Browser WebMCP support is not promoted into proof of native-chat projection and the compatibility gap does not block Core/V1.
-- **Change Impact**: deferred to V1.1 and excluded from the V1 Candidate tree, public Core surface, and CLI.
+- **Change Impact V1.1**: implemented as language-neutral normalized dependency-graph evidence. `reviewer.intelligence` owns deterministic direct/transitive closure and tamper-bound reporting; language parsers, GitNexus, or other CodeIntel systems remain upstream graph producers rather than Core authority.
 
 ### Productization Boundary — G10 Frozen
 - **V1 repository decision**: `KEEP_IN_CURRENT_REPOSITORY_FOR_V1`. Repository Intelligence Core V1 remains inside `nexus-opencli-reviewer` for the V1 release rather than creating a second repository/package authority during stabilization.
@@ -82,12 +83,13 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 
 ## Repository Intelligence Core V1 Operations
 
-The `reviewer.intelligence` package exposes four deterministic, immutable V1 advisory operations:
+The `reviewer.intelligence` package exposes the four accepted V1 operations plus one deterministic V1.1 advisory Change Impact operation:
 
 1. **`revision_identity(snapshot)`**: Deterministic repository revision identity with stale base (`base_sha != current_main_sha`) and declared evidence mismatch detection.
 2. **`classify_readiness(snapshot, policy=...)`**: Immutable advisory readiness classification (`REVIEW_READY`, `WAIT_REBIND`, `NEEDS_ATTENTION`, `EVIDENCE_ONLY`, `STALE`, `EXCLUDED`) over normalized structured evidence. Generic protected-path policy defaults empty and may be explicitly injected by a consumer.
 3. **`analyze_cross_pr_overlap(snapshots, policy=...)`**: Deterministic cross-PR path overlap and shared issue chain analysis, applying `WAIT_REBIND` only between originally eligible peers.
 4. **`fingerprint_ci_failures(snapshot or ...)`**: Hash-bound CI failure evidence distinguishing expected vs unexpected terminal failures, retaining exact identity/evidence gaps and the `CI_EVIDENCE_ONLY` ceiling.
+5. **`analyze_change_impact(graph_evidence)`**: Language-neutral downstream blast-radius analysis over normalized `covered_files` plus `consumer -> dependency` edges. It binds the exact PR revision identity, records graph completeness/errors, computes deterministic direct/transitive impacted files, and emits `reviewer.change_impact.v1` with `PR_INTELLIGENCE_ONLY`. Optional `observed_symbols` are upstream observations only; Core does not claim they are modified symbols.
 
 `build_repository_intelligence_report(...)` produces the canonical `reviewer.repository_intelligence.v1` report with `COMPLETE | PARTIAL | INCOMPLETE` evidence state and a tamper-detectable `content_sha256`.
 
@@ -107,6 +109,9 @@ python -m reviewer.intelligence_cli --operation overlap --input overlap_snapshot
 
 # CI failure fingerprinting
 python -m reviewer.intelligence_cli --operation ci --input snapshot.json
+
+# V1.1 Change Impact from normalized dependency graph evidence
+python -m reviewer.intelligence_cli --operation impact --input impact.json
 
 # Read from stdin
 cat snapshot.json | python -m reviewer.intelligence_cli --operation readiness --input -

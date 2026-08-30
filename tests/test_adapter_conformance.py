@@ -358,7 +358,20 @@ class TestArchitectureAndClaimCeiling:
         assert cli.CLAIM_CEILING == "PR_INTELLIGENCE_ONLY"
         assert webmcp.CLAIM_CEILING == "PR_INTELLIGENCE_ONLY"
         assert webmcp.CI_CLAIM_CEILING == "CI_EVIDENCE_ONLY"
-        assert "impact" not in cli.OPERATIONS
+        assert "impact" in cli.OPERATIONS
+        assert cli.execute_operation("impact", {
+            "snapshot": {
+                "repository": "owner/repo",
+                "pr_number": 1,
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "current_main_sha": "a" * 40,
+                "changed_files": ["src/a.py"],
+            },
+            "covered_files": ["src/a.py"],
+            "dependency_edges": [],
+            "graph_complete": True,
+        })["claim_ceiling"] == "PR_INTELLIGENCE_ONLY"
 
     def test_deferred_adapters_not_present(self):
         """Direct MCP server and GitHub Action adapters are deferred post-V1 and not implemented in codebase."""
