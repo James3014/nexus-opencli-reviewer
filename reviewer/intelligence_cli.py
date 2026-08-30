@@ -15,6 +15,7 @@ from typing import Any, Sequence
 from reviewer.intelligence import (
     CLAIM_CEILING,
     CI_EVIDENCE_CLAIM_CEILING,
+    analyze_change_impact,
     analyze_cross_pr_overlap,
     classify_readiness,
     fingerprint_ci_failures,
@@ -26,6 +27,7 @@ OPERATIONS: frozenset[str] = frozenset({
     "readiness",
     "overlap",
     "ci",
+    "impact",
 })
 
 
@@ -78,6 +80,15 @@ def execute_operation(operation: str, data: Any) -> dict[str, Any]:
         return {
             "operation": operation,
             "claim_ceiling": CI_EVIDENCE_CLAIM_CEILING,
+            "result": res.to_dict(),
+        }
+    elif operation == "impact":
+        if not isinstance(data, dict):
+            raise ValueError("Input for 'impact' must be a JSON object graph-evidence mapping")
+        res = analyze_change_impact(data)
+        return {
+            "operation": operation,
+            "claim_ceiling": CLAIM_CEILING,
             "result": res.to_dict(),
         }
     else:

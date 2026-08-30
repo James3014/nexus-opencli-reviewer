@@ -11,6 +11,7 @@ from .contracts import (
     CI_EVIDENCE_CLAIM_CEILING,
     TERMINAL_FAILURE_STATUSES,
     CIFailureFingerprint,
+    ChangeImpactReportV1,
     CrossPROverlapResult,
     EvidenceCompleteness,
     NormalizedCheckEvidence,
@@ -19,6 +20,7 @@ from .contracts import (
     RepositoryIntelligenceReportV1,
     RevisionIdentity,
 )
+from .impact import analyze_change_impact, verify_change_impact_report
 from .core import (
     analyze_cross_pr_overlap,
     build_repository_intelligence_report,
@@ -41,12 +43,15 @@ __all__ = [
     "CrossPROverlapResult",
     "NormalizedCheckEvidence",
     "CIFailureFingerprint",
+    "ChangeImpactReportV1",
     "RepositoryIntelligenceReportV1",
     "revision_identity",
     "classify_readiness",
     "analyze_cross_pr_overlap",
     "fingerprint_ci_failures",
     "verify_ci_failure_evidence",
+    "analyze_change_impact",
+    "verify_change_impact_report",
     "build_repository_intelligence_report",
     "verify_repository_intelligence_report",
 ]

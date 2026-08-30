@@ -231,7 +231,8 @@ def test_g4_stale_label_policy_is_injected():
     assert custom_result.disposition == Disposition.STALE
 
 
-def test_g4_change_impact_is_not_in_v1_public_surface():
-    assert not hasattr(ri, "analyze_static_impact")
-    assert not hasattr(ri, "StaticImpactReport")
-    assert "impact" not in intelligence_cli.OPERATIONS
+def test_g4_v11_change_impact_is_public_with_advisory_ceiling():
+    assert hasattr(ri, "analyze_change_impact")
+    assert hasattr(ri, "ChangeImpactReportV1")
+    assert hasattr(ri, "verify_change_impact_report")
+    assert "impact" in intelligence_cli.OPERATIONS
