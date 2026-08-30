@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import os
 import subprocess
 import sys
@@ -18,10 +17,6 @@ from repository_intelligence.eia import AUTOMATION_CLAIM_CEILING
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENGINE_ROOT = Path("/Users/jameschen/Workspace/repository-intelligence-engine")
 ENGINE_HEAD = "693ae7cf59e3b090ee873b7196ee330b30e26221"
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_legacy_package_entrypoint_is_a_thin_canonical_forwarder() -> None:
@@ -68,20 +63,6 @@ def test_no_production_consumer_imports_legacy_intelligence_authority() -> None:
                 if module.startswith("reviewer.intelligence") or (node.level and module.startswith("intelligence")):
                     violations.append(f"{path.relative_to(REPO_ROOT)} imports {'.' * node.level}{module}")
     assert violations == []
-
-
-def test_dormant_fallback_sources_match_exact_engine_bytes_before_e9_cleanup() -> None:
-    completed = subprocess.run(
-        ["git", "-C", str(ENGINE_ROOT), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert completed.stdout.strip() == ENGINE_HEAD
-    for name in ("classifier.py", "models.py", "contracts.py", "core.py", "overlap.py", "impact.py", "cfi.py", "eia.py"):
-        assert _sha256(REPO_ROOT / "reviewer" / "intelligence" / name) == _sha256(
-            ENGINE_ROOT / "repository_intelligence" / name
-        ), name
 
 
 def test_poisoned_legacy_core_cannot_intercept_compatibility_imports() -> None:

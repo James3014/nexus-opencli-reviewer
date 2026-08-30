@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import reviewer.intelligence as ri
+import repository_intelligence as ri
 import reviewer.intelligence_cli as cli
 import reviewer.webmcp as webmcp
 
@@ -22,21 +22,22 @@ def _imports(path: Path) -> set[str]:
     return out
 
 
-def test_g10_v1_stays_in_current_repository_without_second_package_authority():
+def test_extracted_package_is_canonical_without_a_second_local_package_authority():
     pyproject = (ROOT / "pyproject.toml").read_text()
     assert 'name = "nexus-opencli-reviewer"' in pyproject
     assert not (ROOT / "repository-intelligence").exists()
     assert not (ROOT / "repository_intelligence").exists()
+    assert (ROOT / "vendor" / "repository-intelligence-engine.provenance.json").exists()
 
 
-def test_g10_v11_change_impact_stays_inside_canonical_core_boundary():
+def test_v11_change_impact_resolves_through_extracted_canonical_boundary():
     assert hasattr(ri, "analyze_change_impact")
     assert hasattr(ri, "ChangeImpactReportV1")
     assert "impact" in cli.OPERATIONS
     assert (ROOT / "reviewer" / "intelligence" / "impact.py").exists()
 
 
-def test_g10_core_has_no_transport_semantic_or_governance_dependencies():
+def test_legacy_shim_has_no_transport_semantic_or_governance_dependencies():
     imports = set()
     for filename in ("__init__.py", "contracts.py", "core.py"):
         imports |= _imports(ROOT / "reviewer" / "intelligence" / filename)
@@ -78,8 +79,8 @@ def test_g10_legacy_scan_is_compatibility_consumer_not_core_dependency():
     assert "build_repository_intelligence_report" in webmcp_source
 
 
-def test_g10_product_boundary_doc_is_explicit():
+def test_extracted_product_boundary_doc_is_explicit():
     text = (ROOT / "README.md").read_text()
-    assert "Productization Boundary — G10 Frozen" in text
-    assert "KEEP_IN_CURRENT_REPOSITORY_FOR_V1" in text
-    assert "DEFER_REPO_EXTRACTION_TO_POST_V1" in text
+    assert "Extraction Boundary — E9 Closed" in text
+    assert "`repository_intelligence` is the canonical" in text
+    assert "`reviewer.intelligence` package is a forwarding-only compatibility shim" in text

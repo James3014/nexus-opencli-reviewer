@@ -20,8 +20,8 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 **Raw GitHub / Collection Transport**
 `reviewer.github`, `reviewer.collector`, `reviewer.normalize` collect untrusted physical PR and CI state from GitHub without interpreting review readiness or applying business rules.
 
-**Repository Intelligence Core V1 (Canonical Product)**
-`reviewer.intelligence` is the pure, deterministic, transport-neutral advisory facade. Its V1 public surface exposes four core operations (`revision_identity`, `classify_readiness`, `analyze_cross_pr_overlap`, and `fingerprint_ci_failures`) plus hash-bound repository-report helpers. It contains zero network calls, zero state mutation, and zero LLM invocations. Nexus governance policies (merge rights, authority grants, lifecycle state promotions) remain strictly out of core.
+**Repository Intelligence Core V1/V1.1 (Extracted Canonical Product)**
+`repository_intelligence` is the canonical pure, deterministic, transport-neutral advisory package. The local `reviewer.intelligence` package is a forwarding-only compatibility shim and owns no intelligence decisions. The extracted package contains zero network calls, zero state mutation, and zero LLM invocations. Nexus governance policies (merge rights, authority grants, lifecycle state promotions) remain strictly out of core.
 
 **V1 Adapters & Consumers**
 - **Structured Local CLI (`reviewer.intelligence_cli`)**: Pure local JSON adapter executing core operations on fixture snapshots or stdin without network/state dependencies.
@@ -39,8 +39,8 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│               Repository Intelligence Core V1               │
-│                   (reviewer.intelligence)                   │
+│            Repository Intelligence Core V1/V1.1             │
+│                 (repository_intelligence)                   │
 │                                                             │
 │  - revision_identity: Deterministic PR revision tracking    │
 │  - classify_readiness: Advisory readiness classification    │
@@ -66,26 +66,26 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 ```
 
 ### Adapter Strategy — G7 Frozen
-- **Canonical product**: `reviewer.intelligence` Python Core API. Adapters acquire/transport/serialize evidence; they do not own or reimplement intelligence decisions.
+- **Canonical product**: `repository_intelligence` Python package. Adapters acquire/transport/serialize evidence; they do not own or reimplement intelligence decisions.
 - **V1 adapters**: (1) structured local CLI (`reviewer.intelligence_cli`) as the reference JSON adapter, and (2) WebMCP (`reviewer.webmcp`) as the browser-facing compatibility adapter. WebMCP uses the legacy scan path only to acquire snapshots, then recomputes PR decisions through the canonical Core.
 - **Next adapter**: a direct MCP adapter is the highest-priority post-V1 adapter because it can expose the same Core operations directly to agent/controller surfaces without requiring a browser page. It is not a V1 completion blocker.
 - **GitHub Action / cloud adapter (N4)**: implemented as a read-only acquisition/transport surface. It reads PR metadata, changed-file names, default-branch identity, and check-run evidence through GitHub REST, never checks out or executes PR code, and emits only a hash-bound advisory bundle plus Step Summary/outputs.
 - **Claim ceilings**: PR intelligence output is bounded by `PR_INTELLIGENCE_ONLY`; CI failure evidence is bounded by `CI_EVIDENCE_ONLY`. The semantic reviewer/publication workflow remains a separate product surface with its existing `PRE_REVIEW_ONLY` ceiling.
 - **WebMCP compatibility**: native ChatGPT Site-tool projection remains a separately tracked OpenAI Desktop compatibility concern; Browser WebMCP support is not promoted into proof of native-chat projection and the compatibility gap does not block Core/V1.
-- **Change Impact V1.1**: implemented as language-neutral normalized dependency-graph evidence. `reviewer.intelligence` owns deterministic direct/transitive closure and tamper-bound reporting; language parsers, GitNexus, or other CodeIntel systems remain upstream graph producers rather than Core authority.
+- **Change Impact V1.1**: implemented as language-neutral normalized dependency-graph evidence. `repository_intelligence` owns deterministic direct/transitive closure and tamper-bound reporting; language parsers, GitNexus, or other CodeIntel systems remain upstream graph producers rather than Core authority.
 - **CFI V1.1**: CI Failure Intelligence classifies exact hash-bound CI evidence as `NO_TERMINAL_FAILURE | EXPECTED_FAILURE_ONLY | UNEXPECTED_FAILURE_OBSERVED | INSUFFICIENT_EVIDENCE`. `diagnosis_eligible=true` means only that complete unexpected-failure evidence exists; it does not claim root cause, regression attribution, repair correctness, or merge readiness.
 - **EIA V1.1**: External Intelligence Automation emits only `READY | NO_ACTION | BLOCKED` with a deterministic idempotency key. `READY` is bounded to considering `CI_FAILURE_DIAGNOSIS` from current complete evidence under `AUTOMATION_ADVISORY_ONLY`; it grants no worker, comment, approval, merge, or repository-write authority.
 
-### Productization Boundary — G10 Frozen
-- **V1 repository decision**: `KEEP_IN_CURRENT_REPOSITORY_FOR_V1`. Repository Intelligence Core V1 remains inside `nexus-opencli-reviewer` for the V1 release rather than creating a second repository/package authority during stabilization.
-- **Package authority**: `reviewer.intelligence` is the canonical deterministic Core; `reviewer.intelligence_cli` and `reviewer.webmcp` are adapters; `reviewer.semantic`, `reviewer.opencli`, and `reviewer.publication` remain separate semantic/application surfaces.
-- **Legacy compatibility seam**: `reviewer.scan` remains a brownfield application/acquisition consumer. Adapters may reuse it for acquisition, but its legacy classification is not canonical Repository Intelligence authority.
-- **Extraction timing**: `DEFER_REPO_EXTRACTION_TO_POST_V1`. A dedicated `repository-intelligence` repository/package may be reconsidered after V1 acceptance and post-merge verification, when migration can be evaluated against an immutable accepted surface.
-- **V1.1 expansion boundary**: Change Impact, CFI/EIA, and the read-only GitHub Action/cloud adapter are additive advisory surfaces. Direct standalone MCP, automatic repair, comments, approval, merge, release, and production authority remain outside Repository Intelligence.
+### Extraction Boundary — E9 Closed
+- **Package authority**: `repository_intelligence` is the only canonical deterministic Core and CLI package. `reviewer.intelligence`, `reviewer.intelligence_cli`, and the legacy primitive modules are forwarding-only compatibility shims.
+- **Consumers**: WebMCP, the GitHub Action, and Dev MCP invoke the extracted package; `reviewer.scan` remains only a brownfield acquisition/application consumer.
+- **Legacy cleanup**: duplicate classifier, models, overlap, readiness, CI, Change Impact, CFI, and EIA implementations have been removed from this repository. Compatibility modules contain imports only.
+- **Authority ceiling**: Repository Intelligence remains advisory. It has no comment, approval, merge, release, publication, worker-dispatch, or production authority.
+- **Publication**: an independent GitHub remote for `repository-intelligence-engine` remains a parked operational item and is not an extraction correctness gate; immutable source, vendored artifact, and exact-head runtime binding remain authoritative evidence.
 
-## Repository Intelligence Core V1 Operations
+## Extracted Repository Intelligence Operations
 
-The `reviewer.intelligence` package exposes the four accepted V1 operations plus three deterministic V1.1 advisory operations:
+The canonical `repository_intelligence` package exposes the four accepted V1 operations plus three deterministic V1.1 advisory operations. `reviewer.intelligence` forwards this surface for compatibility:
 
 1. **`revision_identity(snapshot)`**: Deterministic repository revision identity with stale base (`base_sha != current_main_sha`) and declared evidence mismatch detection.
 2. **`classify_readiness(snapshot, policy=...)`**: Immutable advisory readiness classification (`REVIEW_READY`, `WAIT_REBIND`, `NEEDS_ATTENTION`, `EVIDENCE_ONLY`, `STALE`, `EXCLUDED`) over normalized structured evidence. Generic protected-path policy defaults empty and may be explicitly injected by a consumer.
@@ -97,34 +97,37 @@ The `reviewer.intelligence` package exposes the four accepted V1 operations plus
 
 `build_repository_intelligence_report(...)` produces the canonical `reviewer.repository_intelligence.v1` report with `COMPLETE | PARTIAL | INCOMPLETE` evidence state and a tamper-detectable `content_sha256`.
 
-## Structured Local CLI Adapter (`reviewer.intelligence_cli`)
+## Canonical CLI and Legacy Compatibility
 
-Run pure local core operations over JSON files or stdin:
+The canonical command is `python -m repository_intelligence.cli`. The historical
+`python -m reviewer.intelligence_cli` entrypoint forwards to the same function
+objects and remains available for existing callers. Run pure local operations
+over JSON files or stdin:
 
 ```bash
 # Revision identity
-python -m reviewer.intelligence_cli --operation revision --input snapshot.json
+python -m repository_intelligence.cli --operation revision --input snapshot.json
 
 # Readiness classification
-python -m reviewer.intelligence_cli --operation readiness --input snapshot.json
+python -m repository_intelligence.cli --operation readiness --input snapshot.json
 
 # Cross-PR overlap
-python -m reviewer.intelligence_cli --operation overlap --input overlap_snapshots.json
+python -m repository_intelligence.cli --operation overlap --input overlap_snapshots.json
 
 # CI failure fingerprinting
-python -m reviewer.intelligence_cli --operation ci --input snapshot.json
+python -m repository_intelligence.cli --operation ci --input snapshot.json
 
 # V1.1 Change Impact from normalized dependency graph evidence
-python -m reviewer.intelligence_cli --operation impact --input impact.json
+python -m repository_intelligence.cli --operation impact --input impact.json
 
 # V1.1 CI Failure Intelligence
-python -m reviewer.intelligence_cli --operation cfi --input snapshot.json
+python -m repository_intelligence.cli --operation cfi --input snapshot.json
 
 # V1.1 External Intelligence Automation advisory
-python -m reviewer.intelligence_cli --operation eia --input automation-evidence.json
+python -m repository_intelligence.cli --operation eia --input automation-evidence.json
 
 # Read from stdin
-cat snapshot.json | python -m reviewer.intelligence_cli --operation readiness --input -
+cat snapshot.json | python -m repository_intelligence.cli --operation readiness --input -
 ```
 
 ## GitHub Action / cloud execution (N4)
