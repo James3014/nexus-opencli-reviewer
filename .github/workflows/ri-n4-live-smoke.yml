@@ -38,20 +38,28 @@ jobs:
           from pathlib import Path
 
           report = Path(os.environ["REPORT_PATH"])
-          raw = report.read_bytes()
-          payload = json.loads(raw)
+          payload = json.loads(report.read_text(encoding="utf-8"))
           assert payload["schema"] == "reviewer.repository_intelligence_cloud.v1"
           assert payload["claim_ceiling"] == "ADVISORY_EVIDENCE_ONLY"
           assert os.environ["CLAIM_CEILING"] == "ADVISORY_EVIDENCE_ONLY"
-          assert hashlib.sha256(raw).hexdigest() == os.environ["REPORTED_SHA"]
-          assert payload["repository"] == os.environ["GITHUB_REPOSITORY"]
-          assert int(payload["pr_number"]) > 0
+
+          supplied = payload["content_sha256"]
+          unsigned = dict(payload)
+          unsigned.pop("content_sha256", None)
+          canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"))
+          computed = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+          assert supplied == computed == os.environ["REPORTED_SHA"]
+
+          identity = payload["review_identity"]
+          assert identity[0] == os.environ["GITHUB_REPOSITORY"]
+          assert int(identity[1]) > 0
+          assert len(identity) == 5
           print(json.dumps({
               "schema": payload["schema"],
-              "repository": payload["repository"],
-              "pr_number": payload["pr_number"],
+              "repository": identity[0],
+              "pr_number": identity[1],
               "claim_ceiling": payload["claim_ceiling"],
-              "content_sha256": os.environ["REPORTED_SHA"],
+              "content_sha256": supplied,
           }, sort_keys=True))
           PY
 
