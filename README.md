@@ -68,7 +68,7 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 ### Adapter Strategy — G7 Frozen
 - **Canonical product**: `repository_intelligence` Python package. Adapters acquire/transport/serialize evidence; they do not own or reimplement intelligence decisions.
 - **V1 adapters**: (1) structured local CLI (`reviewer.intelligence_cli`) as the reference JSON adapter, and (2) WebMCP (`reviewer.webmcp`) as the browser-facing compatibility adapter. WebMCP uses the legacy scan path only to acquire snapshots, then recomputes PR decisions through the canonical Core.
-- **Next adapter**: a direct MCP adapter is the highest-priority post-V1 adapter because it can expose the same Core operations directly to agent/controller surfaces without requiring a browser page. It is not a V1 completion blocker.
+- **Dev MCP adapter**: the public raw DevSpace surface exposes all seven operations and verifies the exact canonical engine Git HEAD before every invocation.
 - **GitHub Action / cloud adapter (N4)**: implemented as a read-only acquisition/transport surface. It reads PR metadata, changed-file names, default-branch identity, and check-run evidence through GitHub REST, never checks out or executes PR code, and emits only a hash-bound advisory bundle plus Step Summary/outputs.
 - **Claim ceilings**: PR intelligence output is bounded by `PR_INTELLIGENCE_ONLY`; CI failure evidence is bounded by `CI_EVIDENCE_ONLY`. The semantic reviewer/publication workflow remains a separate product surface with its existing `PRE_REVIEW_ONLY` ceiling.
 - **WebMCP compatibility**: native ChatGPT Site-tool projection remains a separately tracked OpenAI Desktop compatibility concern; Browser WebMCP support is not promoted into proof of native-chat projection and the compatibility gap does not block Core/V1.
@@ -78,10 +78,10 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 
 ### Extraction Boundary — E9 Closed
 - **Package authority**: `repository_intelligence` is the only canonical deterministic Core and CLI package. `reviewer.intelligence`, `reviewer.intelligence_cli`, and the legacy primitive modules are forwarding-only compatibility shims.
-- **Consumers**: WebMCP, the GitHub Action, and Dev MCP invoke the extracted package; `reviewer.scan` remains only a brownfield acquisition/application consumer.
+- **Consumers**: WebMCP and legacy entrypoints remain compatibility adapters; the primary generic GitHub Action is published by `repository-intelligence-engine@v0.1.0`; Dev MCP invokes the exact-head extracted package; `reviewer.scan` remains only a brownfield acquisition/application consumer.
 - **Legacy cleanup**: duplicate classifier, models, overlap, readiness, CI, Change Impact, CFI, and EIA implementations have been removed from this repository. Compatibility modules contain imports only.
 - **Authority ceiling**: Repository Intelligence remains advisory. It has no comment, approval, merge, release, publication, worker-dispatch, or production authority.
-- **Publication**: the canonical engine is published at `https://github.com/James3014/repository-intelligence-engine`; public `main` is bound to `693ae7cf59e3b090ee873b7196ee330b30e26221` (tree `f5f8496ed16e775e8767827f66d1fa35355d2968`). The vendored artifact and Dev MCP exact-head runtime binding use the same source identity.
+- **Publication**: the canonical engine is published at `https://github.com/James3014/repository-intelligence-engine`; immutable tag `v0.1.0` resolves to `a8b9a00a6f3ea3e9ade0c6ef494d0fa88a2d73b2` (tree `410c0e647f8edbe9d250f7e93f86c52a0b982fb8`). The retained legacy wheel provenance remains bound to its original core-only source `693ae7cf59e3b090ee873b7196ee330b30e26221`.
 
 ## Extracted Repository Intelligence Operations
 
@@ -130,9 +130,9 @@ python -m repository_intelligence.cli --operation eia --input automation-evidenc
 cat snapshot.json | python -m repository_intelligence.cli --operation readiness --input -
 ```
 
-## GitHub Action / cloud execution (N4)
+## GitHub Action / cloud execution
 
-The root `action.yml` exposes Repository Intelligence to generic GitHub repositories without checking out pull-request code. It uses GitHub REST to acquire only PR metadata, changed-file names, current default-branch identity, and check-run evidence, then invokes the same canonical Core used by the local CLI.
+The primary generic Action now lives in `James3014/repository-intelligence-engine`. The root `action.yml` in this repository remains a legacy compatibility surface. Both acquire only PR metadata, changed-file names, current default-branch identity, and check-run evidence without checking out or executing pull-request code.
 
 ```yaml
 name: repository-intelligence
@@ -150,7 +150,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - id: ri
-        uses: James3014/nexus-opencli-reviewer@<immutable-commit>
+        uses: James3014/repository-intelligence-engine@v0.1.0
       - uses: actions/upload-artifact@v4
         with:
           name: repository-intelligence
