@@ -55,7 +55,7 @@ def test_g10_core_has_no_transport_semantic_or_governance_dependencies():
 
 
 def test_g10_v11_adapter_boundary_is_exact():
-    assert cli.OPERATIONS == frozenset({"revision", "readiness", "overlap", "ci", "impact"})
+    assert cli.OPERATIONS == frozenset({"revision", "readiness", "overlap", "ci", "impact", "cfi", "eia"})
     assert hasattr(webmcp, "WebMCPServer")
     assert not (ROOT / "reviewer" / "mcp_server.py").exists()
     assert not (ROOT / "reviewer" / "github_action.py").exists()
