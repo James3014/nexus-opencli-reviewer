@@ -1,0 +1,9 @@
+{
+  "package_name": "repository-intelligence-engine",
+  "version": "0.1.0",
+  "source_commit": "693ae7cf59e3b090ee873b7196ee330b30e26221",
+  "prior_e4_parity_subject": "da96b51f04faf6705280f7b7214b496ab74d1e5b",
+  "wheel_filename": "repository_intelligence_engine-0.1.0-py3-none-any.whl",
+  "wheel_sha256": "1e57b4fe4f742ef304d901850e80dea4af13f95e5e31f8eb12c10d5937ad1aa7",
+  "claim_ceiling": "DISTRIBUTION_ARTIFACT_ONLY"
+}
