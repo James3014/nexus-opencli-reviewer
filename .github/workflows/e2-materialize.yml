@@ -1,0 +1,87 @@
+name: E2 self-containment materializer
+
+on:
+  push:
+    branches:
+      - chatgpt/ri-extraction-e2-self-containment
+    paths:
+      - .github/workflows/e2-materialize.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.event.head_commit.message == 'chore: bootstrap E2 materializer'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/ri-extraction-e2-self-containment
+          fetch-depth: 0
+      - name: Apply bounded self-containment migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          core = Path('reviewer/intelligence/core.py')
+          text = core.read_text(encoding='utf-8')
+          old = '''from reviewer.classifier import classify\nfrom reviewer.models import CheckObservation, Classification, Disposition, PRSnapshot\nfrom reviewer.overlap import detect\n'''
+          new = '''from .classifier import classify\nfrom .models import CheckObservation, Classification, Disposition, PRSnapshot\nfrom .overlap import detect\n'''
+          if text.count(old) != 1:
+              raise SystemExit('E2 core import block did not match exactly once')
+          core.write_text(text.replace(old, new), encoding='utf-8')
+
+          facade = Path('reviewer/intelligence/__init__.py')
+          text = facade.read_text(encoding='utf-8')
+          old = 'from reviewer.models import Disposition\n'
+          new = 'from .models import Disposition\n'
+          if text.count(old) != 1:
+              raise SystemExit('E2 facade import did not match exactly once')
+          facade.write_text(text.replace(old, new), encoding='utf-8')
+
+          classifier = Path('reviewer/intelligence/classifier.py')
+          text = classifier.read_text(encoding='utf-8')
+          old = 'from .models import Classification, Disposition\n'
+          new = 'from .models import *\n'
+          if text.count(old) != 1:
+              raise SystemExit('E2 classifier import did not match exactly once')
+          classifier.write_text(text.replace(old, new), encoding='utf-8')
+
+          Path('reviewer/models.py').write_text(
+              '"""Compatibility projection to canonical Repository Intelligence models."""\n'
+              'from .intelligence.models import *\n',
+              encoding='utf-8',
+          )
+          Path('reviewer/classifier.py').write_text(
+              '"""Compatibility projection to canonical Repository Intelligence classifier."""\n'
+              'from .intelligence.classifier import *\n',
+              encoding='utf-8',
+          )
+          Path('reviewer/overlap.py').write_text(
+              '"""Compatibility projection to canonical Repository Intelligence overlap logic."""\n'
+              'from .intelligence.overlap import *\n',
+              encoding='utf-8',
+          )
+
+          Path('tests/test_e2_self_containment.py').write_text('''from __future__ import annotations\n\nimport ast\nfrom pathlib import Path\n\n\ndef test_repository_intelligence_has_no_reverse_reviewer_imports():\n    root = Path("reviewer/intelligence")\n    violations = []\n    for path in sorted(root.glob("*.py")):\n        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))\n        for node in ast.walk(tree):\n            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("reviewer"):\n                violations.append(f"{path}:{node.lineno}:{node.module}")\n            elif isinstance(node, ast.Import):\n                for alias in node.names:\n                    if alias.name.startswith("reviewer"):\n                        violations.append(f"{path}:{node.lineno}:{alias.name}")\n    assert violations == []\n\n\ndef test_legacy_primitives_forward_to_canonical_authority():\n    import reviewer.classifier as legacy_classifier\n    import reviewer.models as legacy_models\n    import reviewer.overlap as legacy_overlap\n    import reviewer.intelligence.classifier as canonical_classifier\n    import reviewer.intelligence.models as canonical_models\n    import reviewer.intelligence.overlap as canonical_overlap\n\n    assert legacy_models.PRSnapshot is canonical_models.PRSnapshot\n    assert legacy_models.CheckObservation is canonical_models.CheckObservation\n    assert legacy_models.Disposition is canonical_models.Disposition\n    assert legacy_classifier.classify is canonical_classifier.classify\n    assert legacy_overlap.detect is canonical_overlap.detect\n''', encoding='utf-8')
+          PY
+      - name: Verify E2 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check pytest
+          python3 -m pytest -q tests/test_e2_self_containment.py
+          python3 -m pytest -q --deselect tests/test_service_cli.py::test_github_binary_read_rejects_oversized_archive_before_materializing
+          git diff --check
+      - name: Commit bounded E2 result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add reviewer/intelligence/core.py reviewer/intelligence/__init__.py reviewer/intelligence/models.py reviewer/intelligence/classifier.py reviewer/intelligence/overlap.py reviewer/models.py reviewer/classifier.py reviewer/overlap.py tests/test_e2_self_containment.py
+          git commit -m 'refactor: make Repository Intelligence Core self-contained'
+          git push origin HEAD:chatgpt/ri-extraction-e2-self-containment
