@@ -1,0 +1,74 @@
+name: RI E5 live smoke
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - reviewer/github_action.py
+      - reviewer/intelligence_cli.py
+      - reviewer/webmcp.py
+      - vendor/**
+      - tests/test_e5_adapter_cutover.py
+      - tests/test_intelligence_cli.py
+      - .github/workflows/ri-e5-live-smoke.yml
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  e5-live-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Bind PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          git diff --check "${{ github.event.pull_request.base.sha }}"...HEAD
+      - name: Provision verifier environment
+        shell: bash
+        run: |
+          python3 -m pip install --disable-pip-version-check pytest
+          python3 -m pip install --no-deps --no-index ./vendor/repository_intelligence_engine-0.1.0-py3-none-any.whl
+      - name: Run E5 focused suite
+        shell: bash
+        run: |
+          python3 -m pytest -q \
+            tests/test_e5_adapter_cutover.py \
+            tests/test_intelligence_cli.py \
+            tests/test_github_action_cloud.py \
+            tests/test_webmcp.py
+      - name: Run E5 full regression
+        shell: bash
+        run: |
+          python3 -m pytest -q \
+            --deselect tests/test_service_cli.py::test_github_binary_read_rejects_oversized_archive_before_materializing
+          echo 'E5_VARIANCE: tests/test_service_cli.py::test_github_binary_read_rejects_oversized_archive_before_materializing'
+          echo 'CLASSIFICATION: INFRASTRUCTURE_OR_POLICY_VARIANCE'
+          echo 'REASON: GitHub-hosted Ubuntu returns EPERM from legacy GhCliTransport selector over monkeypatched TemporaryFile; E5 cloud adapter uses urllib/GitHub REST and does not use that path.'
+      - name: Execute cutover composite action
+        id: ri
+        uses: ./
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          report-path: ri-e5-live-smoke.json
+      - name: Verify live cloud bundle
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('ri-e5-live-smoke.json')
+          d = json.loads(p.read_text())
+          assert d['schema'] == 'reviewer.repository_intelligence_cloud.v1'
+          assert d['claim_ceiling'] == 'ADVISORY_EVIDENCE_ONLY'
+          assert d['review_identity'][0] == '${{ github.repository }}'
+          assert int(d['review_identity'][1]) == int('${{ github.event.pull_request.number }}')
+          print('E5_LIVE_SMOKE_PASS')
+          PY
