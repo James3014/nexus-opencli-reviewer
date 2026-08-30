@@ -16,9 +16,11 @@ from reviewer.intelligence import (
     CLAIM_CEILING,
     CI_EVIDENCE_CLAIM_CEILING,
     analyze_change_impact,
+    analyze_ci_failure_intelligence,
     analyze_cross_pr_overlap,
     classify_readiness,
     fingerprint_ci_failures,
+    plan_external_intelligence_automation,
     revision_identity,
 )
 
@@ -28,6 +30,8 @@ OPERATIONS: frozenset[str] = frozenset({
     "overlap",
     "ci",
     "impact",
+    "cfi",
+    "eia",
 })
 
 
@@ -89,6 +93,24 @@ def execute_operation(operation: str, data: Any) -> dict[str, Any]:
         return {
             "operation": operation,
             "claim_ceiling": CLAIM_CEILING,
+            "result": res.to_dict(),
+        }
+    elif operation == "cfi":
+        if not isinstance(data, dict):
+            raise ValueError("Input for 'cfi' must be a JSON object snapshot mapping")
+        res = analyze_ci_failure_intelligence(data)
+        return {
+            "operation": operation,
+            "claim_ceiling": CI_EVIDENCE_CLAIM_CEILING,
+            "result": res.to_dict(),
+        }
+    elif operation == "eia":
+        if not isinstance(data, dict):
+            raise ValueError("Input for 'eia' must be a JSON object automation-evidence mapping")
+        res = plan_external_intelligence_automation(data)
+        return {
+            "operation": operation,
+            "claim_ceiling": "AUTOMATION_ADVISORY_ONLY",
             "result": res.to_dict(),
         }
     else:

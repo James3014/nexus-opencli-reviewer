@@ -391,6 +391,91 @@ class ChangeImpactReportV1:
         }
 
 
+class CIFailureTriageStatus(str, Enum):
+    NO_TERMINAL_FAILURE = "NO_TERMINAL_FAILURE"
+    EXPECTED_FAILURE_ONLY = "EXPECTED_FAILURE_ONLY"
+    UNEXPECTED_FAILURE_OBSERVED = "UNEXPECTED_FAILURE_OBSERVED"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+
+@dataclass(frozen=True)
+class CIFailureIntelligenceReportV1:
+    """Deterministic CI-failure triage bounded to evidence, never root cause."""
+
+    identity: RevisionIdentity
+    failure_evidence: CIFailureFingerprint
+    status: CIFailureTriageStatus
+    diagnosis_eligible: bool
+    reason_codes: tuple[str, ...] = ()
+    failed_check_names: tuple[str, ...] = ()
+    evidence_gaps: tuple[str, ...] = ()
+    evidence_completeness: EvidenceCompleteness = EvidenceCompleteness.INCOMPLETE
+    content_sha256: str = ""
+    schema: str = "reviewer.ci_failure_intelligence.v1"
+    claim_ceiling: str = CI_EVIDENCE_CLAIM_CEILING
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
+        object.__setattr__(self, "failed_check_names", tuple(self.failed_check_names))
+        object.__setattr__(self, "evidence_gaps", tuple(self.evidence_gaps))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "identity": self.identity.to_dict(),
+            "failure_evidence": self.failure_evidence.to_dict(),
+            "status": self.status.value,
+            "diagnosis_eligible": self.diagnosis_eligible,
+            "reason_codes": list(self.reason_codes),
+            "failed_check_names": list(self.failed_check_names),
+            "evidence_gaps": list(self.evidence_gaps),
+            "evidence_completeness": self.evidence_completeness.value,
+            "claim_ceiling": self.claim_ceiling,
+            "content_sha256": self.content_sha256,
+        }
+
+
+class ExternalIntelligenceDecision(str, Enum):
+    READY = "READY"
+    NO_ACTION = "NO_ACTION"
+    BLOCKED = "BLOCKED"
+
+
+@dataclass(frozen=True)
+class ExternalIntelligenceAutomationEnvelopeV1:
+    """Pure automation plan. It grants no dispatch, write, or merge authority."""
+
+    identity: RevisionIdentity
+    decision: ExternalIntelligenceDecision
+    action_kind: str
+    idempotency_key: str
+    evidence_refs: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    evidence_gaps: tuple[str, ...] = ()
+    content_sha256: str = ""
+    schema: str = "reviewer.external_intelligence_automation.v1"
+    claim_ceiling: str = "AUTOMATION_ADVISORY_ONLY"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
+        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
+        object.__setattr__(self, "evidence_gaps", tuple(self.evidence_gaps))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "identity": self.identity.to_dict(),
+            "decision": self.decision.value,
+            "action_kind": self.action_kind,
+            "idempotency_key": self.idempotency_key,
+            "evidence_refs": list(self.evidence_refs),
+            "reason_codes": list(self.reason_codes),
+            "evidence_gaps": list(self.evidence_gaps),
+            "claim_ceiling": self.claim_ceiling,
+            "content_sha256": self.content_sha256,
+        }
+
+
 @dataclass(frozen=True)
 class RepositoryIntelligenceReportV1:
     """Canonical hash-bound V1 repository intelligence report."""

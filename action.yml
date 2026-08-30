@@ -1,0 +1,53 @@
+name: Repository Intelligence
+
+description: >-
+  Read-only Repository Intelligence for pull requests. Acquires GitHub metadata,
+  changed-file names, and check-run evidence without checking out or executing PR code.
+
+inputs:
+  pr-number:
+    description: Pull request number. Defaults to the current pull_request event.
+    required: false
+    default: ""
+  report-path:
+    description: JSON report path relative to the caller workspace.
+    required: false
+    default: repository-intelligence.json
+
+outputs:
+  report-path:
+    description: Path to the generated JSON evidence bundle.
+    value: ${{ steps.run.outputs.report-path }}
+  content-sha256:
+    description: SHA-256 of the generated cloud evidence bundle.
+    value: ${{ steps.run.outputs.content-sha256 }}
+  readiness:
+    description: Deterministic PR readiness disposition.
+    value: ${{ steps.run.outputs.readiness }}
+  cfi-status:
+    description: CI Failure Intelligence status.
+    value: ${{ steps.run.outputs.cfi-status }}
+  eia-decision:
+    description: External Intelligence Automation advisory decision.
+    value: ${{ steps.run.outputs.eia-decision }}
+  claim-ceiling:
+    description: Top-level cloud bundle claim ceiling.
+    value: ${{ steps.run.outputs.claim-ceiling }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        RI_PR_NUMBER: ${{ inputs.pr-number }}
+        RI_REPORT_PATH: ${{ inputs.report-path }}
+      run: |
+        set -euo pipefail
+        args=(--repository "$GITHUB_REPOSITORY" --output "$RI_REPORT_PATH")
+        if [[ -n "$RI_PR_NUMBER" ]]; then
+          args+=(--pr-number "$RI_PR_NUMBER")
+        fi
+        PYTHONPATH="$GITHUB_ACTION_PATH${PYTHONPATH:+:$PYTHONPATH}" \
+          python3 -m reviewer.github_action "${args[@]}"
