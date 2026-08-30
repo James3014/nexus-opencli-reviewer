@@ -31,9 +31,11 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
           git diff --check "${{ github.event.pull_request.base.sha }}"...HEAD
-      - name: Provision pytest
+      - name: Provision verifier environment
         shell: bash
-        run: python3 -m pip install --disable-pip-version-check pytest
+        run: |
+          python3 -m pip install --disable-pip-version-check pytest
+          python3 -m pip install --no-deps --no-index ./vendor/repository_intelligence_engine-0.1.0-py3-none-any.whl
       - name: Run E5 focused suite
         shell: bash
         run: |
