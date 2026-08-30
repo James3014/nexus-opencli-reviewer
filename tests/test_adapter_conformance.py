@@ -373,12 +373,15 @@ class TestArchitectureAndClaimCeiling:
             "graph_complete": True,
         })["claim_ceiling"] == "PR_INTELLIGENCE_ONLY"
 
-    def test_deferred_adapters_not_present(self):
-        """Direct MCP server and GitHub Action adapters are deferred post-V1 and not implemented in codebase."""
+    def test_v11_cloud_adapter_is_present_without_second_mcp_or_write_authority(self):
+        """V1.1 adds the read-only cloud adapter while keeping direct MCP/write authority external."""
         repo_root = Path(__file__).parent.parent
         reviewer_dir = repo_root / "reviewer"
 
-        # Assert no direct mcp server or github action adapter modules
         assert not (reviewer_dir / "mcp_server.py").exists()
-        assert not (reviewer_dir / "github_action.py").exists()
+        assert (reviewer_dir / "github_action.py").exists()
+        assert (repo_root / "action.yml").exists()
         assert not (reviewer_dir / "action.py").exists()
+        action_text = (repo_root / "action.yml").read_text(encoding="utf-8")
+        assert "actions/checkout" not in action_text
+        assert "python3 -m reviewer.github_action" in action_text
