@@ -198,4 +198,3 @@ collected from GitHub via the reviewer scan substrate.
 - **Does not**: approve PRs, request changes, merge, invoke ChatGPT/OpenCLI,
   publish GitHub comments, write state, or perform any Nexus lifecycle action.
 - PR intelligence outputs include `"claim_ceiling": "PR_INTELLIGENCE_ONLY"`; CI failure evidence outputs include `"claim_ceiling": "CI_EVIDENCE_ONLY"`.
-
