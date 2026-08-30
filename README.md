@@ -81,7 +81,7 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 - **Consumers**: WebMCP, the GitHub Action, and Dev MCP invoke the extracted package; `reviewer.scan` remains only a brownfield acquisition/application consumer.
 - **Legacy cleanup**: duplicate classifier, models, overlap, readiness, CI, Change Impact, CFI, and EIA implementations have been removed from this repository. Compatibility modules contain imports only.
 - **Authority ceiling**: Repository Intelligence remains advisory. It has no comment, approval, merge, release, publication, worker-dispatch, or production authority.
-- **Publication**: an independent GitHub remote for `repository-intelligence-engine` remains a parked operational item and is not an extraction correctness gate; immutable source, vendored artifact, and exact-head runtime binding remain authoritative evidence.
+- **Publication**: the canonical engine is published at `https://github.com/James3014/repository-intelligence-engine`; public `main` is bound to `693ae7cf59e3b090ee873b7196ee330b30e26221` (tree `f5f8496ed16e775e8767827f66d1fa35355d2968`). The vendored artifact and Dev MCP exact-head runtime binding use the same source identity.
 
 ## Extracted Repository Intelligence Operations
 

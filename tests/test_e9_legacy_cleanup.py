@@ -69,5 +69,6 @@ def test_docs_name_extracted_package_as_only_canonical_authority() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "`repository_intelligence` is the canonical" in readme
     assert "`reviewer.intelligence` package is a forwarding-only compatibility shim" in readme
+    assert "https://github.com/James3014/repository-intelligence-engine" in readme
     assert "KEEP_IN_CURRENT_REPOSITORY_FOR_V1" not in readme
     assert "DEFER_REPO_EXTRACTION_TO_POST_V1" not in readme
