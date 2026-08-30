@@ -16,13 +16,15 @@ from unittest.mock import patch
 import pytest
 
 import reviewer.intelligence_cli as cli
-from reviewer.intelligence import (
+from repository_intelligence import (
     CLAIM_CEILING,
     CI_EVIDENCE_CLAIM_CEILING,
     analyze_change_impact,
+    analyze_ci_failure_intelligence,
     analyze_cross_pr_overlap,
     classify_readiness,
     fingerprint_ci_failures,
+    plan_external_intelligence_automation,
     revision_identity,
 )
 
@@ -65,6 +67,47 @@ def sample_overlap_dict(sample_snapshot_dict: dict[str, Any]) -> dict[str, Any]:
     snap2["pr_number"] = 43
     snap2["changed_files"] = ["foo/bar.py", "foo/other.py"]
     return {"snapshots": [sample_snapshot_dict, snap2]}
+
+
+@pytest.fixture
+def sample_impact_dict(sample_snapshot_dict: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "snapshot": sample_snapshot_dict,
+        "covered_files": ["foo/bar.py", "foo/service.py", "tests/test_bar.py"],
+        "dependency_edges": [
+            {"consumer": "foo/service.py", "dependency": "foo/bar.py"},
+        ],
+        "graph_complete": True,
+        "graph_errors": [],
+    }
+
+
+@pytest.fixture
+def sample_cfi_dict() -> dict[str, Any]:
+    return {
+        "repository": "owner/repo",
+        "pr_number": 88,
+        "head_sha": "h88",
+        "base_sha": "m88",
+        "current_main_sha": "m88",
+        "checks": [
+            {
+                "name": "unit-tests",
+                "status": "failure",
+                "head_sha": "h88",
+                "check_run_id": 9901,
+            }
+        ],
+        "collection_complete": True,
+        "collection_errors": [],
+    }
+
+
+@pytest.fixture
+def sample_eia_dict(sample_cfi_dict: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "snapshot": sample_cfi_dict,
+    }
 
 
 class TestIntelligenceCliOperations:
@@ -134,18 +177,10 @@ class TestIntelligenceCliOperations:
         assert output["claim_ceiling"] == CI_EVIDENCE_CLAIM_CEILING
         assert output["result"] == fingerprint_ci_failures(sample_snapshot_dict).to_dict()
 
-    def test_impact_operation_file(self, tmp_path: Path, sample_snapshot_dict: dict[str, Any]):
-        impact_input = {
-            "snapshot": sample_snapshot_dict,
-            "covered_files": ["foo/bar.py", "foo/service.py", "tests/test_bar.py"],
-            "dependency_edges": [
-                {"consumer": "foo/service.py", "dependency": "foo/bar.py"},
-            ],
-            "graph_complete": True,
-            "graph_errors": [],
-        }
+    def test_impact_operation_file(self, tmp_path: Path, sample_impact_dict: dict[str, Any]):
         infile = tmp_path / "impact.json"
-        infile.write_text(json.dumps(impact_input))
+        infile.write_text(json.dumps(sample_impact_dict))
+
         stdout_buf = io.StringIO()
         with patch("sys.stdout", stdout_buf):
             code = cli.main(["--operation", "impact", "--input", str(infile)])
@@ -153,7 +188,44 @@ class TestIntelligenceCliOperations:
         output = json.loads(stdout_buf.getvalue())
         assert output["operation"] == "impact"
         assert output["claim_ceiling"] == CLAIM_CEILING
-        assert output["result"] == analyze_change_impact(impact_input).to_dict()
+        assert output["result"] == analyze_change_impact(sample_impact_dict).to_dict()
+
+    def test_cfi_operation_file(self, tmp_path: Path, sample_cfi_dict: dict[str, Any]):
+        infile = tmp_path / "cfi.json"
+        infile.write_text(json.dumps(sample_cfi_dict))
+
+        stdout_buf = io.StringIO()
+        with patch("sys.stdout", stdout_buf):
+            code = cli.main(["--operation", "cfi", "--input", str(infile)])
+        assert code == 0
+        output = json.loads(stdout_buf.getvalue())
+        assert output["operation"] == "cfi"
+        assert output["claim_ceiling"] == CI_EVIDENCE_CLAIM_CEILING
+        assert output["result"] == analyze_ci_failure_intelligence(sample_cfi_dict).to_dict()
+
+    def test_eia_operation_file(self, tmp_path: Path, sample_eia_dict: dict[str, Any]):
+        infile = tmp_path / "eia.json"
+        infile.write_text(json.dumps(sample_eia_dict))
+
+        stdout_buf = io.StringIO()
+        with patch("sys.stdout", stdout_buf):
+            code = cli.main(["--operation", "eia", "--input", str(infile)])
+        assert code == 0
+        output = json.loads(stdout_buf.getvalue())
+        assert output["operation"] == "eia"
+        assert output["claim_ceiling"] == "AUTOMATION_ADVISORY_ONLY"
+        assert output["result"] == plan_external_intelligence_automation(sample_eia_dict).to_dict()
+
+    def test_all_seven_operations_supported(self):
+        assert cli.OPERATIONS == frozenset({
+            "revision",
+            "readiness",
+            "overlap",
+            "ci",
+            "impact",
+            "cfi",
+            "eia",
+        })
 
     def test_subprocess_module_execution(self, tmp_path: Path, sample_snapshot_dict: dict[str, Any]):
         infile = tmp_path / "snap.json"

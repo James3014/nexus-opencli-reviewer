@@ -18,11 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-from reviewer.intelligence import (
+from repository_intelligence import (
+    CI_EVIDENCE_CLAIM_CEILING,
+    analyze_ci_failure_intelligence,
+    plan_external_intelligence_automation,
     verify_ci_failure_intelligence_report,
     verify_external_intelligence_automation_envelope,
 )
-from reviewer.intelligence_cli import execute_operation
+from repository_intelligence.cli import execute_operation
 
 CLOUD_SCHEMA = "reviewer.repository_intelligence_cloud.v1"
 CLOUD_CLAIM_CEILING = "ADVISORY_EVIDENCE_ONLY"
@@ -217,8 +220,18 @@ def run_cloud_bundle(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     """Run canonical deterministic cloud-safe operations over one acquired snapshot."""
     revision = execute_operation("revision", dict(snapshot))
     readiness = execute_operation("readiness", dict(snapshot))
-    cfi = execute_operation("cfi", dict(snapshot))
-    eia = execute_operation("eia", {"cfi_report": cfi["result"]})
+    cfi_report = analyze_ci_failure_intelligence(dict(snapshot))
+    cfi = {
+        "operation": "cfi",
+        "claim_ceiling": CI_EVIDENCE_CLAIM_CEILING,
+        "result": cfi_report.to_dict(),
+    }
+    eia_report = plan_external_intelligence_automation({"cfi_report": cfi["result"]})
+    eia = {
+        "operation": "eia",
+        "claim_ceiling": "AUTOMATION_ADVISORY_ONLY",
+        "result": eia_report.to_dict(),
+    }
     bundle: dict[str, Any] = {
         "schema": CLOUD_SCHEMA,
         "claim_ceiling": CLOUD_CLAIM_CEILING,

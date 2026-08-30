@@ -45,6 +45,7 @@ runs:
         RI_REPORT_PATH: ${{ inputs.report-path }}
       run: |
         set -euo pipefail
+        python3 -m pip install --no-deps --no-index "$GITHUB_ACTION_PATH/vendor/repository_intelligence_engine-0.1.0-py3-none-any.whl"
         args=(--repository "$GITHUB_REPOSITORY" --output "$RI_REPORT_PATH")
         if [[ -n "$RI_PR_NUMBER" ]]; then
           args+=(--pr-number "$RI_PR_NUMBER")

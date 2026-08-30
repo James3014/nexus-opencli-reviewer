@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from .github import REPO_RE, GhCliTransport
-from .intelligence import (
+from repository_intelligence import (
     CLAIM_CEILING as PR_CLAIM_CEILING,
     CI_EVIDENCE_CLAIM_CEILING as CI_CLAIM_CEILING,
     build_repository_intelligence_report,
