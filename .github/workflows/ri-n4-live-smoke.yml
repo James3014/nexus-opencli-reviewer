@@ -1,0 +1,63 @@
+name: RI N4 live smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ri-n4-live-smoke.yml"
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  live-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - id: ri
+        uses: James3014/nexus-opencli-reviewer@041f3b68d49ad4c972c962980b48f88359638906
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          report-path: repository-intelligence.json
+
+      - name: Verify cloud evidence bundle
+        env:
+          REPORT_PATH: ${{ steps.ri.outputs.report-path }}
+          REPORTED_SHA: ${{ steps.ri.outputs.content-sha256 }}
+          CLAIM_CEILING: ${{ steps.ri.outputs.claim-ceiling }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          report = Path(os.environ["REPORT_PATH"])
+          raw = report.read_bytes()
+          payload = json.loads(raw)
+          assert payload["schema"] == "reviewer.repository_intelligence_cloud.v1"
+          assert payload["claim_ceiling"] == "ADVISORY_EVIDENCE_ONLY"
+          assert os.environ["CLAIM_CEILING"] == "ADVISORY_EVIDENCE_ONLY"
+          assert hashlib.sha256(raw).hexdigest() == os.environ["REPORTED_SHA"]
+          assert payload["repository"] == os.environ["GITHUB_REPOSITORY"]
+          assert int(payload["pr_number"]) > 0
+          print(json.dumps({
+              "schema": payload["schema"],
+              "repository": payload["repository"],
+              "pr_number": payload["pr_number"],
+              "claim_ceiling": payload["claim_ceiling"],
+              "content_sha256": os.environ["REPORTED_SHA"],
+          }, sort_keys=True))
+          PY
+
+      - name: Upload evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ri-n4-live-smoke
+          path: repository-intelligence.json
+          if-no-files-found: error
