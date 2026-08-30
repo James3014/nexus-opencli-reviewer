@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   materialize:
-    if: "${{ github.event.head_commit.message == 'chore: fix E2 materializer' }}"
+    if: "${{ github.event.head_commit.message == 'chore: fix E2 reverse dependency' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +33,14 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit('E2 core import block did not match exactly once')
           core.write_text(text.replace(old, new), encoding='utf-8')
+
+          contracts = Path('reviewer/intelligence/contracts.py')
+          text = contracts.read_text(encoding='utf-8')
+          old = 'from reviewer.models import Disposition\n'
+          new = 'from .models import Disposition\n'
+          if text.count(old) != 1:
+              raise SystemExit('E2 contracts import did not match exactly once')
+          contracts.write_text(text.replace(old, new), encoding='utf-8')
 
           facade = Path('reviewer/intelligence/__init__.py')
           text = facade.read_text(encoding='utf-8')
@@ -82,6 +90,6 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add reviewer/intelligence/core.py reviewer/intelligence/__init__.py reviewer/intelligence/models.py reviewer/intelligence/classifier.py reviewer/intelligence/overlap.py reviewer/models.py reviewer/classifier.py reviewer/overlap.py tests/test_e2_self_containment.py
+          git add reviewer/intelligence/core.py reviewer/intelligence/contracts.py reviewer/intelligence/__init__.py reviewer/intelligence/models.py reviewer/intelligence/classifier.py reviewer/intelligence/overlap.py reviewer/models.py reviewer/classifier.py reviewer/overlap.py tests/test_e2_self_containment.py
           git commit -m 'refactor: make Repository Intelligence Core self-contained'
           git push origin HEAD:chatgpt/ri-extraction-e2-self-containment
