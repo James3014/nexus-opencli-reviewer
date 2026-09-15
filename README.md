@@ -78,10 +78,10 @@ The V1 architecture is structured as a unidirectional pipeline with strict layer
 
 ### Extraction Boundary — E9 Closed
 - **Package authority**: `repository_intelligence` is the only canonical deterministic Core and CLI package. `reviewer.intelligence`, `reviewer.intelligence_cli`, and the legacy primitive modules are forwarding-only compatibility shims.
-- **Consumers**: WebMCP and legacy entrypoints remain compatibility adapters; the primary generic GitHub Action is published by `repository-intelligence-engine@v0.1.2`; Dev MCP invokes the exact-head extracted package; `reviewer.scan` remains only a brownfield acquisition/application consumer.
+- **Consumers**: WebMCP and legacy entrypoints remain compatibility adapters; the primary generic GitHub Action is published by `repository-intelligence-engine@v0.1.0`; Dev MCP invokes the exact-head extracted package; `reviewer.scan` remains only a brownfield acquisition/application consumer.
 - **Legacy cleanup**: duplicate classifier, models, overlap, readiness, CI, Change Impact, CFI, and EIA implementations have been removed from this repository. Compatibility modules contain imports only.
 - **Authority ceiling**: Repository Intelligence remains advisory. It has no comment, approval, merge, release, publication, worker-dispatch, or production authority.
-- **Publication**: the canonical engine is published at `https://github.com/James3014/repository-intelligence-engine`; current immutable release `v0.1.2` publishes both the PR-event snapshot Action and the optional `terminal/` observed-check Action. The retained legacy wheel provenance remains bound to its original core-only source `693ae7cf59e3b090ee873b7196ee330b30e26221`.
+- **Publication**: the canonical engine is published at `https://github.com/James3014/repository-intelligence-engine`; immutable tag `v0.1.0` resolves to `a8b9a00a6f3ea3e9ade0c6ef494d0fa88a2d73b2` (tree `410c0e647f8edbe9d250f7e93f86c52a0b982fb8`). The retained legacy wheel provenance remains bound to its original core-only source `693ae7cf59e3b090ee873b7196ee330b30e26221`.
 
 ## Extracted Repository Intelligence Operations
 
@@ -134,8 +134,6 @@ cat snapshot.json | python -m repository_intelligence.cli --operation readiness 
 
 The primary generic Action now lives in `James3014/repository-intelligence-engine`. The root `action.yml` in this repository remains a legacy compatibility surface. Both acquire only PR metadata, changed-file names, current default-branch identity, and check-run evidence without checking out or executing pull-request code.
 
-This repository also consumes the canonical `terminal/` Action in its PR workflow. That second-stage observation remains advisory-only and does not grant this reviewer approval, request-changes, Candidate acceptance, or merge authority.
-
 ```yaml
 name: repository-intelligence
 on:
@@ -152,7 +150,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - id: ri
-        uses: James3014/repository-intelligence-engine@v0.1.2
+        uses: James3014/repository-intelligence-engine@v0.1.0
       - uses: actions/upload-artifact@v4
         with:
           name: repository-intelligence
