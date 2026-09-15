@@ -316,26 +316,41 @@ def test_metadata_canary_rejection_is_a_failed_cli_exit(monkeypatch):
 
 
 def test_github_binary_read_rejects_oversized_archive_before_materializing(monkeypatch):
+    import os
     import tempfile
     from reviewer.github import GhCliTransport, GitHubError
 
-    payload = tempfile.TemporaryFile()
-    payload.write(b"x" * 17)
-    payload.seek(0)
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"x" * 17)
+    os.close(write_fd)
+    payload = os.fdopen(read_fd, "rb")
+    stderr = tempfile.TemporaryFile()
 
     class Process:
-        stdout = payload
-        stderr = tempfile.TemporaryFile()
+        def __init__(self):
+            self.stdout = payload
+            self.stderr = stderr
+            self.killed = False
+            self.wait_calls = 0
 
         def wait(self, **_):
+            self.wait_calls += 1
             return 0
 
         def kill(self):
+            self.killed = True
             return None
 
-    monkeypatch.setattr("reviewer.github.subprocess.Popen", lambda *a, **k: Process())
-    with pytest.raises(GitHubError, match="byte limit"):
-        GhCliTransport("gh")._get_bytes("repos/o/r/actions/artifacts/1/zip", max_bytes=16)
+    process = Process()
+    monkeypatch.setattr("reviewer.github.subprocess.Popen", lambda *a, **k: process)
+    try:
+        with pytest.raises(GitHubError, match="byte limit"):
+            GhCliTransport("gh")._get_bytes("repos/o/r/actions/artifacts/1/zip", max_bytes=16)
+        assert process.killed is True
+        assert process.wait_calls == 1
+    finally:
+        payload.close()
+        stderr.close()
 
 
 def test_status_reports_launch_and_durable_queue(monkeypatch,tmp_path):
