@@ -76,6 +76,8 @@ class F4CalibrationSplit(str, Enum):
 class F4AuthorizationPreviewStatus(str, Enum):
     READY = "READY"
     CURRENT_STATE_PROJECTION_REQUIRED = "CURRENT_STATE_PROJECTION_REQUIRED"
+    CONFIG_QUOTA_INSUFFICIENT = "CONFIG_QUOTA_INSUFFICIENT"
+    OPERATING_POINT_REQUIRED = "OPERATING_POINT_REQUIRED"
     INVALID_CORPUS = "INVALID_CORPUS"
 
 
@@ -293,24 +295,28 @@ class F4CalibrationBatchPreviewV1:
     provider_payload_hashes: tuple[str, ...]
     corpus_manifest_hash: str
     calibration_contract_revision: str
+    frozen_operating_point_hash: str | None
     authorization_hash: str
 
 
 @dataclass(frozen=True)
 class F4AuthorizationPreviewV1:
     status: F4AuthorizationPreviewStatus
+    partition: F4CalibrationSplit
     source_revision: str
     calibration_contract_revision: str
     config_hash: str
+    config_max_canary_quota: int
+    quota_sufficient: bool
+    required_case_count: int
+    observed_case_count: int
+    missing_case_count: int
+    max_batch_calls: int
     wire_contract_hash: str
     question_contract_hash: str
     input_schema_hash: str
-    max_calls_per_batch: int
-    calibration_fit_count: int
-    calibration_cert_count: int
-    missing_fit_count: int
-    missing_cert_count: int
     corpus_manifest_hash: str
+    frozen_operating_point_hash: str | None
     batches: tuple[F4CalibrationBatchPreviewV1, ...]
     plan_hash: str
     reason: str | None
@@ -763,10 +769,11 @@ def _authorization_batch_hash(
     case_ids: Sequence[str],
     payload_hashes: Sequence[str],
     corpus_manifest_hash: str,
+    frozen_operating_point_hash: str | None,
 ) -> str:
     return _canonical_hash(
         {
-            "schema": "f4-calibration-batch-authorization-preview.v1",
+            "schema": "f4-calibration-batch-authorization-preview.v2",
             "source_revision": source_revision,
             "calibration_contract_revision": calibration_contract_revision,
             "config_hash": config_hash,
@@ -778,6 +785,7 @@ def _authorization_batch_hash(
             "case_ids": list(case_ids),
             "provider_payload_hashes": list(payload_hashes),
             "corpus_manifest_hash": corpus_manifest_hash,
+            "frozen_operating_point_hash": frozen_operating_point_hash,
             "max_calls": len(case_ids),
             "retry": "NONE",
         }
@@ -790,167 +798,200 @@ def build_zero_call_authorization_preview(
     contract: F4QuestionContractV1 | None = None,
     *,
     calibration_contract_revision: str,
+    authorization_partition: F4CalibrationSplit,
     source_revision: str = F4_FROZEN_SOURCE_REVISION,
     wire_contract_hash: str = F4_FROZEN_WIRE_CONTRACT_HASH,
-    required_fit_count: int = 50,
-    required_cert_count: int = 50,
+    required_case_count: int = 50,
+    max_batch_calls: int = 25,
+    frozen_operating_point_hash: str | None = None,
 ) -> F4AuthorizationPreviewV1:
-    """Build an effect-free calibration authorization preview.
+    """Build one phase-specific, effect-free authorization preview.
 
-    Only CALIBRATION_FIT and CALIBRATION_CERT are eligible for Wave 2 calls.
-    The function performs no credential lookup and imports no network client.
+    FIT and CERT are separate external-effect phases. max_canary_quota is treated
+    conservatively as the maximum total calls covered by one Owner authorization
+    plan; splitting into transport batches may not multiply it.
     """
     contract = contract or F4QuestionContractV1()
     if not _HEX40.fullmatch(calibration_contract_revision):
         raise ValueError(
             "calibration_contract_revision must be lowercase git sha"
         )
-    counts = validate_corpus(cases)
-    fit = sorted(
-        (
-            c
-            for c in cases
-            if c.split is F4CalibrationSplit.CALIBRATION_FIT
-        ),
+    if authorization_partition not in (
+        F4CalibrationSplit.CALIBRATION_FIT,
+        F4CalibrationSplit.CALIBRATION_CERT,
+    ):
+        raise ValueError(
+            "authorization_partition must be CALIBRATION_FIT or CALIBRATION_CERT"
+        )
+    if (
+        isinstance(required_case_count, bool)
+        or not isinstance(required_case_count, int)
+        or required_case_count <= 0
+    ):
+        raise ValueError("required_case_count must be positive integer")
+    if (
+        isinstance(max_batch_calls, bool)
+        or not isinstance(max_batch_calls, int)
+        or max_batch_calls <= 0
+    ):
+        raise ValueError("max_batch_calls must be positive integer")
+    if max_batch_calls > config.max_canary_quota:
+        raise ValueError(
+            "max_batch_calls must not exceed config max_canary_quota"
+        )
+
+    validate_corpus(cases)
+    selected = sorted(
+        (c for c in cases if c.split is authorization_partition),
         key=lambda c: c.case_id,
     )
-    cert = sorted(
-        (
-            c
-            for c in cases
-            if c.split is F4CalibrationSplit.CALIBRATION_CERT
-        ),
-        key=lambda c: c.case_id,
+    observed_count = len(selected)
+    missing_count = max(0, required_case_count - observed_count)
+    corpus_manifest_hash = canonical_corpus_manifest_hash(
+        selected,
+        contract,
     )
-    missing_fit = max(0, required_fit_count - len(fit))
-    missing_cert = max(0, required_cert_count - len(cert))
-    corpus_manifest_hash = canonical_corpus_manifest_hash(cases, contract)
+    quota_sufficient = required_case_count <= config.max_canary_quota
+
+    if authorization_partition is F4CalibrationSplit.CALIBRATION_CERT:
+        operating_point_valid = bool(
+            frozen_operating_point_hash
+            and _HEX64.fullmatch(frozen_operating_point_hash)
+        )
+    else:
+        if frozen_operating_point_hash is not None:
+            raise ValueError(
+                "CALIBRATION_FIT preview must not bind a pre-existing "
+                "operating point"
+            )
+        operating_point_valid = True
 
     plan_payload = {
-        "schema": "f4-calibration-zero-call-plan.v1",
+        "schema": "f4-calibration-zero-call-plan.v2",
         "source_revision": source_revision,
         "calibration_contract_revision": calibration_contract_revision,
         "config_hash": config.canonical_config_hash(),
+        "config_max_canary_quota": config.max_canary_quota,
         "wire_contract_hash": wire_contract_hash,
         "question_contract_hash": contract.contract_hash,
         "input_schema_hash": contract.input_schema_hash,
-        "required_fit_count": required_fit_count,
-        "required_cert_count": required_cert_count,
-        "observed_counts": {k.value: v for k, v in counts.items()},
-        "max_calls_per_batch": config.max_canary_quota,
+        "authorization_partition": authorization_partition.value,
+        "required_case_count": required_case_count,
+        "observed_case_count": observed_count,
+        "max_batch_calls": max_batch_calls,
         "corpus_manifest_hash": corpus_manifest_hash,
+        "frozen_operating_point_hash": frozen_operating_point_hash,
         "historical_text_corpus_sha256": HISTORICAL_V231_CORPUS_SHA256,
         "historical_reference_only": True,
         "retry": "NONE",
     }
     plan_hash = _canonical_hash(plan_payload)
 
-    if missing_fit or missing_cert:
+    common = {
+        "partition": authorization_partition,
+        "source_revision": source_revision,
+        "calibration_contract_revision": calibration_contract_revision,
+        "config_hash": config.canonical_config_hash(),
+        "config_max_canary_quota": config.max_canary_quota,
+        "quota_sufficient": quota_sufficient,
+        "required_case_count": required_case_count,
+        "observed_case_count": observed_count,
+        "missing_case_count": missing_count,
+        "max_batch_calls": max_batch_calls,
+        "wire_contract_hash": wire_contract_hash,
+        "question_contract_hash": contract.contract_hash,
+        "input_schema_hash": contract.input_schema_hash,
+        "corpus_manifest_hash": corpus_manifest_hash,
+        "frozen_operating_point_hash": frozen_operating_point_hash,
+        "plan_hash": plan_hash,
+        "network_attempts": 0,
+        "api_key_reads": 0,
+    }
+
+    if missing_count:
         return F4AuthorizationPreviewV1(
             status=(
                 F4AuthorizationPreviewStatus.CURRENT_STATE_PROJECTION_REQUIRED
             ),
-            source_revision=source_revision,
-            calibration_contract_revision=calibration_contract_revision,
-            config_hash=config.canonical_config_hash(),
-            wire_contract_hash=wire_contract_hash,
-            question_contract_hash=contract.contract_hash,
-            input_schema_hash=contract.input_schema_hash,
-            max_calls_per_batch=config.max_canary_quota,
-            calibration_fit_count=len(fit),
-            calibration_cert_count=len(cert),
-            missing_fit_count=missing_fit,
-            missing_cert_count=missing_cert,
-            corpus_manifest_hash=corpus_manifest_hash,
             batches=(),
-            plan_hash=plan_hash,
             reason=(
                 "Current six-field ProviderVisibleRiskStateV1 projections are "
-                "required; historical v2.3.1 text-prompt cases are reference-only."
+                "required; historical text-prompt cases are reference-only."
             ),
+            **common,
         )
 
-    if len(fit) != required_fit_count or len(cert) != required_cert_count:
+    if observed_count != required_case_count:
         return F4AuthorizationPreviewV1(
             status=F4AuthorizationPreviewStatus.INVALID_CORPUS,
-            source_revision=source_revision,
-            calibration_contract_revision=calibration_contract_revision,
-            config_hash=config.canonical_config_hash(),
-            wire_contract_hash=wire_contract_hash,
-            question_contract_hash=contract.contract_hash,
-            input_schema_hash=contract.input_schema_hash,
-            max_calls_per_batch=config.max_canary_quota,
-            calibration_fit_count=len(fit),
-            calibration_cert_count=len(cert),
-            missing_fit_count=0,
-            missing_cert_count=0,
-            corpus_manifest_hash=corpus_manifest_hash,
             batches=(),
-            plan_hash=plan_hash,
-            reason="Calibration partitions must match frozen exact target counts.",
+            reason=(
+                "Selected calibration partition must match the frozen exact "
+                "target count."
+            ),
+            **common,
         )
 
-    if config.max_canary_quota <= 0:
-        raise ValueError("max_canary_quota must be positive")
+    if not operating_point_valid:
+        return F4AuthorizationPreviewV1(
+            status=F4AuthorizationPreviewStatus.OPERATING_POINT_REQUIRED,
+            batches=(),
+            reason=(
+                "CALIBRATION_CERT authorization requires the frozen "
+                "CALIBRATION_FIT operating-point artifact hash."
+            ),
+            **common,
+        )
+
+    if not quota_sufficient:
+        return F4AuthorizationPreviewV1(
+            status=F4AuthorizationPreviewStatus.CONFIG_QUOTA_INSUFFICIENT,
+            batches=(),
+            reason=(
+                "Private max_canary_quota is lower than the total calls "
+                "required by this authorization phase; batching cannot "
+                "multiply the configured quota."
+            ),
+            **common,
+        )
 
     batches: list[F4CalibrationBatchPreviewV1] = []
-    batch_index = 0
-    for partition, partition_cases in (
-        (F4CalibrationSplit.CALIBRATION_FIT, fit),
-        (F4CalibrationSplit.CALIBRATION_CERT, cert),
+    for batch_index, start in enumerate(
+        range(0, len(selected), max_batch_calls)
     ):
-        for start in range(
-            0,
-            len(partition_cases),
-            config.max_canary_quota,
-        ):
-            selected = partition_cases[
-                start : start + config.max_canary_quota
-            ]
-            case_ids = tuple(c.case_id for c in selected)
-            payload_hashes = tuple(
-                c.provider_payload_hash(contract)
-                for c in selected
-            )
-            batches.append(
-                F4CalibrationBatchPreviewV1(
-                    partition=partition,
+        batch_cases = selected[start : start + max_batch_calls]
+        case_ids = tuple(c.case_id for c in batch_cases)
+        payload_hashes = tuple(
+            c.provider_payload_hash(contract) for c in batch_cases
+        )
+        batches.append(
+            F4CalibrationBatchPreviewV1(
+                partition=authorization_partition,
+                batch_index=batch_index,
+                case_ids=case_ids,
+                provider_payload_hashes=payload_hashes,
+                corpus_manifest_hash=corpus_manifest_hash,
+                calibration_contract_revision=calibration_contract_revision,
+                frozen_operating_point_hash=frozen_operating_point_hash,
+                authorization_hash=_authorization_batch_hash(
+                    source_revision=source_revision,
+                    calibration_contract_revision=calibration_contract_revision,
+                    config_hash=config.canonical_config_hash(),
+                    wire_contract_hash=wire_contract_hash,
+                    contract=contract,
+                    partition=authorization_partition,
                     batch_index=batch_index,
                     case_ids=case_ids,
-                    provider_payload_hashes=payload_hashes,
+                    payload_hashes=payload_hashes,
                     corpus_manifest_hash=corpus_manifest_hash,
-                    calibration_contract_revision=calibration_contract_revision,
-                    authorization_hash=_authorization_batch_hash(
-                        source_revision=source_revision,
-                        calibration_contract_revision=calibration_contract_revision,
-                        config_hash=config.canonical_config_hash(),
-                        wire_contract_hash=wire_contract_hash,
-                        contract=contract,
-                        partition=partition,
-                        batch_index=batch_index,
-                        case_ids=case_ids,
-                        payload_hashes=payload_hashes,
-                        corpus_manifest_hash=corpus_manifest_hash,
-                    ),
-                )
+                    frozen_operating_point_hash=frozen_operating_point_hash,
+                ),
             )
-            batch_index += 1
+        )
 
     return F4AuthorizationPreviewV1(
         status=F4AuthorizationPreviewStatus.READY,
-        source_revision=source_revision,
-        calibration_contract_revision=calibration_contract_revision,
-        config_hash=config.canonical_config_hash(),
-        wire_contract_hash=wire_contract_hash,
-        question_contract_hash=contract.contract_hash,
-        input_schema_hash=contract.input_schema_hash,
-        max_calls_per_batch=config.max_canary_quota,
-        calibration_fit_count=len(fit),
-        calibration_cert_count=len(cert),
-        missing_fit_count=0,
-        missing_cert_count=0,
-        corpus_manifest_hash=corpus_manifest_hash,
         batches=tuple(batches),
-        plan_hash=plan_hash,
         reason=None,
+        **common,
     )

@@ -170,12 +170,14 @@
         "EXACT_50_CURRENT_SCHEMA_CASES",
         "PROJECTION_PROVENANCE_FROZEN_BEFORE_TRUTH",
         "TRUTH_FROZEN_BEFORE_MODEL_OUTPUT",
-        "OPERATING_POINT_FROZEN_ON_FIT_ONLY"
+        "OPERATING_POINT_FROZEN_ON_FIT_ONLY",
+        "TOTAL_CALLS_DO_NOT_EXCEED_PRIVATE_MAX_CANARY_QUOTA"
       ],
       "CALIBRATION_CERT": [
         "EXACT_50_CURRENT_SCHEMA_CASES",
         "NO_RETUNING",
-        "CERTIFICATION_CRITERIA_PASS"
+        "CERTIFICATION_CRITERIA_PASS",
+        "BINDS_FROZEN_CALIBRATION_FIT_OPERATING_POINT"
       ],
       "SEALED_HELD_OUT": [
         "CURRENT_SCHEMA_POWER_TARGET_HIGH_RISK_220_CONTROLS_120",
@@ -198,7 +200,24 @@
       "CRITICAL_MISS": "FAIL_CERTIFICATION_GATE",
       "CERTIFICATION_CRITERIA_FAILURE": "DO_NOT_ADVANCE",
       "OUTCOME_UNKNOWN": "STOP_BATCH_NO_RETRY",
-      "IDENTITY_DRIFT": "START_NEW_EVIDENCE_LINEAGE"
+      "IDENTITY_DRIFT": "START_NEW_EVIDENCE_LINEAGE",
+      "CONFIG_QUOTA_INSUFFICIENT": "BLOCK_OWNER_CALL_AUTHORIZATION",
+      "CERT_WITHOUT_FROZEN_OPERATING_POINT": "BLOCK_OWNER_CALL_AUTHORIZATION"
     }
+  },
+  "authorization_planning": {
+    "phase_specific": true,
+    "phase_order": [
+      "CALIBRATION_FIT",
+      "FREEZE_OPERATING_POINT",
+      "CALIBRATION_CERT"
+    ],
+    "fit_required_calls": 50,
+    "cert_required_calls": 50,
+    "private_max_canary_quota_is_total_per_owner_authorization_plan": true,
+    "batching_must_not_multiply_private_quota": true,
+    "technical_max_batch_calls": 25,
+    "calibration_cert_must_bind_frozen_fit_operating_point_hash": true,
+    "current_private_quota_not_hardcoded_in_public_manifest": true
   }
 }

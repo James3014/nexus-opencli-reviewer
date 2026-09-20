@@ -277,79 +277,102 @@ def test_certification_criteria_preserve_pre_registered_values() -> None:
     assert criteria.min_benign_pass_through_rate == pytest.approx(0.70)
 
 
+def _fit_cases() -> list[F4CalibrationCaseV1]:
+    return [
+        _case(i, F4CalibrationSplit.CALIBRATION_FIT, high=i < 30)
+        for i in range(50)
+    ]
+
+
+def _cert_cases() -> list[F4CalibrationCaseV1]:
+    return [
+        _case(100 + i, F4CalibrationSplit.CALIBRATION_CERT, high=i < 30)
+        for i in range(50)
+    ]
+
+
 def test_zero_call_preview_fails_closed_without_current_projection() -> None:
     preview = build_zero_call_authorization_preview(
         [],
-        _config(),
+        _config(quota=25),
         calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
     assert preview.status is (
         F4AuthorizationPreviewStatus.CURRENT_STATE_PROJECTION_REQUIRED
     )
-    assert preview.calibration_fit_count == 0
-    assert preview.calibration_cert_count == 0
-    assert preview.missing_fit_count == 50
-    assert preview.missing_cert_count == 50
+    assert preview.observed_case_count == 0
+    assert preview.missing_case_count == 50
+    assert preview.quota_sufficient is False
     assert preview.batches == ()
     assert preview.network_attempts == 0
     assert preview.api_key_reads == 0
 
 
-def test_zero_call_preview_builds_four_exact_25_call_batches() -> None:
-    cases = []
-    for i in range(50):
-        cases.append(
-            _case(
-                i,
-                F4CalibrationSplit.CALIBRATION_FIT,
-                high=i < 30,
-            )
-        )
-    for i in range(50):
-        cases.append(
-            _case(
-                100 + i,
-                F4CalibrationSplit.CALIBRATION_CERT,
-                high=i < 30,
-            )
-        )
-
+def test_exact_fit_corpus_cannot_multiply_quota_by_batching() -> None:
     preview = build_zero_call_authorization_preview(
-        cases,
+        _fit_cases(),
         _config(quota=25),
         calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
+        max_batch_calls=25,
+    )
+    assert preview.status is (
+        F4AuthorizationPreviewStatus.CONFIG_QUOTA_INSUFFICIENT
+    )
+    assert preview.required_case_count == 50
+    assert preview.config_max_canary_quota == 25
+    assert preview.quota_sufficient is False
+    assert preview.batches == ()
+
+
+def test_fit_preview_with_quota_50_builds_two_transport_batches() -> None:
+    preview = build_zero_call_authorization_preview(
+        _fit_cases(),
+        _config(quota=50),
+        calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
+        max_batch_calls=25,
     )
     assert preview.status is F4AuthorizationPreviewStatus.READY
-    assert len(preview.batches) == 4
-    assert [len(batch.case_ids) for batch in preview.batches] == [
-        25,
-        25,
-        25,
-        25,
-    ]
-    assert len({batch.authorization_hash for batch in preview.batches}) == 4
-    assert all(batch.provider_payload_hashes for batch in preview.batches)
-    assert preview.network_attempts == 0
-    assert preview.api_key_reads == 0
+    assert preview.partition is F4CalibrationSplit.CALIBRATION_FIT
+    assert len(preview.batches) == 2
+    assert [len(batch.case_ids) for batch in preview.batches] == [25, 25]
+    assert all(
+        batch.partition is F4CalibrationSplit.CALIBRATION_FIT
+        for batch in preview.batches
+    )
 
 
-def test_heldout_cases_never_enter_calibration_call_plan() -> None:
-    fit = [
-        _case(
-            i,
-            F4CalibrationSplit.CALIBRATION_FIT,
-            high=i < 30,
-        )
-        for i in range(50)
-    ]
-    cert = [
-        _case(
-            100 + i,
-            F4CalibrationSplit.CALIBRATION_CERT,
-            high=i < 30,
-        )
-        for i in range(50)
-    ]
+def test_cert_preview_requires_frozen_fit_operating_point() -> None:
+    missing_policy = build_zero_call_authorization_preview(
+        _cert_cases(),
+        _config(quota=50),
+        calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_CERT,
+    )
+    assert missing_policy.status is (
+        F4AuthorizationPreviewStatus.OPERATING_POINT_REQUIRED
+    )
+    assert missing_policy.batches == ()
+
+    ready = build_zero_call_authorization_preview(
+        _cert_cases(),
+        _config(quota=50),
+        calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_CERT,
+        frozen_operating_point_hash="e" * 64,
+        max_batch_calls=25,
+    )
+    assert ready.status is F4AuthorizationPreviewStatus.READY
+    assert len(ready.batches) == 2
+    assert all(
+        batch.frozen_operating_point_hash == "e" * 64
+        for batch in ready.batches
+    )
+
+
+def test_heldout_cases_never_enter_fit_authorization_plan() -> None:
     held = [
         _case(
             200,
@@ -358,9 +381,10 @@ def test_heldout_cases_never_enter_calibration_call_plan() -> None:
         )
     ]
     preview = build_zero_call_authorization_preview(
-        fit + cert + held,
-        _config(),
+        _fit_cases() + _cert_cases() + held,
+        _config(quota=50),
         calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
     planned = {
         case_id
@@ -368,6 +392,9 @@ def test_heldout_cases_never_enter_calibration_call_plan() -> None:
         for case_id in batch.case_ids
     }
     assert held[0].case_id not in planned
+    assert not any(
+        case.case_id in planned for case in _cert_cases()
+    )
 
 
 def test_certify_metrics_reports_selective_failure_reasons() -> None:
@@ -435,12 +462,12 @@ def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
 
 
 def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
-    fit = [_case(i, F4CalibrationSplit.CALIBRATION_FIT, high=i < 30) for i in range(50)]
-    cert = [_case(100 + i, F4CalibrationSplit.CALIBRATION_CERT, high=i < 30) for i in range(50)]
+    fit = _fit_cases()
     first = build_zero_call_authorization_preview(
-        fit + cert,
-        _config(),
+        fit,
+        _config(quota=50),
         calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
 
     original = fit[0]
@@ -457,9 +484,10 @@ def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
         truth_provenance_hash=original.truth_provenance_hash,
     )
     second = build_zero_call_authorization_preview(
-        [altered] + fit[1:] + cert,
-        _config(),
+        [altered] + fit[1:],
+        _config(quota=50),
         calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
 
     assert first.corpus_manifest_hash != second.corpus_manifest_hash
@@ -521,23 +549,18 @@ def test_freeze_manifest_is_bound_to_current_contract() -> None:
 
 
 def test_authorization_preview_binds_calibration_contract_revision() -> None:
-    fit = [
-        _case(i, F4CalibrationSplit.CALIBRATION_FIT, high=i < 30)
-        for i in range(50)
-    ]
-    cert = [
-        _case(100 + i, F4CalibrationSplit.CALIBRATION_CERT, high=i < 30)
-        for i in range(50)
-    ]
+    fit = _fit_cases()
     first = build_zero_call_authorization_preview(
-        fit + cert,
-        _config(),
+        fit,
+        _config(quota=50),
         calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
     second = build_zero_call_authorization_preview(
-        fit + cert,
-        _config(),
+        fit,
+        _config(quota=50),
         calibration_contract_revision="d" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
     assert first.plan_hash != second.plan_hash
     assert [b.authorization_hash for b in first.batches] != [
