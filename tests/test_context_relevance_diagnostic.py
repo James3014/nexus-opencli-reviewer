@@ -1533,3 +1533,39 @@ def test_r10_legacy_zero_call_repeated_does_not_consume_claims(clean_journal_dir
     assert os.listdir(journal.journal_dir) == []
     assert executor.api_key_reads == 0
     assert executor.physical_network_attempts == 0
+
+
+def test_private_live_evidence_is_returned_but_hidden_from_repr(
+    clean_journal_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful live parsing retains ranking evidence privately without repr disclosure."""
+    monkeypatch.setenv("TEST_DIAG_API_KEY", "test-key-value")
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(journal, authorized_ids=("id1",))
+    packet = _make_dummy_packet("s1", "id1")
+
+    def transport(req: dict) -> dict:
+        return {
+            "model": "jev-private-model-test",
+            "answers": {"decision": {"noul": 0.73125}},
+        }
+
+    result = executor.execute_live_sample(
+        packet,
+        "op-private-evidence",
+        "exp-private-evidence",
+        transport_handler=transport,
+    )
+    assert result.status == DiagnosticOutcomeStatus.OBSERVED_OK
+    assert result.private_probability == pytest.approx(0.73125)
+    assert result.private_observed_model == "jev-private-model-test"
+    rendered = repr(result)
+    assert "0.73125" not in rendered
+    assert "jev-private-model-test" not in rendered
+
+    auth_hash = executor.authorization.compute_authorization_hash()
+    state = journal.read_state("id1", auth_hash)
+    assert state is not None
+    assert "private_probability" not in state
+    assert "private_observed_model" not in state

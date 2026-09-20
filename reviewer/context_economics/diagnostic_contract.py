@@ -11,7 +11,7 @@ Provides exact, reviewable, one-time Owner-authorizable live Jev execution contr
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import http.client
@@ -676,6 +676,10 @@ class DiagnosticExecutionResult:
     request_hash: str
     response_hash: str | None
     error_message: str | None = None
+    # Private live evidence only. repr=False prevents accidental console/log disclosure.
+    # These values are never written to the public Git journal/state files.
+    private_probability: float | None = field(default=None, repr=False)
+    private_observed_model: str | None = field(default=None, repr=False)
 
 
 class ContextRelevanceDiagnosticExecutor:
@@ -1526,6 +1530,8 @@ class ContextRelevanceLiveDiagnosticExecutor:
             request_hash=req_data["body_payload_hash"],
             response_hash=response_hash,
             error_message=None,
+            private_probability=float(raw_prob),
+            private_observed_model=observed_model,
         )
 
     # ------------------------------------------------------------------
