@@ -1,7 +1,7 @@
 """Provider-neutral H1 localhost HTTP transport adapter.
 
 This module provides an HttpRiskModelAdapter that talks ONLY to a verified
-localhost loopback endpoint (127.0.0.1 or ::1 or localhost). It owns no
+loopback IP endpoint (127.0.0.0/8 or ::1). It owns no
 family operating policy, implements zero automatic retries, reads zero API
 keys or environment credentials, strictly rejects non-loopback hosts, and
 blocks external HTTP redirects.
@@ -41,8 +41,6 @@ def is_loopback_host(hostname: str | None) -> bool:
     if not hostname:
         return False
     cleaned = hostname.strip().strip("[]").lower()
-    if cleaned == "localhost":
-        return True
     try:
         ip = ipaddress.ip_address(cleaned)
         return ip.is_loopback

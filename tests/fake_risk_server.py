@@ -1,7 +1,7 @@
 """Local risk-model fake server fixture for H1 transport testing.
 
-Spins up a lightweight, ephemeral HTTP server strictly bound to 127.0.0.1
-or ::1. Runs in a background thread and automatically tears down when the
+Spins up a lightweight, ephemeral HTTP server strictly bound to a loopback
+IP literal. Runs in a background thread and automatically tears down when the
 context manager exits.
 """
 
@@ -94,8 +94,10 @@ class LocalRiskModelFakeServer:
         truncate_connection: bool = False,
         custom_handler: Callable[[BaseHTTPRequestHandler], None] | None = None,
     ) -> None:
-        if host not in ("127.0.0.1", "::1", "localhost"):
-            raise ValueError(f"Fake server must only bind to loopback, got {host!r}")
+        if host not in ("127.0.0.1", "::1"):
+            raise ValueError(
+                f"Fake server must use a loopback IP literal, got {host!r}"
+            )
 
         self.host = host
         self.port = port

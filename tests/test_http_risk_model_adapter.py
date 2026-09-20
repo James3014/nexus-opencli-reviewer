@@ -163,6 +163,7 @@ def test_http_adapter_truncated_connection() -> None:
         "http://8.8.8.8",
         "http://192.168.1.10",
         "http://10.0.0.1",
+        "http://localhost:8080",
         "http://localhost.evil.com",
         "http://127.0.0.1.evil.com",
         "ftp://127.0.0.1",
@@ -175,6 +176,16 @@ def test_http_adapter_rejects_non_loopback_endpoints(invalid_endpoint: str) -> N
 
     with pytest.raises(ValueError):
         HttpRiskModelAdapter(invalid_endpoint)
+
+
+def test_loopback_validation_uses_ip_literals_only() -> None:
+    assert is_loopback_host("127.0.0.1")
+    assert is_loopback_host("127.0.0.2")
+    assert is_loopback_host("::1")
+    assert not is_loopback_host("localhost")
+
+    assert validate_loopback_endpoint("http://127.0.0.1:8080")[1] == "127.0.0.1"
+    assert validate_loopback_endpoint("http://[::1]:8080")[1] == "::1"
 
 
 def test_http_adapter_redirect_escape_blocked() -> None:
