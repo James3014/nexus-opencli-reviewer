@@ -114,7 +114,17 @@
     "truth_provenance_hash_required": true,
     "projection_must_be_frozen_before_adjudication": true,
     "model_probability_must_be_hidden_until_truth_freeze": true,
-    "sealed_held_out_target_count": 340
+    "sealed_held_out_target_count": 340,
+    "calibration_master_must_be_frozen_before_first_provider_call": true,
+    "master_target": {
+      "calibration_fit": 50,
+      "calibration_cert": 50,
+      "sealed_held_out": 340,
+      "sealed_held_out_high_risk": 220,
+      "sealed_held_out_controls": 120,
+      "prospective_before_window": 0,
+      "total_precommitted_cases": 440
+    }
   },
   "external_effects": {
     "wave1_provider_calls": 0,
@@ -131,7 +141,8 @@
     "authorization_batches_bind_calibration_contract_revision": true,
     "frozen_f4_source_revision_is_distinct_from_calibration_contract_revision": true,
     "corpus_manifest_binds_projection_provenance_hash": true,
-    "single_threshold_legacy_path": "REMOVED"
+    "single_threshold_legacy_path": "REMOVED",
+    "authorization_batches_bind_master_corpus_manifest_hash": true
   },
   "robustness_taxonomy": {
     "primary_risk_subgroups": [
@@ -167,6 +178,7 @@
         "ZERO_API_KEY_READS"
       ],
       "CALIBRATION_FIT": [
+        "FIT_CERT_AND_SEALED_HELD_OUT_MASTER_CORPUS_FROZEN_BEFORE_FIRST_MODEL_OUTPUT",
         "EXACT_50_CURRENT_SCHEMA_CASES",
         "PROJECTION_PROVENANCE_FROZEN_BEFORE_TRUTH",
         "TRUTH_FROZEN_BEFORE_MODEL_OUTPUT",
@@ -202,7 +214,8 @@
       "OUTCOME_UNKNOWN": "STOP_BATCH_NO_RETRY",
       "IDENTITY_DRIFT": "START_NEW_EVIDENCE_LINEAGE",
       "CONFIG_QUOTA_INSUFFICIENT": "BLOCK_OWNER_CALL_AUTHORIZATION",
-      "CERT_WITHOUT_FROZEN_OPERATING_POINT": "BLOCK_OWNER_CALL_AUTHORIZATION"
+      "CERT_WITHOUT_FROZEN_OPERATING_POINT": "BLOCK_OWNER_CALL_AUTHORIZATION",
+      "HELD_OUT_SELECTED_AFTER_MODEL_OUTPUT": "INVALIDATE_CERTIFICATION_LINEAGE"
     }
   },
   "authorization_planning": {

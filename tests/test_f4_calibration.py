@@ -291,6 +291,21 @@ def _cert_cases() -> list[F4CalibrationCaseV1]:
     ]
 
 
+def _heldout_cases() -> list[F4CalibrationCaseV1]:
+    return [
+        _case(
+            1000 + i,
+            F4CalibrationSplit.SEALED_HELD_OUT,
+            high=i < 220,
+        )
+        for i in range(340)
+    ]
+
+
+def _frozen_master_cases() -> list[F4CalibrationCaseV1]:
+    return _fit_cases() + _cert_cases() + _heldout_cases()
+
+
 def test_zero_call_preview_fails_closed_without_current_projection() -> None:
     preview = build_zero_call_authorization_preview(
         [],
@@ -303,6 +318,9 @@ def test_zero_call_preview_fails_closed_without_current_projection() -> None:
     )
     assert preview.observed_case_count == 0
     assert preview.missing_case_count == 50
+    assert preview.missing_fit_count == 50
+    assert preview.missing_cert_count == 50
+    assert preview.missing_held_out_count == 340
     assert preview.quota_sufficient is False
     assert preview.batches == ()
     assert preview.network_attempts == 0
@@ -311,7 +329,7 @@ def test_zero_call_preview_fails_closed_without_current_projection() -> None:
 
 def test_exact_fit_corpus_cannot_multiply_quota_by_batching() -> None:
     preview = build_zero_call_authorization_preview(
-        _fit_cases(),
+        _frozen_master_cases(),
         _config(quota=25),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
@@ -328,7 +346,7 @@ def test_exact_fit_corpus_cannot_multiply_quota_by_batching() -> None:
 
 def test_fit_preview_with_quota_50_builds_two_transport_batches() -> None:
     preview = build_zero_call_authorization_preview(
-        _fit_cases(),
+        _frozen_master_cases(),
         _config(quota=50),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
@@ -346,7 +364,7 @@ def test_fit_preview_with_quota_50_builds_two_transport_batches() -> None:
 
 def test_cert_preview_requires_frozen_fit_operating_point() -> None:
     missing_policy = build_zero_call_authorization_preview(
-        _cert_cases(),
+        _frozen_master_cases(),
         _config(quota=50),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_CERT,
@@ -357,7 +375,7 @@ def test_cert_preview_requires_frozen_fit_operating_point() -> None:
     assert missing_policy.batches == ()
 
     ready = build_zero_call_authorization_preview(
-        _cert_cases(),
+        _frozen_master_cases(),
         _config(quota=50),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_CERT,
@@ -372,16 +390,10 @@ def test_cert_preview_requires_frozen_fit_operating_point() -> None:
     )
 
 
-def test_heldout_cases_never_enter_fit_authorization_plan() -> None:
-    held = [
-        _case(
-            200,
-            F4CalibrationSplit.SEALED_HELD_OUT,
-            high=True,
-        )
-    ]
+def test_heldout_cases_are_precommitted_but_never_provider_called_in_fit() -> None:
+    master = _frozen_master_cases()
     preview = build_zero_call_authorization_preview(
-        _fit_cases() + _cert_cases() + held,
+        master,
         _config(quota=50),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
@@ -391,10 +403,47 @@ def test_heldout_cases_never_enter_fit_authorization_plan() -> None:
         for batch in preview.batches
         for case_id in batch.case_ids
     }
-    assert held[0].case_id not in planned
-    assert not any(
-        case.case_id in planned for case in _cert_cases()
+    held_ids = {c.case_id for c in _heldout_cases()}
+    cert_ids = {c.case_id for c in _cert_cases()}
+    assert planned == {c.case_id for c in _fit_cases()}
+    assert planned.isdisjoint(held_ids)
+    assert planned.isdisjoint(cert_ids)
+
+
+def test_fit_authorization_hash_binds_sealed_heldout_master_commitment() -> None:
+    master = _frozen_master_cases()
+    first = build_zero_call_authorization_preview(
+        master,
+        _config(quota=50),
+        calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
+    held = _heldout_cases()
+    changed = held[0]
+    changed_held = F4CalibrationCaseV1(
+        case_id=changed.case_id,
+        lineage_id=changed.lineage_id,
+        split=changed.split,
+        state=changed.state,
+        requires_escalation=changed.requires_escalation,
+        critical_if_missed=changed.critical_if_missed,
+        subgroup=changed.subgroup,
+        scenario_tags=changed.scenario_tags,
+        projection_provenance_hash=changed.projection_provenance_hash,
+        truth_provenance_hash="f" * 64,
+    )
+    second_master = _fit_cases() + _cert_cases() + [changed_held] + held[1:]
+    second = build_zero_call_authorization_preview(
+        second_master,
+        _config(quota=50),
+        calibration_contract_revision="c" * 40,
+        authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
+    )
+    assert first.corpus_manifest_hash == second.corpus_manifest_hash
+    assert first.master_corpus_manifest_hash != second.master_corpus_manifest_hash
+    assert [b.authorization_hash for b in first.batches] != [
+        b.authorization_hash for b in second.batches
+    ]
 
 
 def test_certify_metrics_reports_selective_failure_reasons() -> None:
@@ -462,9 +511,10 @@ def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
 
 
 def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
+    master = _frozen_master_cases()
     fit = _fit_cases()
     first = build_zero_call_authorization_preview(
-        fit,
+        master,
         _config(quota=50),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
@@ -483,14 +533,16 @@ def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
         projection_provenance_hash=original.projection_provenance_hash,
         truth_provenance_hash=original.truth_provenance_hash,
     )
+    changed_master = [altered] + fit[1:] + _cert_cases() + _heldout_cases()
     second = build_zero_call_authorization_preview(
-        [altered] + fit[1:],
+        changed_master,
         _config(quota=50),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
 
     assert first.corpus_manifest_hash != second.corpus_manifest_hash
+    assert first.master_corpus_manifest_hash != second.master_corpus_manifest_hash
     assert [b.authorization_hash for b in first.batches] != [
         b.authorization_hash for b in second.batches
     ]
@@ -549,15 +601,15 @@ def test_freeze_manifest_is_bound_to_current_contract() -> None:
 
 
 def test_authorization_preview_binds_calibration_contract_revision() -> None:
-    fit = _fit_cases()
+    master = _frozen_master_cases()
     first = build_zero_call_authorization_preview(
-        fit,
+        master,
         _config(quota=50),
         calibration_contract_revision="c" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,
     )
     second = build_zero_call_authorization_preview(
-        fit,
+        master,
         _config(quota=50),
         calibration_contract_revision="d" * 40,
         authorization_partition=F4CalibrationSplit.CALIBRATION_FIT,

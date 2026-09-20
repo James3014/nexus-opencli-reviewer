@@ -294,6 +294,7 @@ class F4CalibrationBatchPreviewV1:
     case_ids: tuple[str, ...]
     provider_payload_hashes: tuple[str, ...]
     corpus_manifest_hash: str
+    master_corpus_manifest_hash: str
     calibration_contract_revision: str
     frozen_operating_point_hash: str | None
     authorization_hash: str
@@ -311,11 +312,18 @@ class F4AuthorizationPreviewV1:
     required_case_count: int
     observed_case_count: int
     missing_case_count: int
+    calibration_fit_count: int
+    calibration_cert_count: int
+    sealed_held_out_count: int
+    missing_fit_count: int
+    missing_cert_count: int
+    missing_held_out_count: int
     max_batch_calls: int
     wire_contract_hash: str
     question_contract_hash: str
     input_schema_hash: str
     corpus_manifest_hash: str
+    master_corpus_manifest_hash: str
     frozen_operating_point_hash: str | None
     batches: tuple[F4CalibrationBatchPreviewV1, ...]
     plan_hash: str
@@ -769,6 +777,7 @@ def _authorization_batch_hash(
     case_ids: Sequence[str],
     payload_hashes: Sequence[str],
     corpus_manifest_hash: str,
+    master_corpus_manifest_hash: str,
     frozen_operating_point_hash: str | None,
 ) -> str:
     return _canonical_hash(
@@ -785,6 +794,7 @@ def _authorization_batch_hash(
             "case_ids": list(case_ids),
             "provider_payload_hashes": list(payload_hashes),
             "corpus_manifest_hash": corpus_manifest_hash,
+            "master_corpus_manifest_hash": master_corpus_manifest_hash,
             "frozen_operating_point_hash": frozen_operating_point_hash,
             "max_calls": len(case_ids),
             "retry": "NONE",
@@ -802,6 +812,11 @@ def build_zero_call_authorization_preview(
     source_revision: str = F4_FROZEN_SOURCE_REVISION,
     wire_contract_hash: str = F4_FROZEN_WIRE_CONTRACT_HASH,
     required_case_count: int = 50,
+    required_fit_count: int = 50,
+    required_cert_count: int = 50,
+    required_held_out_count: int = 340,
+    required_held_out_high_risk: int = 220,
+    required_held_out_controls: int = 120,
     max_batch_calls: int = 25,
     frozen_operating_point_hash: str | None = None,
 ) -> F4AuthorizationPreviewV1:
@@ -841,14 +856,35 @@ def build_zero_call_authorization_preview(
         )
 
     validate_corpus(cases)
-    selected = sorted(
-        (c for c in cases if c.split is authorization_partition),
+    fit = sorted(
+        (c for c in cases if c.split is F4CalibrationSplit.CALIBRATION_FIT),
         key=lambda c: c.case_id,
     )
+    cert = sorted(
+        (c for c in cases if c.split is F4CalibrationSplit.CALIBRATION_CERT),
+        key=lambda c: c.case_id,
+    )
+    held_out = sorted(
+        (c for c in cases if c.split is F4CalibrationSplit.SEALED_HELD_OUT),
+        key=lambda c: c.case_id,
+    )
+    prospective = [
+        c for c in cases if c.split is F4CalibrationSplit.PROSPECTIVE
+    ]
+    selected = fit if authorization_partition is F4CalibrationSplit.CALIBRATION_FIT else cert
     observed_count = len(selected)
     missing_count = max(0, required_case_count - observed_count)
+    missing_fit = max(0, required_fit_count - len(fit))
+    missing_cert = max(0, required_cert_count - len(cert))
+    missing_held_out = max(0, required_held_out_count - len(held_out))
+    held_out_high = sum(c.requires_escalation for c in held_out)
+    held_out_controls = len(held_out) - held_out_high
     corpus_manifest_hash = canonical_corpus_manifest_hash(
         selected,
+        contract,
+    )
+    master_corpus_manifest_hash = canonical_corpus_manifest_hash(
+        fit + cert + held_out,
         contract,
     )
     quota_sufficient = required_case_count <= config.max_canary_quota
@@ -878,8 +914,20 @@ def build_zero_call_authorization_preview(
         "authorization_partition": authorization_partition.value,
         "required_case_count": required_case_count,
         "observed_case_count": observed_count,
+        "required_fit_count": required_fit_count,
+        "required_cert_count": required_cert_count,
+        "required_held_out_count": required_held_out_count,
+        "required_held_out_high_risk": required_held_out_high_risk,
+        "required_held_out_controls": required_held_out_controls,
+        "observed_fit_count": len(fit),
+        "observed_cert_count": len(cert),
+        "observed_held_out_count": len(held_out),
+        "observed_held_out_high_risk": held_out_high,
+        "observed_held_out_controls": held_out_controls,
+        "prospective_count": len(prospective),
         "max_batch_calls": max_batch_calls,
         "corpus_manifest_hash": corpus_manifest_hash,
+        "master_corpus_manifest_hash": master_corpus_manifest_hash,
         "frozen_operating_point_hash": frozen_operating_point_hash,
         "historical_text_corpus_sha256": HISTORICAL_V231_CORPUS_SHA256,
         "historical_reference_only": True,
@@ -897,26 +945,53 @@ def build_zero_call_authorization_preview(
         "required_case_count": required_case_count,
         "observed_case_count": observed_count,
         "missing_case_count": missing_count,
+        "calibration_fit_count": len(fit),
+        "calibration_cert_count": len(cert),
+        "sealed_held_out_count": len(held_out),
+        "missing_fit_count": missing_fit,
+        "missing_cert_count": missing_cert,
+        "missing_held_out_count": missing_held_out,
         "max_batch_calls": max_batch_calls,
         "wire_contract_hash": wire_contract_hash,
         "question_contract_hash": contract.contract_hash,
         "input_schema_hash": contract.input_schema_hash,
         "corpus_manifest_hash": corpus_manifest_hash,
+        "master_corpus_manifest_hash": master_corpus_manifest_hash,
         "frozen_operating_point_hash": frozen_operating_point_hash,
         "plan_hash": plan_hash,
         "network_attempts": 0,
         "api_key_reads": 0,
     }
 
-    if missing_count:
+    if missing_fit or missing_cert or missing_held_out:
         return F4AuthorizationPreviewV1(
             status=(
                 F4AuthorizationPreviewStatus.CURRENT_STATE_PROJECTION_REQUIRED
             ),
             batches=(),
             reason=(
-                "Current six-field ProviderVisibleRiskStateV1 projections are "
-                "required; historical text-prompt cases are reference-only."
+                "Current six-field calibration FIT, CERT, and sealed held-out "
+                "projections must all be frozen before the first provider call; "
+                "historical text-prompt cases are reference-only."
+            ),
+            **common,
+        )
+
+    if (
+        len(fit) != required_fit_count
+        or len(cert) != required_cert_count
+        or len(held_out) != required_held_out_count
+        or held_out_high != required_held_out_high_risk
+        or held_out_controls != required_held_out_controls
+        or prospective
+    ):
+        return F4AuthorizationPreviewV1(
+            status=F4AuthorizationPreviewStatus.INVALID_CORPUS,
+            batches=(),
+            reason=(
+                "Frozen calibration master corpus must have exact FIT/CERT/held-out "
+                "counts, exact held-out risk/control composition, and zero prospective "
+                "cases before the prospective window starts."
             ),
             **common,
         )
@@ -971,6 +1046,7 @@ def build_zero_call_authorization_preview(
                 case_ids=case_ids,
                 provider_payload_hashes=payload_hashes,
                 corpus_manifest_hash=corpus_manifest_hash,
+                master_corpus_manifest_hash=master_corpus_manifest_hash,
                 calibration_contract_revision=calibration_contract_revision,
                 frozen_operating_point_hash=frozen_operating_point_hash,
                 authorization_hash=_authorization_batch_hash(
@@ -984,6 +1060,7 @@ def build_zero_call_authorization_preview(
                     case_ids=case_ids,
                     payload_hashes=payload_hashes,
                     corpus_manifest_hash=corpus_manifest_hash,
+                    master_corpus_manifest_hash=master_corpus_manifest_hash,
                     frozen_operating_point_hash=frozen_operating_point_hash,
                 ),
             )
