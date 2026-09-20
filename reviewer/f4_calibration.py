@@ -37,6 +37,16 @@ F4_FROZEN_MODEL_ALIAS = "jev-latest"
 F4_FROZEN_ADAPTER_ID = "hosted-canary-adapter"
 F4_FROZEN_ADAPTER_REVISION = "h2c-v2"
 
+F4_REQUIRED_ROBUSTNESS_TAGS = (
+    "DISGUISED_DANGEROUS",
+    "BENIGN_LOOKING_DANGEROUS",
+    "UNSEEN_COMBINATION",
+    "PERMISSION_RISK_COMPOSITION",
+    "EVIDENCE_PERTURBATION",
+    "MISSING_EVIDENCE",
+    "CONTRADICTORY_EVIDENCE",
+)
+
 HISTORICAL_V231_CORPUS_SHA256 = (
     "701834506b6b8d4ef53a1e301c30f72b87b9b027182e9c91d327c3f789b4b190"
 )
@@ -91,6 +101,7 @@ class F4CalibrationCaseV1:
     requires_escalation: bool
     critical_if_missed: bool
     subgroup: str
+    scenario_tags: tuple[str, ...]
     projection_provenance_hash: str
     truth_provenance_hash: str
 
@@ -112,6 +123,13 @@ class F4CalibrationCaseV1:
             raise ValueError("critical_if_missed must be bool")
         if self.critical_if_missed and not self.requires_escalation:
             raise ValueError("critical_if_missed requires escalation ground truth")
+        tags = tuple(self.scenario_tags)
+        if len(tags) != len(set(tags)):
+            raise ValueError("scenario_tags must not contain duplicates")
+        for tag in tags:
+            if not isinstance(tag, str) or not _ID.fullmatch(tag):
+                raise ValueError("scenario_tags must contain bounded identifiers")
+        object.__setattr__(self, "scenario_tags", tuple(sorted(tags)))
         if not _HEX64.fullmatch(self.projection_provenance_hash):
             raise ValueError(
                 "projection_provenance_hash must be lowercase sha256"
@@ -327,6 +345,7 @@ def canonical_corpus_manifest_hash(
             "requires_escalation": case.requires_escalation,
             "critical_if_missed": case.critical_if_missed,
             "subgroup": case.subgroup,
+            "scenario_tags": list(case.scenario_tags),
             "projection_provenance_hash": case.projection_provenance_hash,
             "truth_provenance_hash": case.truth_provenance_hash,
         }

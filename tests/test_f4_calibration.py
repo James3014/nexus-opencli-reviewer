@@ -52,6 +52,7 @@ def _case(
         requires_escalation=high,
         critical_if_missed=high,
         subgroup="HIGH_RISK" if high else "CONTROL",
+        scenario_tags=("STANDARD",),
         projection_provenance_hash=f"{(i + 1) % 16:x}" * 64,
         truth_provenance_hash=f"{i % 16:x}" * 64,
     )
@@ -93,6 +94,7 @@ def test_provider_payload_contains_no_truth_or_raw_prompt() -> None:
         "allowed_path_count",
     }
     assert "requires_escalation" not in payload
+    assert "scenario_tags" not in payload
     assert "projection_provenance_hash" not in payload
     assert "truth_provenance_hash" not in payload
     assert "prompt_state" not in payload
@@ -108,6 +110,7 @@ def test_ground_truth_cannot_mark_control_as_critical() -> None:
             requires_escalation=False,
             critical_if_missed=True,
             subgroup="CONTROL",
+            scenario_tags=("STANDARD",),
             projection_provenance_hash="b" * 64,
             truth_provenance_hash="a" * 64,
         )
@@ -411,6 +414,7 @@ def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
         requires_escalation=True,
         critical_if_missed=False,
         subgroup="AMBIGUOUS",
+        scenario_tags=("STANDARD",),
         projection_provenance_hash="b" * 64,
         truth_provenance_hash="a" * 64,
     )
@@ -422,6 +426,7 @@ def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
         requires_escalation=False,
         critical_if_missed=False,
         subgroup="AMBIGUOUS",
+        scenario_tags=("STANDARD",),
         projection_provenance_hash="b" * 64,
         truth_provenance_hash="a" * 64,
     )
@@ -447,6 +452,7 @@ def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
         requires_escalation=False,
         critical_if_missed=False,
         subgroup=original.subgroup,
+        scenario_tags=original.scenario_tags,
         projection_provenance_hash=original.projection_provenance_hash,
         truth_provenance_hash=original.truth_provenance_hash,
     )
@@ -554,6 +560,7 @@ def test_projection_provenance_change_changes_corpus_commitment() -> None:
         requires_escalation=original.requires_escalation,
         critical_if_missed=original.critical_if_missed,
         subgroup=original.subgroup,
+        scenario_tags=original.scenario_tags,
         projection_provenance_hash="f" * 64,
         truth_provenance_hash=original.truth_provenance_hash,
     )
@@ -570,3 +577,47 @@ def test_no_legacy_single_threshold_certification_path_remains() -> None:
     assert not hasattr(module, "F4FrozenThresholdV1")
     assert not hasattr(module, "evaluate_threshold")
     assert not hasattr(module, "fit_operating_threshold")
+
+
+def test_scenario_tags_are_private_metadata_but_bound_in_corpus_commitment() -> None:
+    contract = F4QuestionContractV1()
+    original = _case(
+        1,
+        F4CalibrationSplit.CALIBRATION_FIT,
+        high=True,
+    )
+    changed = F4CalibrationCaseV1(
+        case_id=original.case_id,
+        lineage_id=original.lineage_id,
+        split=original.split,
+        state=original.state,
+        requires_escalation=original.requires_escalation,
+        critical_if_missed=original.critical_if_missed,
+        subgroup=original.subgroup,
+        scenario_tags=("DISGUISED_DANGEROUS",),
+        projection_provenance_hash=original.projection_provenance_hash,
+        truth_provenance_hash=original.truth_provenance_hash,
+    )
+    assert original.provider_payload_hash(contract) == changed.provider_payload_hash(contract)
+    assert canonical_corpus_manifest_hash([original], contract) != (
+        canonical_corpus_manifest_hash([changed], contract)
+    )
+
+
+def test_freeze_manifest_has_robustness_taxonomy_and_fail_closed_gates() -> None:
+    import json
+    from pathlib import Path
+    from reviewer.f4_calibration import F4_REQUIRED_ROBUSTNESS_TAGS
+
+    manifest = json.loads(
+        Path("evidence/f4-risk-wave1-freeze.json").read_text()
+    )
+    assert tuple(manifest["robustness_taxonomy"]["required_tags"]) == (
+        F4_REQUIRED_ROBUSTNESS_TAGS
+    )
+    kills = manifest["phase_gates"]["kill_conditions"]
+    assert "CURRENT_SCHEMA_PROJECTION_MISSING" in kills
+    assert "MODEL_OUTPUT_VISIBLE_BEFORE_TRUTH_FREEZE" in kills
+    assert "CALIBRATION_CERT_RETUNING_ATTEMPT" in kills
+    assert "CRITICAL_MISS" in kills
+    assert "IDENTITY_DRIFT" in kills
