@@ -51,8 +51,11 @@ _VALID_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _F4_PROVIDER_QUESTION_NAME = "decision"
 _F4_REQUEST_TEMPLATE_KIND = "systemone_noul"
 _F4_RESPONSE_PROBABILITY_PATH = "answers.decision.noul"
+_F4_AUTH_HEADER_NAME = "Authorization"
+_F4_CONTENT_TYPE = "application/json"
+_MAX_RESPONSE_BYTES = 1_048_576
 _ADAPTER_ID = "hosted-canary-adapter"
-_ADAPTER_REVISION = "h2c-v1"
+_ADAPTER_REVISION = "h2c-v2"
 
 
 class CanaryJournalState(str, Enum):
@@ -79,6 +82,7 @@ class LiveCanaryObservationV1:
     question_contract_hash: str
     body_payload_hash: str
     endpoint_host_hash: str
+    authorization_hash: str
     probability: float | None
     observed_model: str | None
     usage: dict[str, int] | None
@@ -145,12 +149,54 @@ def _validate_bounded_id(name: str, value: Any) -> str:
     return value
 
 
+def _canonical_authorization_hash(authorization: LiveCanaryAuthorizationV1) -> str:
+    """Bind the exact one-shot Owner authorization contents to a durable identity."""
+    payload = {
+        "schema": "h2c-single-call-authorization.v1",
+        "config_hash": authorization.config_hash,
+        "wire_contract_hash": authorization.wire_contract_hash,
+        "endpoint_host": authorization.endpoint_host,
+        "question_contract_hash": authorization.question_contract_hash,
+        "max_calls": authorization.max_calls,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _create_json_exclusive(path: Path, data: dict[str, Any], *, conflict_code: str) -> None:
+    """Atomically claim a one-shot identity before any external effect can occur."""
+    encoded = json.dumps(data, sort_keys=True, indent=2).encode("utf-8")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(f"{conflict_code}: durable claim already exists") from exc
+
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _write_journal_atomic(journal_path: Path, data: dict[str, Any]) -> None:
-    """Write journal data atomically via temp file replace."""
+    """Write journal data atomically via a private temp file replace."""
     tmp_path = journal_path.with_suffix(".tmp")
     encoded = json.dumps(data, sort_keys=True, indent=2).encode("utf-8")
-    tmp_path.write_bytes(encoded)
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
     tmp_path.replace(journal_path)
+
+
+def _reject_duplicate_response_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous provider JSON instead of silently accepting last-write-wins."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Provider response contains duplicate JSON keys")
+        result[key] = value
+    return result
 
 
 def execute_hosted_canary_call(
@@ -229,6 +275,14 @@ def execute_hosted_canary_call(
         )
     if wire.auth_mode != HostedAuthMode.BEARER:
         raise ValueError(f"F4 hosted canary requires auth_mode=BEARER, got {wire.auth_mode}")
+    if wire.auth_header_name != _F4_AUTH_HEADER_NAME:
+        raise ValueError(
+            f"F4 hosted canary requires auth_header_name={_F4_AUTH_HEADER_NAME!r}"
+        )
+    if wire.content_type != _F4_CONTENT_TYPE:
+        raise ValueError(
+            f"F4 hosted canary requires content_type={_F4_CONTENT_TYPE!r}"
+        )
     if contract.primitive != "NOUL":
         raise ValueError(f"F4 hosted canary requires primitive=NOUL, got {contract.primitive}")
 
@@ -265,31 +319,16 @@ def execute_hosted_canary_call(
     endpoint_host_hash = hashlib.sha256(parsed_origin.hostname.encode("utf-8")).hexdigest()
 
     # 2. Journal Setup and Replay Protection
-    j_dir = Path(journal_dir).resolve()
-    j_dir.mkdir(parents=True, exist_ok=True)
+    j_dir_input = Path(journal_dir)
+    if j_dir_input.exists() and j_dir_input.is_symlink():
+        raise ValueError("journal_dir must not be a symlink")
+    j_dir = j_dir_input.resolve()
+    j_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     journal_path = j_dir / f"{operation_id}.json"
 
-    if journal_path.exists():
-        try:
-            existing_j = json.loads(journal_path.read_bytes())
-        except Exception as exc:
-            raise RuntimeError(f"Corrupted journal file for operation {operation_id}: {exc}") from exc
+    authorization_hash = _canonical_authorization_hash(authorization)
 
-        j_state = existing_j.get("journal_state")
-        attempt_count = existing_j.get("attempt_count", 0)
-
-        if j_state in (
-            CanaryJournalState.REQUEST_ATTEMPT_STARTED.value,
-            CanaryJournalState.OUTCOME_UNKNOWN.value,
-            CanaryJournalState.OBSERVED_OK.value,
-            CanaryJournalState.OBSERVED_PROVIDER_FAILURE.value,
-        ) or attempt_count > 0:
-            raise RuntimeError(
-                f"RECONCILIATION_REQUIRED: operation {operation_id} is in non-resumable state "
-                f"{j_state} with attempt_count={attempt_count}"
-            )
-
-    # 3. Write PREPARED Journal State (attempt_count = 0)
+    # 3. Atomically claim this operation before any secret read or network attempt.
     journal_data: dict[str, Any] = {
         "operation_id": operation_id,
         "provider_request_id": provider_request_id,
@@ -299,9 +338,14 @@ def execute_hosted_canary_call(
         "question_contract_hash": contract.contract_hash,
         "body_payload_hash": body_payload_hash,
         "endpoint_host_hash": endpoint_host_hash,
+        "authorization_hash": authorization_hash,
         "attempt_count": 0,
     }
-    _write_journal_atomic(journal_path, journal_data)
+    _create_json_exclusive(
+        journal_path,
+        journal_data,
+        conflict_code="RECONCILIATION_REQUIRED",
+    )
 
     # 4. Late-Bound Secret Retrieval
     secret_value = os.environ.get(config.api_key_env_var_name)
@@ -318,6 +362,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=None,
             usage=None,
@@ -337,15 +382,39 @@ def execute_hosted_canary_call(
         )
         return result, observation
 
-    # 5. Transition to REQUEST_ATTEMPT_STARTED (attempt_count = 1) immediately before send
+    # 5. Consume the one-shot Owner authorization atomically before first possible effect.
+    authorization_claim_path = j_dir / f"authorization-{authorization_hash}.json"
+    try:
+        _create_json_exclusive(
+            authorization_claim_path,
+            {
+                "authorization_hash": authorization_hash,
+                "operation_id": operation_id,
+                "provider_request_id": provider_request_id,
+                "config_hash": cfg_hash,
+                "wire_contract_hash": wire_hash,
+                "question_contract_hash": contract.contract_hash,
+                "endpoint_host_hash": endpoint_host_hash,
+                "max_calls": authorization.max_calls,
+                "claim_state": "CONSUMED_FOR_SINGLE_CALL",
+            },
+            conflict_code="AUTHORIZATION_ALREADY_CONSUMED",
+        )
+    except RuntimeError:
+        journal_data["journal_state"] = CanaryJournalState.NOT_SENT.value
+        journal_data["error_code"] = "AUTHORIZATION_ALREADY_CONSUMED"
+        _write_journal_atomic(journal_path, journal_data)
+        raise
+
+    # 6. Transition to REQUEST_ATTEMPT_STARTED (attempt_count = 1) immediately before send
     journal_data["journal_state"] = CanaryJournalState.REQUEST_ATTEMPT_STARTED.value
     journal_data["attempt_count"] = 1
     _write_journal_atomic(journal_path, journal_data)
 
-    # 6. Build Request and Execute Single Attempt
+    # 7. Build Request and Execute Single Attempt
     headers = {
         "Accept": "application/json",
-        "Content-Type": "application/json",
+        "Content-Type": _F4_CONTENT_TYPE,
         wire.auth_header_name: f"Bearer {secret_value.strip()}",
     }
     req = urllib.request.Request(
@@ -360,16 +429,15 @@ def execute_hosted_canary_call(
     response_code: int | None = None
     transport_error: str | None = None
 
+    response_too_large = False
     try:
         with opener.open(req, timeout=timeout_seconds) as resp:
-            raw_response_bytes = resp.read()
+            raw_response_bytes = resp.read(_MAX_RESPONSE_BYTES + 1)
             response_code = resp.status
+            response_too_large = len(raw_response_bytes) > _MAX_RESPONSE_BYTES
     except urllib.error.HTTPError as exc:
         response_code = exc.code
-        try:
-            raw_response_bytes = exc.read()
-        except Exception:
-            pass
+        # Error bodies are not needed for classification and are intentionally not read.
         transport_error = f"HTTP {exc.code}: {exc.reason}"
     except (TimeoutError, urllib.error.URLError) as exc:
         # Check if underlying cause is timeout
@@ -450,6 +518,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=None,
             usage=None,
@@ -481,6 +550,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=None,
             usage=None,
@@ -500,7 +570,7 @@ def execute_hosted_canary_call(
         )
         return res, obs
 
-    # 7. Provider Response Handling (Definitive HTTP response observed)
+    # 8. Provider Response Handling (Definitive HTTP response observed)
     if response_code != 200:
         journal_data["journal_state"] = CanaryJournalState.OBSERVED_PROVIDER_FAILURE.value
         _write_journal_atomic(journal_path, journal_data)
@@ -526,6 +596,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=None,
             usage=None,
@@ -545,11 +616,47 @@ def execute_hosted_canary_call(
         )
         return res, obs
 
+    if response_too_large:
+        journal_data["journal_state"] = CanaryJournalState.OBSERVED_PROVIDER_FAILURE.value
+        _write_journal_atomic(journal_path, journal_data)
+        obs = LiveCanaryObservationV1(
+            operation_id=operation_id,
+            provider_request_id=provider_request_id,
+            journal_state=CanaryJournalState.OBSERVED_PROVIDER_FAILURE,
+            call_status=ProviderCallStatus.INVALID_RESPONSE,
+            config_hash=cfg_hash,
+            wire_contract_hash=wire_hash,
+            question_contract_hash=contract.contract_hash,
+            body_payload_hash=body_payload_hash,
+            endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
+            probability=None,
+            observed_model=None,
+            usage=None,
+            attempt_count=1,
+            error_message="Provider response exceeded bounded size limit",
+        )
+        res = RiskModelResult(
+            status=ProviderCallStatus.INVALID_RESPONSE,
+            probability=None,
+            provider_payload_hash=body_payload_hash,
+            adapter_id=_ADAPTER_ID,
+            adapter_revision=_ADAPTER_REVISION,
+            question_contract_hash=contract.contract_hash,
+            provider_schema_version=wire.provider_schema_identity,
+            api_version=wire.api_version_source,
+            error_message="Provider response exceeded bounded size limit",
+        )
+        return res, obs
+
     # Parse 200 response JSON
     try:
         if raw_response_bytes is None:
             raise ValueError("Empty response body")
-        resp_obj = json.loads(raw_response_bytes.decode("utf-8"))
+        resp_obj = json.loads(
+            raw_response_bytes.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_response_pairs,
+        )
         if not isinstance(resp_obj, dict):
             raise ValueError("Response must be a JSON object")
     except Exception as exc:
@@ -565,6 +672,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=None,
             usage=None,
@@ -599,6 +707,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=None,
             usage=None,
@@ -632,6 +741,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=observed_model,
             usage=None,
@@ -666,6 +776,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=observed_model,
             usage=None,
@@ -700,6 +811,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=observed_model,
             usage=None,
@@ -725,9 +837,8 @@ def execute_hosted_canary_call(
         raw_prob is None
         or isinstance(raw_prob, bool)
         or not isinstance(raw_prob, (int, float))
-        or math.isnan(raw_prob)
-        or math.isinf(raw_prob)
-        or not (0.0 <= float(raw_prob) <= 1.0)
+        or (isinstance(raw_prob, float) and not math.isfinite(raw_prob))
+        or not (0.0 <= raw_prob <= 1.0)
     ):
         journal_data["journal_state"] = CanaryJournalState.OBSERVED_PROVIDER_FAILURE.value
         _write_journal_atomic(journal_path, journal_data)
@@ -741,6 +852,7 @@ def execute_hosted_canary_call(
             question_contract_hash=contract.contract_hash,
             body_payload_hash=body_payload_hash,
             endpoint_host_hash=endpoint_host_hash,
+            authorization_hash=authorization_hash,
             probability=None,
             observed_model=observed_model,
             usage=None,
@@ -769,7 +881,12 @@ def execute_hosted_canary_call(
     if isinstance(raw_usage, dict):
         inp = raw_usage.get("input_tokens")
         out = raw_usage.get("output_tokens")
-        if isinstance(inp, int) and isinstance(out, int):
+        if (
+            type(inp) is int
+            and type(out) is int
+            and inp >= 0
+            and out >= 0
+        ):
             usage_dict = {"input_tokens": inp, "output_tokens": out}
 
     # Mark OBSERVED_OK in journal
@@ -786,6 +903,7 @@ def execute_hosted_canary_call(
         question_contract_hash=contract.contract_hash,
         body_payload_hash=body_payload_hash,
         endpoint_host_hash=endpoint_host_hash,
+        authorization_hash=authorization_hash,
         probability=prob_value,
         observed_model=observed_model,
         usage=usage_dict,

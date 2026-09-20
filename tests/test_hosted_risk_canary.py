@@ -96,8 +96,10 @@ class FakeHTTPResponse:
         self._body_bytes = body_bytes
         self.headers = headers or {}
 
-    def read(self) -> bytes:
-        return self._body_bytes
+    def read(self, amt: int | None = None) -> bytes:
+        if amt is None:
+            return self._body_bytes
+        return self._body_bytes[:amt]
 
     def __enter__(self) -> FakeHTTPResponse:
         return self
@@ -621,6 +623,249 @@ def test_redirect_handler_blocks_redirects() -> None:
     req = urllib.request.Request("https://provider.example.invalid/v1/systemone")
     with pytest.raises(urllib.error.HTTPError, match="HTTP redirect to .* forbidden"):
         handler.redirect_request(req, None, 302, "Found", {}, "https://evil.com/leak")
+
+
+
+def test_same_authorization_cannot_send_twice_with_different_operation_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SYNTHETIC_API_KEY", "synthetic-key")
+    body = b'{"model":"m","answers":{"decision":{"type":"noul","noul":0.25}}}'
+    fake_opener = FakeOpener(200, body)
+    monkeypatch.setattr(
+        "reviewer.hosted_risk_canary._build_secure_https_opener",
+        lambda: fake_opener,
+    )
+
+    config = _valid_config()
+    wire = _valid_wire_descriptor()
+    contract = F4QuestionContractV1()
+    auth = _valid_authorization(config, wire, contract)
+    state = _valid_state()
+
+    execute_hosted_canary_call(
+        config,
+        wire,
+        auth,
+        state,
+        contract,
+        operation_id="op-auth-once-1",
+        provider_request_id="req-auth-once-1",
+        journal_dir=tmp_path,
+    )
+    assert fake_opener.open_call_count == 1
+
+    with pytest.raises(RuntimeError, match="AUTHORIZATION_ALREADY_CONSUMED"):
+        execute_hosted_canary_call(
+            config,
+            wire,
+            auth,
+            state,
+            contract,
+            operation_id="op-auth-once-2",
+            provider_request_id="req-auth-once-2",
+            journal_dir=tmp_path,
+        )
+
+    assert fake_opener.open_call_count == 1
+    second_journal = json.loads((tmp_path / "op-auth-once-2.json").read_bytes())
+    assert second_journal["journal_state"] == "NOT_SENT"
+    assert second_journal["attempt_count"] == 0
+
+
+def test_concurrent_same_operation_has_single_winner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SYNTHETIC_API_KEY", "synthetic-key")
+    body = b'{"model":"m","answers":{"decision":{"type":"noul","noul":0.25}}}'
+    fake_opener = FakeOpener(200, body)
+    monkeypatch.setattr(
+        "reviewer.hosted_risk_canary._build_secure_https_opener",
+        lambda: fake_opener,
+    )
+
+    config = _valid_config()
+    wire = _valid_wire_descriptor()
+    contract = F4QuestionContractV1()
+    auth = _valid_authorization(config, wire, contract)
+    state = _valid_state()
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def invoke(request_id: str) -> None:
+        barrier.wait()
+        try:
+            execute_hosted_canary_call(
+                config,
+                wire,
+                auth,
+                state,
+                contract,
+                operation_id="op-concurrent",
+                provider_request_id=request_id,
+                journal_dir=tmp_path,
+            )
+            outcomes.append("sent")
+        except RuntimeError as exc:
+            outcomes.append(str(exc))
+
+    t1 = threading.Thread(target=invoke, args=("req-concurrent-1",))
+    t2 = threading.Thread(target=invoke, args=("req-concurrent-2",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert outcomes.count("sent") == 1
+    assert sum("RECONCILIATION_REQUIRED" in item for item in outcomes) == 1
+    assert fake_opener.open_call_count == 1
+
+
+def test_duplicate_provider_response_keys_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SYNTHETIC_API_KEY", "synthetic-key")
+    body = b'{"model":"m","answers":{"decision":{"type":"noul","noul":0.2,"noul":0.9}}}'
+    fake_opener = FakeOpener(200, body)
+    monkeypatch.setattr(
+        "reviewer.hosted_risk_canary._build_secure_https_opener",
+        lambda: fake_opener,
+    )
+
+    config = _valid_config()
+    wire = _valid_wire_descriptor()
+    contract = F4QuestionContractV1()
+    auth = _valid_authorization(config, wire, contract)
+
+    result, observation = execute_hosted_canary_call(
+        config,
+        wire,
+        auth,
+        _valid_state(),
+        contract,
+        operation_id="op-duplicate-json",
+        provider_request_id="req-duplicate-json",
+        journal_dir=tmp_path,
+    )
+
+    assert result.status is ProviderCallStatus.INVALID_RESPONSE
+    assert result.probability is None
+    assert observation.journal_state is CanaryJournalState.OBSERVED_PROVIDER_FAILURE
+
+
+def test_huge_integer_probability_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SYNTHETIC_API_KEY", "synthetic-key")
+    body = json.dumps(
+        {
+            "model": "m",
+            "answers": {"decision": {"type": "noul", "noul": 10**400}},
+        }
+    ).encode("utf-8")
+    fake_opener = FakeOpener(200, body)
+    monkeypatch.setattr(
+        "reviewer.hosted_risk_canary._build_secure_https_opener",
+        lambda: fake_opener,
+    )
+
+    config = _valid_config()
+    wire = _valid_wire_descriptor()
+    contract = F4QuestionContractV1()
+    auth = _valid_authorization(config, wire, contract)
+
+    result, observation = execute_hosted_canary_call(
+        config,
+        wire,
+        auth,
+        _valid_state(),
+        contract,
+        operation_id="op-huge-prob",
+        provider_request_id="req-huge-prob",
+        journal_dir=tmp_path,
+    )
+
+    assert result.status is ProviderCallStatus.INVALID_RESPONSE
+    assert result.probability is None
+    assert observation.journal_state is CanaryJournalState.OBSERVED_PROVIDER_FAILURE
+
+
+def test_oversized_provider_response_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SYNTHETIC_API_KEY", "synthetic-key")
+    fake_opener = FakeOpener(200, b"x" * (1_048_576 + 2))
+    monkeypatch.setattr(
+        "reviewer.hosted_risk_canary._build_secure_https_opener",
+        lambda: fake_opener,
+    )
+
+    config = _valid_config()
+    wire = _valid_wire_descriptor()
+    contract = F4QuestionContractV1()
+    auth = _valid_authorization(config, wire, contract)
+
+    result, observation = execute_hosted_canary_call(
+        config,
+        wire,
+        auth,
+        _valid_state(),
+        contract,
+        operation_id="op-large-response",
+        provider_request_id="req-large-response",
+        journal_dir=tmp_path,
+    )
+
+    assert result.status is ProviderCallStatus.INVALID_RESPONSE
+    assert result.probability is None
+    assert observation.journal_state is CanaryJournalState.OBSERVED_PROVIDER_FAILURE
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "message"),
+    [
+        ("auth_header_name", "X-Authorization", "auth_header_name='Authorization'"),
+        ("content_type", "text/plain", "content_type='application/json'"),
+    ],
+)
+def test_executor_rejects_wire_transport_drift(
+    field_name: str,
+    bad_value: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SYNTHETIC_API_KEY", "synthetic-key")
+    data = {
+        "contract_schema_version": "f4-hosted-wire-v1",
+        "http_method": "POST",
+        "request_path": "/v1/systemone",
+        "auth_mode": "BEARER",
+        "auth_header_name": "Authorization",
+        "content_type": "application/json",
+        "expected_model_identifier": "jev-latest",
+        "request_template_kind": "systemone_noul",
+        "response_probability_path": "answers.decision.noul",
+        "api_version_source": "OPENAPI_INFO_0.2.0_PATH_V1",
+        "provider_schema_identity": "typesafe-openapi-0.2.0-systemone-v1",
+    }
+    data[field_name] = bad_value
+    wire = load_wire_descriptor_from_dict(data)
+    config = _valid_config()
+    contract = F4QuestionContractV1()
+    auth = _valid_authorization(config, wire, contract)
+
+    with pytest.raises(ValueError, match=message):
+        execute_hosted_canary_call(
+            config,
+            wire,
+            auth,
+            _valid_state(),
+            contract,
+            operation_id="op-wire-drift",
+            provider_request_id="req-wire-drift",
+            journal_dir=tmp_path,
+        )
 
 
 # --- Negative Mutation Controls ---
