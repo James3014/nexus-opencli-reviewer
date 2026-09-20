@@ -6,6 +6,8 @@ Derives semantic value via evaluate_semantic_value against deterministic baselin
 
 from __future__ import annotations
 
+import subprocess
+
 from reviewer.context_economics.fixtures import SessionFixtureGenerator
 from reviewer.context_economics.models import SyntheticRankerMode
 from reviewer.context_economics.simulation import (
@@ -16,7 +18,16 @@ from reviewer.context_economics.simulation import (
 )
 
 
-def run_full_wave1_matrix() -> tuple[list[ArchitectureRunResult], dict]:
+def _get_current_git_sha() -> str:
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+        return out.decode("utf-8").strip()
+    except Exception:
+        return "UNKNOWN_CANDIDATE"
+
+
+def run_full_wave1_matrix(candidate_sha: str | None = None) -> tuple[list[ArchitectureRunResult], dict]:
+    resolved_sha = candidate_sha or _get_current_git_sha()
     generator = SessionFixtureGenerator(seed="EXP_C_WAVE1_V2")
     turns, anchors, fixture_hash = generator.generate_1000_turn_session()
 
@@ -81,7 +92,7 @@ def run_full_wave1_matrix() -> tuple[list[ArchitectureRunResult], dict]:
 
     # Generate proposal
     proposal = generate_wave1_live_authorization_proposal(
-        candidate_sha="PENDING_COMMIT",
+        candidate_sha=resolved_sha,
         fixture_hash=fixture_hash,
         simulation_results=results,
     )
