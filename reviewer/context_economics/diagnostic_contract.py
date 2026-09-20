@@ -22,6 +22,7 @@ import re
 import ssl
 from typing import Any, Callable, Sequence
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from reviewer.context_economics.fixtures import SessionFixtureGenerator
@@ -232,6 +233,7 @@ class ContextRelevanceDiagnosticAuthorizationV1:
     question_contract_hash: str = ""
     provider_state_schema_hash: str = ""
     wire_contract_hash: str = ""
+    config_hash: str = ""
     endpoint_host: str = ""
     authorized_semantic_input_ids: tuple[str, ...] = ()
     journal_root_resolved_hash: str = ""
@@ -264,6 +266,12 @@ class ContextRelevanceDiagnosticAuthorizationV1:
             if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdef" for c in val):
                 raise ValueError(f"{name} must be a valid 64-character lowercase hexadecimal hash")
 
+        if self.config_hash and (
+            len(self.config_hash) != 64
+            or not all(c in "0123456789abcdef" for c in self.config_hash)
+        ):
+            raise ValueError("config_hash must be a valid 64-character lowercase hexadecimal hash")
+
         for name, val in (
             ("journal_root_resolved_hash", self.journal_root_resolved_hash),
             ("journal_namespace_hash", self.journal_namespace_hash),
@@ -275,7 +283,14 @@ class ContextRelevanceDiagnosticAuthorizationV1:
         if not isinstance(self.endpoint_host, str) or not self.endpoint_host.strip():
             raise ValueError("endpoint_host must be a non-empty string")
 
-        total_authorized = len(self.authorized_semantic_input_ids) + len(self.authorized_backup_sample_ids)
+        all_authorized_ids = (
+            tuple(self.authorized_semantic_input_ids)
+            + tuple(self.authorized_backup_sample_ids)
+        )
+        if len(set(all_authorized_ids)) != len(all_authorized_ids):
+            raise ValueError("authorized semantic input IDs must be unique across primary and backup sets")
+
+        total_authorized = len(all_authorized_ids)
         if self.max_calls != total_authorized:
             raise ValueError(
                 f"max_calls ({self.max_calls}) must exactly equal total authorized IDs ({total_authorized})"
@@ -289,6 +304,7 @@ class ContextRelevanceDiagnosticAuthorizationV1:
             "authorized_semantic_input_ids": list(self.authorized_semantic_input_ids),
             "diagnostic_packet_hash": self.diagnostic_packet_hash,
             "diagnostic_sample_hash": self.diagnostic_sample_hash,
+            "config_hash": self.config_hash,
             "endpoint_host_hash": endpoint_host_hash,
             "fixture_hash": self.fixture_hash,
             "journal_namespace_hash": self.journal_namespace_hash,
@@ -310,6 +326,7 @@ class ContextRelevanceDiagnosticAuthorizationV1:
             "authorization_schema_version": self.authorization_schema_version,
             "authorization_hash": auth_hash,
             "diagnostic_packet_hash": self.diagnostic_packet_hash,
+            "config_hash": self.config_hash,
             "live_contract_revision": self.live_contract_revision,
             "sample_source_revision": self.sample_source_revision,
             "fixture_hash": self.fixture_hash,
@@ -342,6 +359,22 @@ class PreflightSampleResult:
     semantic_input_id: str
     status: PreflightStatus
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DiagnosticTransportResponse:
+    """Transport result used by tests and the shared HTTP classifier/parser path."""
+
+    status_code: int
+    raw_body: bytes
+
+    def __post_init__(self) -> None:
+        if isinstance(self.status_code, bool) or not isinstance(self.status_code, int):
+            raise ValueError("status_code must be an integer")
+        if not (100 <= self.status_code <= 599):
+            raise ValueError("status_code must be between 100 and 599")
+        if not isinstance(self.raw_body, bytes):
+            raise ValueError("raw_body must be bytes")
 
 
 _MAX_RESPONSE_BYTES = 1_048_576
@@ -872,13 +905,7 @@ class ContextRelevanceLiveDiagnosticExecutor:
     # ------------------------------------------------------------------
 
     def preflight_sample(self, packet: DiagnosticSamplePacketV1) -> PreflightSampleResult:
-        """Validate a sample packet for live execution eligibility.
-
-        Pure zero-effect: no atomic claim, no PREPARED write, no state file,
-        no journal terminal state, no authorization consumption, no API key read,
-        no network.  Returns READY or NOT_READY(reason).
-        """
-        # Config availability (no hardcoded fallback)
+        """Validate one sample for live execution eligibility with zero effects."""
         if self.config is None:
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
@@ -887,7 +914,36 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 reason="LIVE_DIAGNOSTIC_NOT_SENT_PRIVATE_CONFIG_UNAVAILABLE",
             )
 
-        # Candidate revision
+        runtime_config_hash = self.config.canonical_config_hash()
+        if not self.authorization.config_hash or self.authorization.config_hash != runtime_config_hash:
+            return PreflightSampleResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=PreflightStatus.NOT_READY,
+                reason="LIVE_DIAGNOSTIC_NOT_SENT_CONFIG_HASH_MISMATCH",
+            )
+
+        runtime_host = urllib.parse.urlparse(self.config.endpoint_origin).hostname
+        if not runtime_host or self.authorization.endpoint_host != runtime_host:
+            return PreflightSampleResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=PreflightStatus.NOT_READY,
+                reason="LIVE_DIAGNOSTIC_NOT_SENT_ENDPOINT_HOST_MISMATCH",
+            )
+
+        if self.authorization.max_calls > self.config.max_canary_quota:
+            return PreflightSampleResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=PreflightStatus.NOT_READY,
+                reason=(
+                    "LIVE_DIAGNOSTIC_NOT_SENT_QUOTA_EXCEEDED: "
+                    f"authorized={self.authorization.max_calls} "
+                    f"quota={self.config.max_canary_quota}"
+                ),
+            )
+
         if self.authorization.live_contract_revision != self.current_candidate_sha:
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
@@ -900,7 +956,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 ),
             )
 
-        # Wire hash
         wire_hash = self.wire_descriptor.canonical_wire_hash()
         if self.authorization.wire_contract_hash != wire_hash:
             return PreflightSampleResult(
@@ -913,7 +968,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 ),
             )
 
-        # Question contract
         if self.authorization.question_contract_hash != self.question_contract.contract_hash:
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
@@ -926,7 +980,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 ),
             )
 
-        # Packet question contract hash
         if packet.question_contract_hash != self.question_contract.contract_hash:
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
@@ -935,7 +988,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 reason="Packet question_contract_hash does not match question_contract",
             )
 
-        # Packet provider state schema hash
         if packet.provider_state_schema_hash != self.authorization.provider_state_schema_hash:
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
@@ -944,24 +996,27 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 reason="Packet provider_state_schema_hash mismatch with authorization",
             )
 
-        # Journal root hash
         actual_root_hash = self.journal.get_root_resolved_hash()
-        if self.authorization.journal_root_resolved_hash and \
-                self.authorization.journal_root_resolved_hash != actual_root_hash:
+        if (
+            self.authorization.journal_root_resolved_hash
+            and self.authorization.journal_root_resolved_hash != actual_root_hash
+        ):
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
                 semantic_input_id=packet.semantic_input_id,
                 status=PreflightStatus.NOT_READY,
                 reason=(
                     f"Authorization journal_root_resolved_hash mismatch: "
-                    f"auth={self.authorization.journal_root_resolved_hash} actual={actual_root_hash}"
+                    f"auth={self.authorization.journal_root_resolved_hash} "
+                    f"actual={actual_root_hash}"
                 ),
             )
 
-        # Journal namespace hash
         actual_ns_hash = self.journal.get_namespace_hash()
-        if self.authorization.journal_namespace_hash and \
-                self.authorization.journal_namespace_hash != actual_ns_hash:
+        if (
+            self.authorization.journal_namespace_hash
+            and self.authorization.journal_namespace_hash != actual_ns_hash
+        ):
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
                 semantic_input_id=packet.semantic_input_id,
@@ -972,7 +1027,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 ),
             )
 
-        # Authorized ID check
         if packet.semantic_input_id not in self.authorization.authorized_semantic_input_ids:
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
@@ -981,8 +1035,10 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 reason="semantic_input_id not in authorization.authorized_semantic_input_ids",
             )
 
-        # Credential metadata — zero-call: verify env_var_name is non-empty, do NOT read secret
-        if not self.config.api_key_env_var_name or not isinstance(self.config.api_key_env_var_name, str):
+        if (
+            not self.config.api_key_env_var_name
+            or not isinstance(self.config.api_key_env_var_name, str)
+        ):
             return PreflightSampleResult(
                 sample_id=packet.sample_id,
                 semantic_input_id=packet.semantic_input_id,
@@ -1068,14 +1124,9 @@ class ContextRelevanceLiveDiagnosticExecutor:
         packet: DiagnosticSamplePacketV1,
         operation_id: str,
         experiment_id: str,
-        transport_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        transport_handler: Callable[[dict[str, Any]], Any] | None = None,
     ) -> DiagnosticExecutionResult:
-        """Execute a single live sample.
-
-        transport_handler(request_dict) -> response_dict  (for loopback/fake tests).
-        If transport_handler is None, uses real HTTPS opener.
-        """
-        # 1. Config gate
+        """Execute one authorized sample with at most one physical dispatch attempt."""
         if self.config is None:
             return DiagnosticExecutionResult(
                 sample_id=packet.sample_id,
@@ -1086,7 +1137,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 error_message="LIVE_DIAGNOSTIC_NOT_SENT_PRIVATE_CONFIG_UNAVAILABLE",
             )
 
-        # 2. Owner authorization gate
         if not self.owner_runtime_authorization_granted:
             return DiagnosticExecutionResult(
                 sample_id=packet.sample_id,
@@ -1097,7 +1147,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 error_message="LIVE_DIAGNOSTIC_NOT_SENT_OWNER_AUTHORIZATION_NOT_GRANTED",
             )
 
-        # 3. Per-sample preflight
         pf = self.preflight_sample(packet)
         if pf.status != PreflightStatus.READY:
             return DiagnosticExecutionResult(
@@ -1110,8 +1159,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
             )
 
         auth_hash = self.authorization.compute_authorization_hash()
-
-        # 4. Check existing journal state (restart / replay protection)
         existing_state = self.journal.read_state(packet.semantic_input_id, auth_hash)
         if existing_state:
             curr_j_state = existing_state.get("journal_state")
@@ -1130,9 +1177,12 @@ class ContextRelevanceLiveDiagnosticExecutor:
                     status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
                     request_hash=packet.compute_packet_hash(),
                     response_hash=None,
-                    error_message="RECONCILE_ONLY: previous attempt interrupted at REQUEST_ATTEMPT_STARTED; no second dispatch eligibility",
+                    error_message=(
+                        "RECONCILE_ONLY: previous attempt interrupted at "
+                        "REQUEST_ATTEMPT_STARTED; no second dispatch eligibility"
+                    ),
                 )
-            elif curr_j_state in (
+            if curr_j_state in (
                 DiagnosticJournalState.OBSERVED_OK.value,
                 DiagnosticJournalState.OBSERVED_CLIENT_FAILURE.value,
                 DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE.value,
@@ -1148,7 +1198,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                     error_message=f"Replay blocked: sample already in terminal state {curr_j_state}",
                 )
 
-        # 5. Atomic per-sample claim (first real effect)
         claimed = self.journal.try_atomic_claim(
             experiment_id=experiment_id,
             semantic_input_id=packet.semantic_input_id,
@@ -1166,8 +1215,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
             )
 
         self.total_claims_consumed += 1
-
-        # 6. Call ceiling check
         if self.total_claims_consumed > self.authorization.max_calls:
             return DiagnosticExecutionResult(
                 sample_id=packet.sample_id,
@@ -1178,7 +1225,6 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 error_message="MAX_CALLS_EXHAUSTED",
             )
 
-        # 7. PREPARED state (attempt_count=0)
         self.journal.write_state_atomic(
             packet.semantic_input_id,
             auth_hash,
@@ -1187,14 +1233,12 @@ class ContextRelevanceLiveDiagnosticExecutor:
             attempt_count=0,
         )
 
-        # 8. Build wire request
         req_data = build_context_relevance_provider_request(
             self.question_contract,
             packet.provider_state,
             self.wire_descriptor,
         )
 
-        # 9. Late-bind API key secret from environment (AFTER all validations)
         secret_value = os.environ.get(self.config.api_key_env_var_name)
         self.api_key_reads += 1
         if not secret_value or not secret_value.strip():
@@ -1204,7 +1248,7 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 DiagnosticJournalState.NOT_SENT,
                 operation_id=operation_id,
                 attempt_count=0,
-                extra_fields={"reason": f"env var {self.config.api_key_env_var_name} missing or empty"},
+                extra_fields={"reason": "configured credential unavailable"},
             )
             return DiagnosticExecutionResult(
                 sample_id=packet.sample_id,
@@ -1212,11 +1256,9 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 status=DiagnosticOutcomeStatus.NOT_SENT,
                 request_hash=req_data["body_payload_hash"],
                 response_hash=None,
-                error_message=f"LIVE_DIAGNOSTIC_NOT_SENT_PRIVATE_CONFIG_UNAVAILABLE: "
-                              f"env var {self.config.api_key_env_var_name} missing or empty",
+                error_message="LIVE_DIAGNOSTIC_NOT_SENT_PRIVATE_CREDENTIAL_UNAVAILABLE",
             )
 
-        # 10. REQUEST_ATTEMPT_STARTED (attempt_count=1) immediately before dispatch
         self.journal.write_state_atomic(
             packet.semantic_input_id,
             auth_hash,
@@ -1226,123 +1268,111 @@ class ContextRelevanceLiveDiagnosticExecutor:
         )
         self.physical_network_attempts += 1
 
-        # 11. Dispatch (fake handler or real HTTPS)
-        if transport_handler is not None:
-            # Test loopback path
-            try:
-                resp_obj = transport_handler(req_data)
-                response_code = 200
-            except Exception as exc:  # noqa: BLE001
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OUTCOME_UNKNOWN,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                    extra_fields={"reason": f"transport_handler raised: {exc}"},
+        response_code: int | None = None
+        raw_response_bytes: bytes | None = None
+        resp_obj: Any = None
+
+        try:
+            if transport_handler is not None:
+                transport_result = transport_handler(req_data)
+                if isinstance(transport_result, DiagnosticTransportResponse):
+                    response_code = transport_result.status_code
+                    raw_response_bytes = transport_result.raw_body
+                else:
+                    response_code = 200
+                    resp_obj = transport_result
+            else:
+                final_url = (
+                    f"{self.config.endpoint_origin.rstrip('/')}"
+                    f"{self.wire_descriptor.request_path}"
                 )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message=f"OUTCOME_UNKNOWN: transport_handler raised: {exc}",
+                encoded_body = req_data["body_json"].encode("utf-8")
+                headers = {
+                    "Accept": "application/json",
+                    "Content-Type": self.wire_descriptor.content_type,
+                    self.wire_descriptor.auth_header_name: f"Bearer {secret_value.strip()}",
+                }
+                http_req = urllib.request.Request(
+                    url=final_url,
+                    data=encoded_body,
+                    headers=headers,
+                    method=self.wire_descriptor.http_method,
                 )
-        else:
-            # Real HTTPS path
-            from urllib.parse import urlparse as _urlparse
-            parsed_origin = _urlparse(self.config.endpoint_origin)
-            final_url = f"{self.config.endpoint_origin.rstrip('/')}{self.wire_descriptor.request_path}"
-            encoded_body = req_data["body_json"].encode("utf-8")
-
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": self.wire_descriptor.content_type,
-                self.wire_descriptor.auth_header_name: f"Bearer {secret_value.strip()}",
-            }
-            http_req = urllib.request.Request(
-                url=final_url,
-                data=encoded_body,
-                headers=headers,
-                method=self.wire_descriptor.http_method,
-            )
-
-            opener = _build_secure_diag_opener()
-            raw_response_bytes: bytes | None = None
-            response_code: int | None = None
-            response_too_large = False
-
-            try:
+                opener = _build_secure_diag_opener()
                 with opener.open(http_req, timeout=10.0) as resp:
                     raw_response_bytes = resp.read(_MAX_RESPONSE_BYTES + 1)
                     response_code = resp.status
-                    response_too_large = len(raw_response_bytes) > _MAX_RESPONSE_BYTES
-            except urllib.error.HTTPError as exc:
-                response_code = exc.code
-            except (TimeoutError, urllib.error.URLError, http.client.IncompleteRead,
-                    http.client.RemoteDisconnected, ConnectionResetError,
-                    ConnectionError, BrokenPipeError) as exc:
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OUTCOME_UNKNOWN,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                    extra_fields={"reason": f"transport error: {exc}"},
-                )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message=f"OUTCOME_UNKNOWN: transport error: {exc}",
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OUTCOME_UNKNOWN,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                    extra_fields={"reason": f"unexpected: {exc}"},
-                )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message=f"OUTCOME_UNKNOWN: unexpected transport failure: {exc}",
-                )
+        except urllib.error.HTTPError as exc:
+            response_code = exc.code
+            raw_response_bytes = b""
+        except (
+            TimeoutError,
+            urllib.error.URLError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+            ConnectionResetError,
+            ConnectionError,
+            BrokenPipeError,
+        ) as exc:
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                DiagnosticJournalState.OUTCOME_UNKNOWN,
+                operation_id=operation_id,
+                attempt_count=1,
+                extra_fields={"reason": f"transport error: {type(exc).__name__}"},
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
+                request_hash=req_data["body_payload_hash"],
+                response_hash=None,
+                error_message=f"OUTCOME_UNKNOWN: transport error: {type(exc).__name__}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                DiagnosticJournalState.OUTCOME_UNKNOWN,
+                operation_id=operation_id,
+                attempt_count=1,
+                extra_fields={"reason": f"unexpected transport error: {type(exc).__name__}"},
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
+                request_hash=req_data["body_payload_hash"],
+                response_hash=None,
+                error_message=f"OUTCOME_UNKNOWN: unexpected transport failure: {type(exc).__name__}",
+            )
 
-            # Non-200 HTTP
-            if response_code is not None and response_code != 200:
-                if 400 <= response_code < 500:
-                    d_status = DiagnosticOutcomeStatus.OBSERVED_CLIENT_FAILURE
-                    j_state = DiagnosticJournalState.OBSERVED_CLIENT_FAILURE
-                else:
-                    d_status = DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE
-                    j_state = DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    j_state,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=d_status,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message=f"HTTP {response_code}",
-                )
+        if response_code is not None and response_code != 200:
+            if 400 <= response_code < 500:
+                d_status = DiagnosticOutcomeStatus.OBSERVED_CLIENT_FAILURE
+                j_state = DiagnosticJournalState.OBSERVED_CLIENT_FAILURE
+            else:
+                d_status = DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE
+                j_state = DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                j_state,
+                operation_id=operation_id,
+                attempt_count=1,
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=d_status,
+                request_hash=req_data["body_payload_hash"],
+                response_hash=None,
+                error_message=f"HTTP {response_code}",
+            )
 
-            # Oversized body
-            if response_too_large:
+        if raw_response_bytes is not None:
+            if len(raw_response_bytes) > _MAX_RESPONSE_BYTES:
                 self.journal.write_state_atomic(
                     packet.semantic_input_id,
                     auth_hash,
@@ -1358,17 +1388,13 @@ class ContextRelevanceLiveDiagnosticExecutor:
                     response_hash=None,
                     error_message="Provider response exceeded 1MB bound",
                 )
-
-            # Parse JSON
             try:
-                if raw_response_bytes is None:
+                if not raw_response_bytes:
                     raise ValueError("Empty response body")
                 resp_obj = json.loads(
                     raw_response_bytes.decode("utf-8"),
                     object_pairs_hook=_reject_duplicate_diag_pairs,
                 )
-                if not isinstance(resp_obj, dict):
-                    raise ValueError("Response must be a JSON object")
             except Exception as exc:
                 self.journal.write_state_atomic(
                     packet.semantic_input_id,
@@ -1386,90 +1412,7 @@ class ContextRelevanceLiveDiagnosticExecutor:
                     error_message=f"Invalid response JSON: {exc}",
                 )
 
-        # 12. Validate response (shared between transport_handler and real path)
-        if isinstance(resp_obj, dict):
-            # Model present check
-            observed_model = resp_obj.get("model")
-            if not isinstance(observed_model, str) or not observed_model.strip():
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message="Missing or invalid model identifier in response",
-                )
-
-            # Probability extraction
-            answers = resp_obj.get("answers")
-            if not isinstance(answers, dict) or "decision" not in answers:
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message="Missing answers.decision in response",
-                )
-
-            decision_answer = answers["decision"]
-            if not isinstance(decision_answer, dict):
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message="answers.decision must be an object",
-                )
-
-            raw_prob = decision_answer.get("noul")
-            if (
-                raw_prob is None
-                or isinstance(raw_prob, bool)
-                or not isinstance(raw_prob, (int, float))
-                or (isinstance(raw_prob, float) and not math.isfinite(raw_prob))
-                or not (0.0 <= raw_prob <= 1.0)
-            ):
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
-                    operation_id=operation_id,
-                    attempt_count=1,
-                )
-                return DiagnosticExecutionResult(
-                    sample_id=packet.sample_id,
-                    semantic_input_id=packet.semantic_input_id,
-                    status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
-                    request_hash=req_data["body_payload_hash"],
-                    response_hash=None,
-                    error_message=f"Invalid noul probability value: {raw_prob!r}",
-                )
-
-        else:
-            # transport_handler returned non-dict (already checked above if real path)
+        if not isinstance(resp_obj, dict):
             self.journal.write_state_atomic(
                 packet.semantic_input_id,
                 auth_hash,
@@ -1483,11 +1426,90 @@ class ContextRelevanceLiveDiagnosticExecutor:
                 status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
                 request_hash=req_data["body_payload_hash"],
                 response_hash=None,
-                error_message="transport_handler returned non-dict response",
+                error_message="Provider response must be a JSON object",
             )
 
-        # 13. OBSERVED_OK
-        resp_bytes = json.dumps(resp_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        observed_model = resp_obj.get("model")
+        if not isinstance(observed_model, str) or not observed_model.strip():
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
+                operation_id=operation_id,
+                attempt_count=1,
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
+                request_hash=req_data["body_payload_hash"],
+                response_hash=None,
+                error_message="Missing or invalid model identifier in response",
+            )
+
+        answers = resp_obj.get("answers")
+        if not isinstance(answers, dict) or "decision" not in answers:
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
+                operation_id=operation_id,
+                attempt_count=1,
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
+                request_hash=req_data["body_payload_hash"],
+                response_hash=None,
+                error_message="Missing answers.decision in response",
+            )
+
+        decision_answer = answers["decision"]
+        if not isinstance(decision_answer, dict):
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
+                operation_id=operation_id,
+                attempt_count=1,
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
+                request_hash=req_data["body_payload_hash"],
+                response_hash=None,
+                error_message="answers.decision must be an object",
+            )
+
+        raw_prob = decision_answer.get("noul")
+        if (
+            raw_prob is None
+            or isinstance(raw_prob, bool)
+            or not isinstance(raw_prob, (int, float))
+            or (isinstance(raw_prob, float) and not math.isfinite(raw_prob))
+            or not (0.0 <= raw_prob <= 1.0)
+        ):
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE,
+                operation_id=operation_id,
+                attempt_count=1,
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE,
+                request_hash=req_data["body_payload_hash"],
+                response_hash=None,
+                error_message=f"Invalid noul probability value: {raw_prob!r}",
+            )
+
+        resp_bytes = json.dumps(
+            resp_obj, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
         response_hash = hashlib.sha256(resp_bytes).hexdigest()
         self.journal.write_state_atomic(
             packet.semantic_input_id,
@@ -1510,18 +1532,65 @@ class ContextRelevanceLiveDiagnosticExecutor:
     # execute_live_batch
     # ------------------------------------------------------------------
 
+    def preflight_live_batch(
+        self,
+        packets: Sequence[DiagnosticSamplePacketV1],
+    ) -> tuple[bool, str | None]:
+        """Pure batch validation. No claims, state writes, secret reads, or network."""
+        if not self.owner_runtime_authorization_granted:
+            return False, "LIVE_DIAGNOSTIC_NOT_SENT_OWNER_AUTHORIZATION_NOT_GRANTED"
+        if self.config is None:
+            return False, "LIVE_DIAGNOSTIC_NOT_SENT_PRIVATE_CONFIG_UNAVAILABLE"
+        if self.authorization.authorized_backup_sample_ids:
+            return False, "LIVE_DIAGNOSTIC_NOT_SENT_BACKUP_IDS_FORBIDDEN"
+        if len(packets) != self.authorization.max_calls:
+            return (
+                False,
+                "LIVE_DIAGNOSTIC_NOT_SENT_EXACT_BATCH_REQUIRED: "
+                f"packets={len(packets)} max_calls={self.authorization.max_calls}",
+            )
+
+        semantic_ids = [p.semantic_input_id for p in packets]
+        if len(set(semantic_ids)) != len(semantic_ids):
+            return False, "LIVE_DIAGNOSTIC_NOT_SENT_DUPLICATE_SEMANTIC_INPUT_ID"
+        sample_ids = [p.sample_id for p in packets]
+        if len(set(sample_ids)) != len(sample_ids):
+            return False, "LIVE_DIAGNOSTIC_NOT_SENT_DUPLICATE_SAMPLE_ID"
+
+        if set(semantic_ids) != set(self.authorization.authorized_semantic_input_ids):
+            return False, "LIVE_DIAGNOSTIC_NOT_SENT_AUTHORIZED_SET_MISMATCH"
+
+        for packet in packets:
+            pf = self.preflight_sample(packet)
+            if pf.status != PreflightStatus.READY:
+                return False, pf.reason
+
+        return True, None
+
     def execute_live_batch(
         self,
         packets: Sequence[DiagnosticSamplePacketV1],
         operation_id: str,
         experiment_id: str,
-        transport_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        transport_handler: Callable[[dict[str, Any]], Any] | None = None,
     ) -> list[DiagnosticExecutionResult]:
-        """Execute a batch with atomic batch claim and OUTCOME_UNKNOWN halt."""
+        """Execute an exact authorized batch after all zero-effect validation passes."""
+        ready, reason = self.preflight_live_batch(packets)
+        if not ready:
+            return [
+                DiagnosticExecutionResult(
+                    sample_id=p.sample_id,
+                    semantic_input_id=p.semantic_input_id,
+                    status=DiagnosticOutcomeStatus.NOT_SENT,
+                    request_hash=p.compute_packet_hash(),
+                    response_hash=None,
+                    error_message=reason,
+                )
+                for p in packets
+            ]
+
         auth_hash = self.authorization.compute_authorization_hash()
         sample_ids = [p.sample_id for p in packets]
-
-        # Batch-wide claim (prevents parallel runs of the same authorization)
         batch_claimed = self.journal.try_atomic_batch_claim(
             authorization_hash=auth_hash,
             experiment_id=experiment_id,
@@ -1543,24 +1612,28 @@ class ContextRelevanceLiveDiagnosticExecutor:
 
         results: list[DiagnosticExecutionResult] = []
         stopped_due_to_unknown = False
-
-        for p in packets:
+        for packet in packets:
             if stopped_due_to_unknown:
                 results.append(
                     DiagnosticExecutionResult(
-                        sample_id=p.sample_id,
-                        semantic_input_id=p.semantic_input_id,
+                        sample_id=packet.sample_id,
+                        semantic_input_id=packet.semantic_input_id,
                         status=DiagnosticOutcomeStatus.NOT_SENT,
-                        request_hash=p.compute_packet_hash(),
+                        request_hash=packet.compute_packet_hash(),
                         response_hash=None,
                         error_message="BATCH_HALTED_DUE_TO_OUTCOME_UNKNOWN",
                     )
                 )
                 continue
 
-            res = self.execute_live_sample(p, operation_id, experiment_id, transport_handler)
-            results.append(res)
-            if res.status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN:
+            result = self.execute_live_sample(
+                packet,
+                operation_id,
+                experiment_id,
+                transport_handler,
+            )
+            results.append(result)
+            if result.status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN:
                 stopped_due_to_unknown = True
 
         return results
@@ -1619,13 +1692,7 @@ class ContextRelevanceLiveDiagnosticExecutor:
         operation_id: str,
         experiment_id: str,
     ) -> DiagnosticExecutionResult:
-        """Legacy zero-call execute path (frozen gate).
-
-        Does NOT consume authorization or write state — zero side-effects on
-        failure paths.  On success, writes dry-run OBSERVED_OK only.
-        Config is not required: zero-call path never reads secrets or makes network calls.
-        """
-        # Hash-only preflight (no config gate)
+        """Legacy zero-call compatibility preflight with no durable effects."""
         ok, reason = self._hash_preflight_check()
         if not ok:
             return DiagnosticExecutionResult(
@@ -1648,28 +1715,22 @@ class ContextRelevanceLiveDiagnosticExecutor:
             )
 
         auth_hash = self.authorization.compute_authorization_hash()
-
         existing_state = self.journal.read_state(packet.semantic_input_id, auth_hash)
         if existing_state:
             curr_j_state = existing_state.get("journal_state")
             if curr_j_state == DiagnosticJournalState.REQUEST_ATTEMPT_STARTED.value:
-                self.journal.write_state_atomic(
-                    packet.semantic_input_id,
-                    auth_hash,
-                    DiagnosticJournalState.OUTCOME_UNKNOWN,
-                    operation_id=operation_id,
-                    attempt_count=existing_state.get("attempt_count", 1),
-                    extra_fields={"reason": "RECONCILE_ONLY_PREVIOUS_ATTEMPT_INTERRUPTED"},
-                )
                 return DiagnosticExecutionResult(
                     sample_id=packet.sample_id,
                     semantic_input_id=packet.semantic_input_id,
                     status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
                     request_hash=packet.compute_packet_hash(),
                     response_hash=None,
-                    error_message="RECONCILE_ONLY: previous attempt interrupted at REQUEST_ATTEMPT_STARTED; no second dispatch eligibility",
+                    error_message=(
+                        "RECONCILE_ONLY: previous attempt interrupted at "
+                        "REQUEST_ATTEMPT_STARTED; zero-call compatibility path does not mutate state"
+                    ),
                 )
-            elif curr_j_state in (
+            if curr_j_state in (
                 DiagnosticJournalState.OBSERVED_OK.value,
                 DiagnosticJournalState.OBSERVED_CLIENT_FAILURE.value,
                 DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE.value,
@@ -1682,67 +1743,16 @@ class ContextRelevanceLiveDiagnosticExecutor:
                     status=DiagnosticOutcomeStatus(curr_j_state),
                     request_hash=packet.compute_packet_hash(),
                     response_hash=None,
-                    error_message=f"Replay blocked: sample already in terminal state {curr_j_state}",
+                    error_message=f"Replay observed: sample already in terminal state {curr_j_state}",
                 )
 
-        claimed = self.journal.try_atomic_claim(
-            experiment_id=experiment_id,
-            semantic_input_id=packet.semantic_input_id,
-            authorization_hash=auth_hash,
-            operation_id=operation_id,
-        )
-        if not claimed:
-            return DiagnosticExecutionResult(
-                sample_id=packet.sample_id,
-                semantic_input_id=packet.semantic_input_id,
-                status=DiagnosticOutcomeStatus.NOT_SENT,
-                request_hash=packet.compute_packet_hash(),
-                response_hash=None,
-                error_message="ALREADY_CLAIMED: atomic sample claim exists",
-            )
-
-        self.total_claims_consumed += 1
-
-        if self.total_claims_consumed > self.authorization.max_calls:
-            return DiagnosticExecutionResult(
-                sample_id=packet.sample_id,
-                semantic_input_id=packet.semantic_input_id,
-                status=DiagnosticOutcomeStatus.NOT_SENT,
-                request_hash=packet.compute_packet_hash(),
-                response_hash=None,
-                error_message="MAX_CALLS_EXHAUSTED",
-            )
-
-        self.journal.write_state_atomic(
-            packet.semantic_input_id,
-            auth_hash,
-            DiagnosticJournalState.PREPARED,
-            operation_id=operation_id,
-            attempt_count=0,
-        )
-
-        req = build_context_relevance_provider_request(
-            self.question_contract,
-            packet.provider_state,
-            self.wire_descriptor,
-        )
-
-        # Zero-call gate: never make real network calls here
-        self.journal.write_state_atomic(
-            packet.semantic_input_id,
-            auth_hash,
-            DiagnosticJournalState.OBSERVED_OK,
-            operation_id=operation_id,
-            attempt_count=0,
-            extra_fields={"zero_call_preflight": True, "request_payload_hash": req["body_payload_hash"]},
-        )
         return DiagnosticExecutionResult(
             sample_id=packet.sample_id,
             semantic_input_id=packet.semantic_input_id,
-            status=DiagnosticOutcomeStatus.OBSERVED_OK,
-            request_hash=req["body_payload_hash"],
-            response_hash=hashlib.sha256(b"zero_call_preflight_simulated").hexdigest(),
-            error_message=None,
+            status=DiagnosticOutcomeStatus.NOT_SENT,
+            request_hash=packet.compute_packet_hash(),
+            response_hash=None,
+            error_message="ZERO_CALL_PREFLIGHT_READY_NO_EFFECT",
         )
 
     def execute_batch(
@@ -1785,6 +1795,7 @@ def generate_context_relevance_authorization_preview(
     question_contract_hash: str = "a7b75a88641668c1eb4bb460cd0f5ad8ffc3dff94e53b34bbc4791fcfff7aac9",
     provider_state_schema_hash: str = "bdfcd045b233a84618a7b26ffc963838ab41c480f3d694c989b4efa8910a70ac",
     wire_contract_hash: str = "586a75c42a22cb6f6cb03afd81cdea33695dd377384f75a1d24d3b81382cb66e",
+    config_hash: str = "",
     endpoint_host: str = "",
     journal_root_resolved_path: str = "",
     journal_namespace: str = "wave1-diag",
@@ -1796,6 +1807,10 @@ def generate_context_relevance_authorization_preview(
     endpoint_host and journal_root_resolved_path must be explicitly provided
     by the Owner.  No default private endpoints or paths.
     """
+    if not config_hash:
+        raise ValueError(
+            "config_hash must be explicitly provided; authorization must bind the H2A config identity"
+        )
     if not endpoint_host:
         raise ValueError(
             "endpoint_host must be explicitly provided; no default private endpoint allowed"
@@ -1818,6 +1833,7 @@ def generate_context_relevance_authorization_preview(
         question_contract_hash=question_contract_hash,
         provider_state_schema_hash=provider_state_schema_hash,
         wire_contract_hash=wire_contract_hash,
+        config_hash=config_hash,
         endpoint_host=endpoint_host,
         journal_root_resolved_hash=root_hash,
         journal_namespace_hash=ns_hash,
@@ -1836,6 +1852,7 @@ def generate_context_relevance_authorization_preview(
         "question_contract_hash": question_contract_hash,
         "provider_state_schema_hash": provider_state_schema_hash,
         "wire_contract_hash": wire_contract_hash,
+        "config_hash": config_hash,
         "endpoint_host_hash": endpoint_host_hash,
         "journal_root_hash": root_hash,
         "journal_namespace_hash": ns_hash,

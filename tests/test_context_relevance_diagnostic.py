@@ -26,6 +26,7 @@ from reviewer.context_economics.diagnostic_contract import (
     DiagnosticJournalState,
     DiagnosticOutcomeStatus,
     DiagnosticSamplePacketV1,
+    DiagnosticTransportResponse,
     PreflightStatus,
     PreflightSampleResult,
     build_context_relevance_provider_request,
@@ -436,6 +437,8 @@ def _make_live_authorization(
     root_hash: str | None = None,
     ns_hash: str | None = None,
     sample_hash: str = "1" * 64,
+    config_hash: str = "",
+    endpoint_host: str = "diagnostic.provider.internal",
 ) -> ContextRelevanceDiagnosticAuthorizationV1:
     wire = get_authoritative_h2b_wire_descriptor()
     q_contract = ContextRelevanceQuestionContractV1()
@@ -449,7 +452,8 @@ def _make_live_authorization(
         question_contract_hash=q_hash or q_contract.contract_hash,
         provider_state_schema_hash=s_hash,
         wire_contract_hash=wire_hash or wire.canonical_wire_hash(),
-        endpoint_host="diagnostic.provider.internal",
+        config_hash=config_hash,
+        endpoint_host=endpoint_host,
         journal_root_resolved_hash=root_hash or journal.get_root_resolved_hash(),
         journal_namespace_hash=ns_hash or journal.get_namespace_hash(),
         authorized_semantic_input_ids=authorized_ids,
@@ -477,6 +481,7 @@ def test_l2_packet_hash_distinct_from_authorization_hash(clean_journal_dir: str)
     journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
     auth, preview = generate_context_relevance_authorization_preview(
         live_contract_revision="98e8f18a637e2aecffa45a5c225f8de50bccfe82",
+        config_hash="c" * 64,
         endpoint_host="diagnostic.provider.internal",
         journal_root_resolved_path=journal.resolved_root,
         authorized_semantic_input_ids=("id1",),
@@ -525,24 +530,44 @@ def test_l5_different_namespace_yields_not_sent(clean_journal_dir: str) -> None:
     assert "journal_namespace_hash mismatch" in (res.error_message or "")
 
 
-def test_l6_concurrent_same_sample_attempts_exactly_one_claim_winner(clean_journal_dir: str) -> None:
-    """L6: two concurrent same-sample attempts -> exactly one atomic claim winner."""
+def test_l6_concurrent_same_sample_attempts_exactly_one_claim_winner(
+    clean_journal_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L6: two concurrent live attempts have exactly one claim/transport winner."""
+    monkeypatch.setenv("TEST_DIAG_API_KEY", "test-key-value")
     journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
-    auth = _make_live_authorization(journal, authorized_ids=("id_concurrent",))
+    config = _make_test_config()
+    auth = _make_live_authorization(
+        journal,
+        authorized_ids=("id_concurrent",),
+        config_hash=config.canonical_config_hash(),
+    )
     wire = get_authoritative_h2b_wire_descriptor()
     q = ContextRelevanceQuestionContractV1()
     executor1 = ContextRelevanceLiveDiagnosticExecutor(
-        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+        auth, q, wire, journal,
+        current_candidate_sha=auth.live_contract_revision,
+        config=config,
+        owner_runtime_authorization_granted=True,
     )
     executor2 = ContextRelevanceLiveDiagnosticExecutor(
-        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+        auth, q, wire, journal,
+        current_candidate_sha=auth.live_contract_revision,
+        config=config,
+        owner_runtime_authorization_granted=True,
     )
-    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id_concurrent")
+    packet = _make_dummy_packet("s1", "id_concurrent")
     barrier = threading.Barrier(2)
+    calls = [0]
+
+    def transport(req: dict) -> dict:
+        calls[0] += 1
+        return _good_transport(req)
 
     def run_exec(ex: ContextRelevanceLiveDiagnosticExecutor, op_id: str):
         barrier.wait()
-        return ex.execute_sample(packet, op_id, "exp1")
+        return ex.execute_live_sample(packet, op_id, "exp1", transport_handler=transport)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         f1 = pool.submit(run_exec, executor1, "op_worker1")
@@ -550,22 +575,24 @@ def test_l6_concurrent_same_sample_attempts_exactly_one_claim_winner(clean_journ
         r1 = f1.result()
         r2 = f2.result()
 
-    results = [r1, r2]
-    statuses = [r.status for r in results]
+    statuses = [r1.status, r2.status]
     assert statuses.count(DiagnosticOutcomeStatus.OBSERVED_OK) == 1
     assert statuses.count(DiagnosticOutcomeStatus.NOT_SENT) == 1
-    loser = [r for r in results if r.status == DiagnosticOutcomeStatus.NOT_SENT][0]
-    assert "ALREADY_CLAIMED" in (loser.error_message or "")
-    assert executor1.physical_network_attempts + executor2.physical_network_attempts == 0
+    assert calls[0] == 1
 
 
-def test_l7_process_restart_from_request_attempt_started_no_second_dispatch(clean_journal_dir: str) -> None:
-    """L7: process/restart from REQUEST_ATTEMPT_STARTED -> no second dispatch eligibility."""
+def test_l7_process_restart_from_request_attempt_started_no_second_dispatch(
+    clean_journal_dir: str,
+) -> None:
+    """L7: live restart from REQUEST_ATTEMPT_STARTED becomes OUTCOME_UNKNOWN without dispatch."""
     journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
-    auth = _make_live_authorization(journal, authorized_ids=("id_crash",))
+    config = _make_test_config()
+    auth = _make_live_authorization(
+        journal,
+        authorized_ids=("id_crash",),
+        config_hash=config.canonical_config_hash(),
+    )
     auth_hash = auth.compute_authorization_hash()
-
-    # Pre-claim and write REQUEST_ATTEMPT_STARTED to simulate crash during flight
     journal.try_atomic_claim("exp1", "id_crash", auth_hash, "op_dead")
     journal.write_state_atomic(
         "id_crash",
@@ -574,31 +601,39 @@ def test_l7_process_restart_from_request_attempt_started_no_second_dispatch(clea
         operation_id="op_dead",
         attempt_count=1,
     )
-
     wire = get_authoritative_h2b_wire_descriptor()
     q = ContextRelevanceQuestionContractV1()
-    executor_restarted = ContextRelevanceLiveDiagnosticExecutor(
-        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal,
+        current_candidate_sha=auth.live_contract_revision,
+        config=config,
+        owner_runtime_authorization_granted=True,
     )
-    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id_crash")
-    res = executor_restarted.execute_sample(packet, "op_restart", "exp1")
-
-    assert res.status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN
-    assert "no second dispatch eligibility" in (res.error_message or "")
-    assert executor_restarted.physical_network_attempts == 0
-
+    packet = _make_dummy_packet("s1", "id_crash")
+    result = executor.execute_live_sample(
+        packet, "op_restart", "exp1", transport_handler=_good_transport
+    )
+    assert result.status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN
+    assert executor.physical_network_attempts == 0
     state = journal.read_state("id_crash", auth_hash)
     assert state is not None
     assert state["journal_state"] == DiagnosticJournalState.OUTCOME_UNKNOWN.value
 
 
-def test_l8_outcome_unknown_halts_subsequent_samples(clean_journal_dir: str) -> None:
-    """L8: OUTCOME_UNKNOWN -> all subsequent samples NOT_SENT."""
+def test_l8_outcome_unknown_halts_subsequent_samples(
+    clean_journal_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L8: a live OUTCOME_UNKNOWN halts all later samples in the batch."""
+    monkeypatch.setenv("TEST_DIAG_API_KEY", "test-key-value")
     journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
-    auth = _make_live_authorization(journal, authorized_ids=("id1", "id2", "id3"))
+    config = _make_test_config(max_canary_quota=3)
+    auth = _make_live_authorization(
+        journal,
+        authorized_ids=("id1", "id2", "id3"),
+        config_hash=config.canonical_config_hash(),
+    )
     auth_hash = auth.compute_authorization_hash()
-
-    # Inject interrupted attempt on id2
     journal.try_atomic_claim("exp1", "id2", auth_hash, "op_dead")
     journal.write_state_atomic(
         "id2",
@@ -607,18 +642,22 @@ def test_l8_outcome_unknown_halts_subsequent_samples(clean_journal_dir: str) -> 
         operation_id="op_dead",
         attempt_count=1,
     )
-
     wire = get_authoritative_h2b_wire_descriptor()
     q = ContextRelevanceQuestionContractV1()
     executor = ContextRelevanceLiveDiagnosticExecutor(
-        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+        auth, q, wire, journal,
+        current_candidate_sha=auth.live_contract_revision,
+        config=config,
+        owner_runtime_authorization_granted=True,
     )
-    p1 = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
-    p2 = _make_dummy_packet(sample_id="s2", semantic_input_id="id2")
-    p3 = _make_dummy_packet(sample_id="s3", semantic_input_id="id3")
-
-    results = executor.execute_batch([p1, p2, p3], "op_batch", "exp1")
-    assert len(results) == 3
+    packets = [
+        _make_dummy_packet("s1", "id1"),
+        _make_dummy_packet("s2", "id2"),
+        _make_dummy_packet("s3", "id3"),
+    ]
+    results = executor.execute_live_batch(
+        packets, "op_batch", "exp1", transport_handler=_good_transport
+    )
     assert results[0].status == DiagnosticOutcomeStatus.OBSERVED_OK
     assert results[1].status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN
     assert results[2].status == DiagnosticOutcomeStatus.NOT_SENT
@@ -739,12 +778,15 @@ def test_l15_risk_contract_cannot_substitute_relevance_contract() -> None:
 # REAL PROVIDER CALLS = 0, REAL NOUL CALLS = 0, API KEY SECRET READS = 0
 # ===========================================================================
 
-def _make_test_config(endpoint_host: str = "diagnostic.provider.internal") -> HostedProviderConfigV1:
-    """Helper: build a test HostedProviderConfigV1 (no real secrets read)."""
+def _make_test_config(
+    endpoint_host: str = "diagnostic.provider.internal",
+    max_canary_quota: int = 50,
+) -> HostedProviderConfigV1:
+    """Build private-config-shaped test metadata without reading a real secret."""
     return HostedProviderConfigV1(
         endpoint_origin=f"https://{endpoint_host}",
         api_key_env_var_name="TEST_DIAG_API_KEY",
-        max_canary_quota=50,
+        max_canary_quota=max_canary_quota,
         allowed_hosts_whitelist=(endpoint_host,),
     )
 
@@ -759,10 +801,14 @@ def _make_live_executor(
     q_hash: str | None = None,
     root_hash: str | None = None,
     ns_hash: str | None = None,
+    auth_config_hash: str | None = None,
+    auth_endpoint_host: str | None = None,
 ) -> ContextRelevanceLiveDiagnosticExecutor:
-    """Helper: build a ContextRelevanceLiveDiagnosticExecutor for F tests."""
+    """Build a live executor with authorization bound to its test config."""
     wire = get_authoritative_h2b_wire_descriptor()
     q_contract = ContextRelevanceQuestionContractV1()
+    effective_config = config if config is not None else _make_test_config()
+    endpoint_host = auth_endpoint_host or effective_config.allowed_hosts_whitelist[0]
     auth = ContextRelevanceDiagnosticAuthorizationV1(
         live_contract_revision=candidate_sha,
         sample_source_revision="1a82954e0ddcf90427bbad3dd36dfbea732f1f4e",
@@ -771,7 +817,8 @@ def _make_live_executor(
         question_contract_hash=q_hash or q_contract.contract_hash,
         provider_state_schema_hash=ContextRelevanceProviderStateV1.compute_schema_hash(),
         wire_contract_hash=wire_hash or wire.canonical_wire_hash(),
-        endpoint_host="diagnostic.provider.internal",
+        config_hash=auth_config_hash or effective_config.canonical_config_hash(),
+        endpoint_host=endpoint_host,
         journal_root_resolved_hash=root_hash or journal.get_root_resolved_hash(),
         journal_namespace_hash=ns_hash or journal.get_namespace_hash(),
         authorized_semantic_input_ids=authorized_ids,
@@ -779,9 +826,11 @@ def _make_live_executor(
         max_calls=len(authorized_ids),
         diagnostic_packet_hash="d3120e10f83a80da9e84ed5ec4e13064a6af160fb53d6b00f8fa0f304125ea99",
     )
-    effective_config = config if config is not None else _make_test_config()
     return ContextRelevanceLiveDiagnosticExecutor(
-        auth, q_contract, wire, journal,
+        auth,
+        q_contract,
+        wire,
+        journal,
         current_candidate_sha=candidate_sha,
         config=effective_config,
         owner_runtime_authorization_granted=owner_authorized,
@@ -1033,50 +1082,52 @@ def test_f9_timeout_outcome_unknown_stops_batch(clean_journal_dir: str, monkeypa
 # F10: 4xx response → OBSERVED_CLIENT_FAILURE, no retry
 # ---------------------------------------------------------------------------
 
-def test_f10_4xx_observed_client_failure_no_retry(clean_journal_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """F10: transport returns client-failure indicator → OBSERVED_CLIENT_FAILURE, no retry."""
+def test_f10_4xx_observed_client_failure_no_retry(
+    clean_journal_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F10: a definitive HTTP 4xx is OBSERVED_CLIENT_FAILURE with no retry."""
     monkeypatch.setenv("TEST_DIAG_API_KEY", "test-key-value")
     journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
     executor = _make_live_executor(journal, authorized_ids=("id1",))
     packet = _make_dummy_packet("s1", "id1")
+    calls = [0]
 
-    call_count = [0]
+    def transport(req: dict) -> DiagnosticTransportResponse:
+        calls[0] += 1
+        return DiagnosticTransportResponse(status_code=429, raw_body=b'{"error":"rate"}')
 
-    def client_failure_transport(req: dict) -> dict:
-        call_count[0] += 1
-        raise RuntimeError("client_error_4xx")  # Simulate via transport raising; executor maps to OUTCOME_UNKNOWN
-
-    # Note: fake transport exceptions map to OUTCOME_UNKNOWN in execute_live_sample.
-    # To test 4xx properly we use the response validation path — return a response that will fail model check.
-    def bad_model_transport(req: dict) -> dict:
-        call_count[0] += 1
-        return {"model": "", "answers": {"decision": {"type": "noul", "noul": 0.5}}}
-
-    result = executor.execute_live_sample(packet, "op1", "exp1", transport_handler=bad_model_transport)
-    assert result.status == DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE
-    assert call_count[0] == 1, "No retry: exactly 1 transport call"
-    assert "Missing or invalid model identifier" in (result.error_message or "")
+    result = executor.execute_live_sample(packet, "op1", "exp1", transport_handler=transport)
+    assert result.status == DiagnosticOutcomeStatus.OBSERVED_CLIENT_FAILURE
+    assert result.error_message == "HTTP 429"
+    assert calls[0] == 1
+    assert executor.physical_network_attempts == 1
 
 
 # ---------------------------------------------------------------------------
 # F11: 5xx response → OBSERVED_PROVIDER_FAILURE, no retry
 # ---------------------------------------------------------------------------
 
-def test_f11_5xx_observed_provider_failure_no_retry(clean_journal_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """F11: transport returns missing answers.decision → OBSERVED_PROVIDER_FAILURE, no retry."""
+def test_f11_5xx_observed_provider_failure_no_retry(
+    clean_journal_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F11: a definitive HTTP 5xx is OBSERVED_PROVIDER_FAILURE with no retry."""
     monkeypatch.setenv("TEST_DIAG_API_KEY", "test-key-value")
     journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
     executor = _make_live_executor(journal, authorized_ids=("id1",))
     packet = _make_dummy_packet("s1", "id1")
-    call_count = [0]
+    calls = [0]
 
-    def no_answers_transport(req: dict) -> dict:
-        call_count[0] += 1
-        return {"model": "jev-latest", "answers": {}}  # missing 'decision'
+    def transport(req: dict) -> DiagnosticTransportResponse:
+        calls[0] += 1
+        return DiagnosticTransportResponse(status_code=503, raw_body=b'{"error":"unavailable"}')
 
-    result = executor.execute_live_sample(packet, "op1", "exp1", transport_handler=no_answers_transport)
+    result = executor.execute_live_sample(packet, "op1", "exp1", transport_handler=transport)
     assert result.status == DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE
-    assert call_count[0] == 1, "No retry"
+    assert result.error_message == "HTTP 503"
+    assert calls[0] == 1
+    assert executor.physical_network_attempts == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1116,22 +1167,28 @@ def test_f13_duplicate_json_key_provider_failure(clean_journal_dir: str, monkeyp
 # F14: oversized response → OBSERVED_PROVIDER_FAILURE (via bounded 1MB check)
 # ---------------------------------------------------------------------------
 
-def test_f14_oversized_response_provider_failure(clean_journal_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """F14: transport returning oversized response → OBSERVED_PROVIDER_FAILURE via response size check."""
+def test_f14_oversized_response_provider_failure(
+    clean_journal_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F14: a raw body larger than 1 MiB is rejected before JSON parsing."""
     monkeypatch.setenv("TEST_DIAG_API_KEY", "test-key-value")
     journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
     executor = _make_live_executor(journal, authorized_ids=("id1",))
     packet = _make_dummy_packet("s1", "id1")
+    calls = [0]
 
-    # Transport returns a response that will fail validation (missing model)
-    # The 1MB bound is enforced in the real HTTPS path only; in fake transport we test
-    # via returning invalid response structure
-    def missing_answers_transport(req: dict) -> dict:
-        return {"model": "jev-latest"}  # missing answers entirely
+    def transport(req: dict) -> DiagnosticTransportResponse:
+        calls[0] += 1
+        return DiagnosticTransportResponse(
+            status_code=200,
+            raw_body=b"x" * (1_048_576 + 1),
+        )
 
-    result = executor.execute_live_sample(packet, "op1", "exp1", transport_handler=missing_answers_transport)
+    result = executor.execute_live_sample(packet, "op1", "exp1", transport_handler=transport)
     assert result.status == DiagnosticOutcomeStatus.OBSERVED_PROVIDER_FAILURE
-    assert "answers.decision" in (result.error_message or "")
+    assert "exceeded 1MB bound" in (result.error_message or "")
+    assert calls[0] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1295,3 +1352,184 @@ def test_f20_zero_external_calls_zero_secret_reads(clean_journal_dir: str, monke
     assert executor.physical_network_attempts == 0, "REAL PROVIDER CALLS MUST BE 0"
     assert executor.api_key_reads == 0, "API KEY SECRET READS MUST BE 0"
     assert executor.total_claims_consumed == 0, "No authorization consumed in preflight"
+
+
+# ===========================================================================
+# Runtime authorization binding regressions
+# ===========================================================================
+
+def test_r1_config_hash_mismatch_has_zero_effects(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(
+        journal, authorized_ids=("id1",), auth_config_hash="0" * 64
+    )
+    packet = _make_dummy_packet("s1", "id1")
+    ready, reason = executor.preflight_live_batch([packet])
+    assert not ready
+    assert "CONFIG_HASH_MISMATCH" in (reason or "")
+    assert os.listdir(journal.journal_dir) == []
+    assert executor.api_key_reads == 0
+    assert executor.physical_network_attempts == 0
+
+
+def test_r2_endpoint_host_mismatch_has_zero_effects(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    config = _make_test_config(endpoint_host="actual.provider.internal")
+    executor = _make_live_executor(
+        journal,
+        authorized_ids=("id1",),
+        config=config,
+        auth_endpoint_host="authorized.provider.internal",
+    )
+    ready, reason = executor.preflight_live_batch([_make_dummy_packet("s1", "id1")])
+    assert not ready
+    assert "ENDPOINT_HOST_MISMATCH" in (reason or "")
+    assert os.listdir(journal.journal_dir) == []
+
+
+def test_r3_quota_25_against_quota_1_fails_before_claim(clean_journal_dir: str) -> None:
+    ids = tuple(f"id{i:02d}" for i in range(25))
+    packets = [_make_dummy_packet(f"s{i:02d}", sid) for i, sid in enumerate(ids)]
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(
+        journal,
+        authorized_ids=ids,
+        config=_make_test_config(max_canary_quota=1),
+    )
+    ready, reason = executor.preflight_live_batch(packets)
+    assert not ready
+    assert "QUOTA_EXCEEDED" in (reason or "")
+    assert os.listdir(journal.journal_dir) == []
+    assert executor.api_key_reads == 0
+    assert executor.physical_network_attempts == 0
+
+
+def test_r4_exact_25_with_quota_25_is_preflight_eligible(clean_journal_dir: str) -> None:
+    ids = tuple(f"id{i:02d}" for i in range(25))
+    packets = [_make_dummy_packet(f"s{i:02d}", sid) for i, sid in enumerate(ids)]
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(
+        journal,
+        authorized_ids=ids,
+        config=_make_test_config(max_canary_quota=25),
+    )
+    ready, reason = executor.preflight_live_batch(packets)
+    assert ready
+    assert reason is None
+    assert os.listdir(journal.journal_dir) == []
+
+
+def test_r5_owner_auth_missing_creates_no_batch_claim(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(
+        journal, authorized_ids=("id1",), owner_authorized=False
+    )
+    results = executor.execute_live_batch(
+        [_make_dummy_packet("s1", "id1")],
+        "op",
+        "exp",
+        transport_handler=_good_transport,
+    )
+    assert results[0].status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "OWNER_AUTHORIZATION_NOT_GRANTED" in (results[0].error_message or "")
+    assert os.listdir(journal.journal_dir) == []
+
+
+def test_r6_config_missing_creates_no_batch_claim(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    auth = ContextRelevanceDiagnosticAuthorizationV1(
+        live_contract_revision="1" * 40,
+        sample_source_revision="2" * 40,
+        fixture_hash="3" * 64,
+        diagnostic_sample_hash="4" * 64,
+        question_contract_hash=q.contract_hash,
+        provider_state_schema_hash=ContextRelevanceProviderStateV1.compute_schema_hash(),
+        wire_contract_hash=wire.canonical_wire_hash(),
+        config_hash="5" * 64,
+        endpoint_host="diagnostic.provider.internal",
+        authorized_semantic_input_ids=("id1",),
+        journal_root_resolved_hash=journal.get_root_resolved_hash(),
+        journal_namespace_hash=journal.get_namespace_hash(),
+        max_calls=1,
+    )
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal,
+        current_candidate_sha="1" * 40,
+        config=None,
+        owner_runtime_authorization_granted=True,
+    )
+    results = executor.execute_live_batch(
+        [_make_dummy_packet("s1", "id1")],
+        "op",
+        "exp",
+        transport_handler=_good_transport,
+    )
+    assert results[0].status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "PRIVATE_CONFIG_UNAVAILABLE" in (results[0].error_message or "")
+    assert os.listdir(journal.journal_dir) == []
+
+
+def test_r7_subset_batch_creates_no_claim(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(journal, authorized_ids=("id1", "id2"))
+    results = executor.execute_live_batch(
+        [_make_dummy_packet("s1", "id1")],
+        "op",
+        "exp",
+        transport_handler=_good_transport,
+    )
+    assert results[0].status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "EXACT_BATCH_REQUIRED" in (results[0].error_message or "")
+    assert os.listdir(journal.journal_dir) == []
+
+
+def test_r8_duplicate_semantic_id_creates_no_claim(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(journal, authorized_ids=("id1", "id2"))
+    packets = [
+        _make_dummy_packet("s1", "id1"),
+        _make_dummy_packet("s2", "id1"),
+    ]
+    results = executor.execute_live_batch(
+        packets, "op", "exp", transport_handler=_good_transport
+    )
+    assert all(r.status == DiagnosticOutcomeStatus.NOT_SENT for r in results)
+    assert "DUPLICATE_SEMANTIC_INPUT_ID" in (results[0].error_message or "")
+    assert os.listdir(journal.journal_dir) == []
+
+
+def test_r9_unauthorized_replacement_creates_no_claim(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    executor = _make_live_executor(journal, authorized_ids=("id1", "id2"))
+    packets = [
+        _make_dummy_packet("s1", "id1"),
+        _make_dummy_packet("s2", "idX"),
+    ]
+    results = executor.execute_live_batch(
+        packets, "op", "exp", transport_handler=_good_transport
+    )
+    assert all(r.status == DiagnosticOutcomeStatus.NOT_SENT for r in results)
+    assert "AUTHORIZED_SET_MISMATCH" in (results[0].error_message or "")
+    assert os.listdir(journal.journal_dir) == []
+
+
+def test_r10_legacy_zero_call_repeated_does_not_consume_claims(clean_journal_dir: str) -> None:
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, authorized_ids=("id1",))
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet("s1", "id1")
+    first = executor.execute_sample(packet, "op1", "exp")
+    second = executor.execute_sample(packet, "op2", "exp")
+    assert first.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert second.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert first.error_message == "ZERO_CALL_PREFLIGHT_READY_NO_EFFECT"
+    assert second.error_message == "ZERO_CALL_PREFLIGHT_READY_NO_EFFECT"
+    assert os.listdir(journal.journal_dir) == []
+    assert executor.api_key_reads == 0
+    assert executor.physical_network_attempts == 0
