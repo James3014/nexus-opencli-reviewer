@@ -198,7 +198,7 @@ class MockRiskModelAdapter:
 
     def __init__(
         self,
-        fixed_probability: float = 0.05,
+        fixed_probability: float,
         simulate_status: ProviderCallStatus = ProviderCallStatus.OK,
     ) -> None:
         if (
