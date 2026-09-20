@@ -6,6 +6,7 @@ import pytest
 from reviewer.context_economics.fixtures import SessionFixtureGenerator
 from reviewer.context_economics.models import (
     AnchorType,
+    ArchitectureId,
     CacheEconomicsV1,
     ContextSegmentV1,
     CriticalAnchorV1,
@@ -22,6 +23,7 @@ from reviewer.context_economics.simulation import (
     ArchitectureRunResult,
     ThrashingDetector,
     evaluate_semantic_value,
+    generate_wave1_live_authorization_proposal,
     run_session_simulation,
 )
 
@@ -197,20 +199,37 @@ def test_m1_negative_control_semantic_ranker_cannot_hide_protected_evidence() ->
 
 
 def test_m2_negative_control_matched_budget_invariant() -> None:
-    """M2: In simulation, both deterministic pruning and semantic retroactive use exact same budget."""
-    gen = SessionFixtureGenerator(seed="TEST_SEED")
+    """M2: In simulation, both deterministic pruning and semantic retroactive must enforce the exact matched budget.
+
+    If one architecture were evaluated with 90K and the other with 60K, the harness must detect
+    the budget asymmetry.
+    """
+    gen = SessionFixtureGenerator(seed="TEST_SEED_M2")
     turns, anchors, _ = gen.generate_1000_turn_session()
 
-    res_det = run_session_simulation(turns[:50], anchors, "deterministic_pruning", visible_tool_budget_tokens=30_000)
-    res_sem = run_session_simulation(
+    # Matched run with 60K budget
+    res_det_60k = run_session_simulation(turns[:50], anchors, ArchitectureId.DETERMINISTIC_PRUNING, visible_tool_budget_tokens=60_000)
+    res_sem_60k = run_session_simulation(
         turns[:50],
         anchors,
-        "semantic_retroactive",
-        visible_tool_budget_tokens=30_000,
+        ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        visible_tool_budget_tokens=60_000,
         synthetic_ranker_mode=SyntheticRankerMode.PERFECTISH,
     )
-    # The budget constraint applied to non-protected tools is identical (30,000)
-    assert res_det.window_class == res_sem.window_class
+    # Both observe exact same configured visible tool budget
+    assert res_det_60k.visible_tool_budget_tokens == res_sem_60k.visible_tool_budget_tokens == 60_000
+    assert res_det_60k.budget_violation_count == 0
+    assert res_sem_60k.budget_violation_count == 0
+
+    # Asymmetric run: if semantic were granted 90K while baseline has 60K, budgets do not match
+    res_sem_90k = run_session_simulation(
+        turns[:50],
+        anchors,
+        ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        visible_tool_budget_tokens=90_000,
+        synthetic_ranker_mode=SyntheticRankerMode.PERFECTISH,
+    )
+    assert res_det_60k.visible_tool_budget_tokens != res_sem_90k.visible_tool_budget_tokens
 
 
 def test_m3_negative_control_hidden_store_loss_detected() -> None:
@@ -222,18 +241,37 @@ def test_m3_negative_control_hidden_store_loss_detected() -> None:
 
 
 def test_m4_negative_control_missed_recall_fails_checkpoint() -> None:
-    """M4: If required anchor is not in context and not recalled, checkpoint fails."""
-    # Create turn with checkpoint requiring non-existent anchor
-    chk = TaskCheckpointV1("chk-1", 1, ("missing-anchor-id",), "verify anchor")
-    turn = SessionTurnV1(
+    """M4: When an anchor is hidden at write time and not recalled when needed, checkpoint and availability fail."""
+    # Segment with critical anchor hidden by write-time sieve (relevance = 0.1, not protected)
+    aid = "aid-test-m4"
+    seg = ContextSegmentV1(
+        segment_id="seg-m4",
         turn_id=1,
-        user_prompt="p",
-        segments=[_sample_segment("log")],
-        task_checkpoint=chk,
-        recall_queries=[],  # Did not attempt recall
+        source_type=SourceType.TOOL_RESULT,
+        token_count=100,
+        created_at_turn=1,
+        content_class="test",
+        content="some non-protected output containing anchor",
+        relevance_ground_truth=0.1,
+        critical_anchor_ids=(aid,),
+        has_hard_protected_anchor=False,
     )
-    res = run_session_simulation([turn], [], "deterministic_pruning")
+    chk = TaskCheckpointV1("chk-m4", 2, (aid,), "verify anchor aid-test-m4")
+    turn1 = SessionTurnV1(1, "task", [seg])
+    # Turn 2 needs the anchor but recall is disallowed or fails
+    turn2 = SessionTurnV1(2, "task", [_sample_segment("turn 2 log")], task_checkpoint=chk, recall_queries=[aid])
+
+    res = run_session_simulation(
+        [turn1, turn2],
+        [],
+        ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
+        synthetic_ranker_mode=SyntheticRankerMode.PERFECTISH,
+        allow_recall_execution=False,  # Disallow recall -> simulated missed recall
+    )
     assert res.task_success_rate == 0.0
+    assert res.critical_information_available_rate == 0.0
+    assert res.missed_recall == 1
+    assert res.quality_qualified is False
 
 
 def test_m5_negative_control_cache_rewrite_invalidation_recorded() -> None:
@@ -317,3 +355,60 @@ def test_canonical_fixture_hash_sensitivity() -> None:
     )
     mutated_hash = compute_canonical_fixture_hash(mutated_turns, anchors1, "SEED_ALPHA")
     assert mutated_hash != hash1
+
+
+def test_window_overflow_early_break_and_censorship() -> None:
+    """Test that window overflow halts session execution accurately and flags incomplete session."""
+    # Run NO_TRIMMING with a small window of 5,000 tokens
+    gen = SessionFixtureGenerator(seed="TEST_OVERFLOW")
+    turns, anchors, _ = gen.generate_1000_turn_session()
+    res = run_session_simulation(
+        turns,
+        anchors,
+        ArchitectureId.NO_TRIMMING,
+        window_size_tokens=5_000,
+    )
+    assert res.window_overflow is True
+    assert res.session_completed is False
+    assert res.completed_turns < len(turns)
+    assert res.first_overflow_turn is not None
+    assert res.first_overflow_turn == res.completed_turns
+
+
+def test_proposal_fails_closed_without_semantic_inputs() -> None:
+    """Test that live authorization proposal generation fails closed if no semantic inputs were observed."""
+    gen = SessionFixtureGenerator(seed="TEST_NO_INPUTS")
+    turns, anchors, fhash = gen.generate_1000_turn_session()
+    res = run_session_simulation(turns[:5], anchors, ArchitectureId.DETERMINISTIC_PRUNING)
+
+    with pytest.raises(ValueError, match="LIVE_AUTHORIZATION_PROPOSAL_BLOCKED"):
+        generate_wave1_live_authorization_proposal("dummy_sha", fhash, [res])
+
+
+def test_proposal_stratified_diagnostic_live_plan_and_hash_recomputation() -> None:
+    """Test that proposal contains MINIMUM_DIAGNOSTIC_LIVE_PLAN and proposal_hash verifies correctly."""
+    gen = SessionFixtureGenerator(seed="TEST_DIAG_PLAN")
+    turns, anchors, fhash = gen.generate_1000_turn_session()
+    res_sem = run_session_simulation(
+        turns[:30],
+        anchors,
+        ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
+        synthetic_ranker_mode=SyntheticRankerMode.PERFECTISH,
+    )
+    proposal = generate_wave1_live_authorization_proposal("c6bda4d97384cedfb3ea2150cd7a9754c1a4d834", fhash, [res_sem])
+
+    assert "minimum_diagnostic_live_plan" in proposal
+    assert "full_replay_required_calls" in proposal
+    assert proposal["full_replay_required_calls"] == proposal["deduplicated_total_calls"]
+    diag_plan = proposal["minimum_diagnostic_live_plan"]
+    assert diag_plan["total_diagnostic_calls"] > 0
+    assert len(diag_plan["strata"]) == 5
+
+    # Verify proposal_hash recomputation
+    import hashlib
+    import json
+    p_copy = dict(proposal)
+    claimed_hash = p_copy.pop("proposal_hash")
+    p_bytes = json.dumps(p_copy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    expected_hash = hashlib.sha256(p_bytes).hexdigest()
+    assert claimed_hash == expected_hash

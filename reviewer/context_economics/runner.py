@@ -9,7 +9,7 @@ from __future__ import annotations
 import subprocess
 
 from reviewer.context_economics.fixtures import SessionFixtureGenerator
-from reviewer.context_economics.models import SyntheticRankerMode
+from reviewer.context_economics.models import ArchitectureId, SyntheticRankerMode
 from reviewer.context_economics.simulation import (
     ArchitectureRunResult,
     evaluate_semantic_value,
@@ -32,15 +32,15 @@ def run_full_wave1_matrix(candidate_sha: str | None = None) -> tuple[list[Archit
     turns, anchors, fixture_hash = generator.generate_1000_turn_session()
 
     architectures = [
-        ("No trimming", "no_trimming", None),
-        ("Host summary + retrieval", "host_summary", None),
-        ("Deterministic pruning", "deterministic_pruning", None),
-        ("Semantic retroactive PERFECTISH", "semantic_retroactive", SyntheticRankerMode.PERFECTISH),
-        ("Semantic retroactive NOISY", "semantic_retroactive", SyntheticRankerMode.NOISY),
-        ("Semantic retroactive NO_VALUE", "semantic_retroactive", SyntheticRankerMode.NO_VALUE),
-        ("Semantic write-time PERFECTISH", "semantic_write_time", SyntheticRankerMode.PERFECTISH),
-        ("Semantic write-time NOISY", "semantic_write_time", SyntheticRankerMode.NOISY),
-        ("Semantic write-time NO_VALUE", "semantic_write_time", SyntheticRankerMode.NO_VALUE),
+        ("No trimming", ArchitectureId.NO_TRIMMING, None),
+        ("Host summary + retrieval", ArchitectureId.HOST_SUMMARY, None),
+        ("Deterministic pruning", ArchitectureId.DETERMINISTIC_PRUNING, None),
+        ("Semantic retroactive PERFECTISH", ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH, SyntheticRankerMode.PERFECTISH),
+        ("Semantic retroactive NOISY", ArchitectureId.SEMANTIC_RETROACTIVE_NOISY, SyntheticRankerMode.NOISY),
+        ("Semantic retroactive NO_VALUE", ArchitectureId.SEMANTIC_RETROACTIVE_NO_VALUE, SyntheticRankerMode.NO_VALUE),
+        ("Semantic write-time PERFECTISH", ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH, SyntheticRankerMode.PERFECTISH),
+        ("Semantic write-time NOISY", ArchitectureId.SEMANTIC_WRITE_TIME_NOISY, SyntheticRankerMode.NOISY),
+        ("Semantic write-time NO_VALUE", ArchitectureId.SEMANTIC_WRITE_TIME_NO_VALUE, SyntheticRankerMode.NO_VALUE),
     ]
 
     results: list[ArchitectureRunResult] = []
@@ -57,14 +57,22 @@ def run_full_wave1_matrix(candidate_sha: str | None = None) -> tuple[list[Archit
             synthetic_ranker_mode=ranker_mode,
         )
         res.architecture_name = display_name
-        if arch_key == "deterministic_pruning":
+        if arch_key == ArchitectureId.DETERMINISTIC_PRUNING:
             det_200k_res = res
         results.append(res)
 
     # Evaluate semantic value for 200K
     assert det_200k_res is not None
+    semantic_arch_ids = {
+        ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        ArchitectureId.SEMANTIC_RETROACTIVE_NOISY,
+        ArchitectureId.SEMANTIC_RETROACTIVE_NO_VALUE,
+        ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
+        ArchitectureId.SEMANTIC_WRITE_TIME_NOISY,
+        ArchitectureId.SEMANTIC_WRITE_TIME_NO_VALUE,
+    }
     for r in results:
-        if r.window_class == "~200K" and "Semantic" in r.architecture_name:
+        if r.window_class == "~200K" and r.architecture_id in semantic_arch_ids:
             r.semantic_value_status = evaluate_semantic_value(r, det_200k_res)
 
     # Run for 1M window
@@ -80,14 +88,14 @@ def run_full_wave1_matrix(candidate_sha: str | None = None) -> tuple[list[Archit
             synthetic_ranker_mode=ranker_mode,
         )
         res.architecture_name = display_name
-        if arch_key == "deterministic_pruning":
+        if arch_key == ArchitectureId.DETERMINISTIC_PRUNING:
             det_1m_res = res
         results.append(res)
 
     # Evaluate semantic value for 1M
     assert det_1m_res is not None
     for r in results[results_1m_start:]:
-        if r.window_class == "~1M" and "Semantic" in r.architecture_name:
+        if r.window_class == "~1M" and r.architecture_id in semantic_arch_ids:
             r.semantic_value_status = evaluate_semantic_value(r, det_1m_res)
 
     # Generate proposal

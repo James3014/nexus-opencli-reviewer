@@ -34,6 +34,18 @@ class AnchorProtectionClass(str, Enum):
     RECALL_REQUIRED = "RECALL_REQUIRED"
 
 
+class ArchitectureId(str, Enum):
+    NO_TRIMMING = "NO_TRIMMING"
+    HOST_SUMMARY = "HOST_SUMMARY"
+    DETERMINISTIC_PRUNING = "DETERMINISTIC_PRUNING"
+    SEMANTIC_RETROACTIVE_PERFECTISH = "SEMANTIC_RETROACTIVE_PERFECTISH"
+    SEMANTIC_RETROACTIVE_NOISY = "SEMANTIC_RETROACTIVE_NOISY"
+    SEMANTIC_RETROACTIVE_NO_VALUE = "SEMANTIC_RETROACTIVE_NO_VALUE"
+    SEMANTIC_WRITE_TIME_PERFECTISH = "SEMANTIC_WRITE_TIME_PERFECTISH"
+    SEMANTIC_WRITE_TIME_NOISY = "SEMANTIC_WRITE_TIME_NOISY"
+    SEMANTIC_WRITE_TIME_NO_VALUE = "SEMANTIC_WRITE_TIME_NO_VALUE"
+
+
 class AnchorType(str, Enum):
     EXACT_FILE_PATH = "EXACT_FILE_PATH"
     ERROR_STRING = "ERROR_STRING"
@@ -313,11 +325,13 @@ class TotalSessionCostV1:
     rate_generation_output_per_k: float = 3.0
     rate_semantic_call_fixed: float = 0.5
     rate_semantic_token_per_k: float = 0.8
+    rate_semantic_output_per_k: float = 2.4
     rate_compaction_call_fixed: float = 2.0
     rate_recall_call_fixed: float = 0.2
     rate_cache_read_per_k: float = 0.1
     rate_cache_write_per_k: float = 1.25
     rate_cache_miss_penalty_per_k: float = 0.5
+    rate_fallback_call_fixed: float = 1.0
 
     def compute_total_cost(self) -> float:
         cost = (
@@ -325,11 +339,13 @@ class TotalSessionCostV1:
             + (self.generation_output_tokens / 1000.0) * self.rate_generation_output_per_k
             + self.semantic_decision_calls * self.rate_semantic_call_fixed
             + (self.semantic_decision_input_tokens / 1000.0) * self.rate_semantic_token_per_k
+            + (self.semantic_decision_output_tokens / 1000.0) * self.rate_semantic_output_per_k
             + self.compaction_calls * self.rate_compaction_call_fixed
             + self.recall_calls * self.rate_recall_call_fixed
             + (self.cache_read_tokens / 1000.0) * self.rate_cache_read_per_k
             + (self.cache_write_tokens / 1000.0) * self.rate_cache_write_per_k
             + (self.cache_miss_penalty_tokens / 1000.0) * self.rate_cache_miss_penalty_per_k
+            + self.fallback_calls * self.rate_fallback_call_fixed
         )
         return round(cost, 2)
 

@@ -17,9 +17,11 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
-from typing import Sequence
+from typing import Any, Sequence
 
 from reviewer.context_economics.models import (
+    AnchorProtectionClass,
+    ArchitectureId,
     CacheEconomicsV1,
     ContextRelevanceRanker,
     ContextSegmentV1,
@@ -41,14 +43,18 @@ class ArchitectureRunResult:
     """Summary metrics of an architecture execution run."""
 
     architecture_name: str
+    architecture_id: ArchitectureId
     window_class: str  # "~200K" or "~1M"
     task_success_rate: float  # 0.0 to 1.0
     critical_anchor_recall: float  # 0.0 to 1.0
+    critical_information_available_rate: float  # 0.0 to 1.0
     final_context_tokens: int
     peak_context_tokens: int
     untouchable_context_floor: int
     window_overflow: bool
     first_overflow_turn: int | None
+    completed_turns: int
+    session_completed: bool
     compaction_count: int
     compaction_thrashing: bool
     structural_hard_stop: bool
@@ -79,6 +85,7 @@ class ArchitectureRunResult:
     semantic_decision_calls: int
     semantic_unique_input_count: int
     semantic_cache_hits: int
+    semantic_input_identities: list[str] = field(default_factory=list)
 
     notes: str = ""
 
@@ -104,8 +111,9 @@ class ThrashingDetector:
 def run_session_simulation(
     turns: list[SessionTurnV1],
     anchors: list[CriticalAnchorV1],
-    architecture_name: str,
+    architecture_id: ArchitectureId | str,
     *,
+    architecture_name: str | None = None,
     window_size_tokens: int = 200_000,
     visible_tool_budget_tokens: int = 60_000,
     compaction_trigger_fraction: float = 0.75,  # Trigger when context >= 75% of window
@@ -113,6 +121,33 @@ def run_session_simulation(
     allow_recall_execution: bool = True,
 ) -> ArchitectureRunResult:
     """Execute a single architecture simulation through the long session."""
+    # Normalize architecture_id
+    if isinstance(architecture_id, str):
+        try:
+            arch_id = ArchitectureId(architecture_id.upper())
+        except ValueError:
+            # Match by substring or key
+            key_map = {
+                "no_trimming": ArchitectureId.NO_TRIMMING,
+                "host_summary": ArchitectureId.HOST_SUMMARY,
+                "deterministic_pruning": ArchitectureId.DETERMINISTIC_PRUNING,
+                "semantic_retroactive": ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+                "semantic_write_time": ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
+            }
+            if architecture_id in key_map:
+                base = key_map[architecture_id]
+                if synthetic_ranker_mode == SyntheticRankerMode.NOISY:
+                    arch_id = ArchitectureId(f"{base.value.replace('_PERFECTISH', '')}_NOISY")
+                elif synthetic_ranker_mode == SyntheticRankerMode.NO_VALUE:
+                    arch_id = ArchitectureId(f"{base.value.replace('_PERFECTISH', '')}_NO_VALUE")
+                else:
+                    arch_id = base
+            else:
+                arch_id = ArchitectureId(architecture_id)
+    else:
+        arch_id = architecture_id
+
+    display_name = architecture_name or arch_id.value
     window_label = "~200K" if window_size_tokens <= 250_000 else "~1M"
     compaction_trigger_tokens = int(window_size_tokens * compaction_trigger_fraction)
 
@@ -121,6 +156,10 @@ def run_session_simulation(
     thrashing_detector = ThrashingDetector()
 
     visible_segments: list[ContextSegmentV1] = []
+    visible_segment_ids: set[str] = set()
+    visible_anchor_counts: dict[str, int] = {}
+    current_context_tokens = 0
+    untouchable_floor = 0
     compaction_intervals: list[int] = []
     last_compaction_turn = 0
     compaction_count = 0
@@ -135,6 +174,7 @@ def run_session_simulation(
 
     semantic_decision_calls = 0
     seen_semantic_inputs: set[str] = set()
+    semantic_input_identities: list[str] = []
     semantic_cache_hits = 0
 
     max_visible_tool_tokens_observed = 0
@@ -143,28 +183,81 @@ def run_session_simulation(
     window_overflow = False
     first_overflow_turn: int | None = None
     structural_hard_stop = False
+    completed_turns = 0
+    session_completed = True
+    cumulative_generation_input_tokens = 0
+
+    # Availability tracking across all needed anchors
+    total_anchor_checks = 0
+    available_anchor_checks = 0
 
     floor_history: list[int] = []
+
+    def _add_segment(s: ContextSegmentV1) -> None:
+        nonlocal current_context_tokens, untouchable_floor
+        if s.segment_id in visible_segment_ids:
+            return
+        visible_segments.append(s)
+        visible_segment_ids.add(s.segment_id)
+        current_context_tokens += s.token_count
+        if deterministic_must_keep(s):
+            untouchable_floor += s.token_count
+        for aid in s.critical_anchor_ids:
+            visible_anchor_counts[aid] = visible_anchor_counts.get(aid, 0) + 1
+
+    def _reset_visible(segs: list[ContextSegmentV1]) -> None:
+        nonlocal current_context_tokens, untouchable_floor, visible_segments, visible_segment_ids, visible_anchor_counts
+        visible_segments = segs
+        visible_segment_ids = {s.segment_id for s in segs}
+        visible_anchor_counts = {}
+        current_context_tokens = 0
+        untouchable_floor = 0
+        for s in segs:
+            current_context_tokens += s.token_count
+            if deterministic_must_keep(s):
+                untouchable_floor += s.token_count
+            for aid in s.critical_anchor_ids:
+                visible_anchor_counts[aid] = visible_anchor_counts.get(aid, 0) + 1
+
+    is_write_time = arch_id in (
+        ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
+        ArchitectureId.SEMANTIC_WRITE_TIME_NOISY,
+        ArchitectureId.SEMANTIC_WRITE_TIME_NO_VALUE,
+    )
+    is_retroactive = arch_id in (
+        ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        ArchitectureId.SEMANTIC_RETROACTIVE_NOISY,
+        ArchitectureId.SEMANTIC_RETROACTIVE_NO_VALUE,
+    )
 
     ranker: SyntheticJevRanker | None = None
     if synthetic_ranker_mode is not None:
         ranker = SyntheticJevRanker(synthetic_ranker_mode)
+    elif is_write_time or is_retroactive:
+        # Infer mode from arch_id
+        if "NOISY" in arch_id.value:
+            ranker = SyntheticJevRanker(SyntheticRankerMode.NOISY)
+        elif "NO_VALUE" in arch_id.value:
+            ranker = SyntheticJevRanker(SyntheticRankerMode.NO_VALUE)
+        else:
+            ranker = SyntheticJevRanker(SyntheticRankerMode.PERFECTISH)
 
     for turn in turns:
         t_id = turn.turn_id
+        turn_visible_tokens_before = current_context_tokens
 
         # 1. Admission of incoming segments for this turn
         for seg in turn.segments:
             # Store in immutable/recall store unconditionally
             recall_store.put(seg)
 
-            if "write_time" in architecture_name:
-                # W1-D Write-Time Sieve
+            if is_write_time:
+                # Write-time sieve: deterministic_must_keep always protected
                 is_protected = deterministic_must_keep(seg)
                 if is_protected:
-                    visible_segments.append(seg)
-                else:
-                    # Semantic scoring
+                    _add_segment(seg)
+                elif seg.source_type == SourceType.TOOL_RESULT:
+                    # Non-protected tool result undergoes semantic scoring
                     assert ranker is not None
                     semantic_decision_calls += 1
                     inp_hash = ranker.compute_semantic_input_hash(turn.user_prompt, seg)
@@ -172,27 +265,25 @@ def run_session_simulation(
                         semantic_cache_hits += 1
                     else:
                         seen_semantic_inputs.add(inp_hash)
+                        semantic_input_identities.append(inp_hash)
 
                     score = ranker.score(turn.user_prompt, seg).relevance_score
                     if score >= 0.5:
-                        visible_segments.append(seg)
+                        _add_segment(seg)
                     else:
                         # Hidden at write time -> losslessly stored in recall store
-                        # Never enters prompt prefix -> 0 prefix invalidation!
                         pass
+                else:
+                    _add_segment(seg)
             else:
-                # Standard append (No trimming, Host summary, Deterministic pruning, Retroactive Jev)
-                visible_segments.append(seg)
+                _add_segment(seg)
 
         # 2. Simulated Recall Tool Execution
-        # If this turn needs specific anchors, simulator attempts context_recall
         if turn.recall_queries:
             for aid in turn.recall_queries:
                 recall_needed += 1
-                # Check if currently visible
-                is_visible = any(aid in s.critical_anchor_ids for s in visible_segments)
+                is_visible = visible_anchor_counts.get(aid, 0) > 0
                 if is_visible:
-                    # Already visible, no recall needed
                     pass
                 else:
                     if allow_recall_execution:
@@ -200,31 +291,35 @@ def run_session_simulation(
                         recalled_segs = recall_store.search_by_anchor(aid)
                         if recalled_segs:
                             for r_seg in recalled_segs:
-                                if r_seg not in visible_segments:
-                                    visible_segments.append(r_seg)
+                                _add_segment(r_seg)
                             recall_success += 1
                         else:
                             missed_recall += 1
                     else:
-                        # Recall disallowed / not attempted
                         missed_recall += 1
 
         # 3. Context Accounting, Peak Context, and Floor
-        current_context_tokens = sum(s.token_count for s in visible_segments)
         if current_context_tokens > peak_context_tokens:
             peak_context_tokens = current_context_tokens
 
+        # Check for window overflow
         if current_context_tokens >= window_size_tokens:
             window_overflow = True
             if first_overflow_turn is None:
                 first_overflow_turn = t_id
+            session_completed = False
+            completed_turns = t_id
+            cumulative_generation_input_tokens += current_context_tokens
+            break
 
-        untouchable_floor = sum(s.token_count for s in visible_segments if deterministic_must_keep(s))
+        cumulative_generation_input_tokens += current_context_tokens
+        completed_turns = t_id
+
         floor_history.append(untouchable_floor)
         if untouchable_floor >= compaction_trigger_tokens:
             structural_hard_stop = True
 
-        # Track visible tool budget invariant (budget applies to non-protected tools)
+        # Track visible tool budget invariant (budget applies ONLY to non-protected tool results)
         unprotected_tool_tokens = sum(
             s.token_count for s in visible_segments if s.source_type == SourceType.TOOL_RESULT and not deterministic_must_keep(s)
         )
@@ -232,19 +327,17 @@ def run_session_simulation(
             max_visible_tool_tokens_observed = unprotected_tool_tokens
 
         # 4. Cache Accounting for normal turn append
-        # Prefix remains stable if we only appended new visible tokens
-        turn_visible_tokens = sum(s.token_count for s in turn.segments if s in visible_segments)
+        turn_visible_tokens = current_context_tokens - turn_visible_tokens_before
         cached_read = max(0, current_context_tokens - turn_visible_tokens)
         cache_econ.cache_read_tokens += cached_read
         cache_econ.cache_write_tokens += turn_visible_tokens
 
         # 5. Compaction / Pruning Logic
         if current_context_tokens >= compaction_trigger_tokens:
-            if architecture_name == "no_trimming":
-                # No trimming does nothing
+            if arch_id == ArchitectureId.NO_TRIMMING:
                 pass
 
-            elif architecture_name == "host_summary":
+            elif arch_id == ArchitectureId.HOST_SUMMARY:
                 compaction_count += 1
                 if last_compaction_turn > 0:
                     compaction_intervals.append(t_id - last_compaction_turn)
@@ -252,8 +345,6 @@ def run_session_simulation(
 
                 cache_econ.record_invalidation(t_id, current_context_tokens)
 
-                # Simulated host summary: preserves hard protected evidence + recent 20 segments
-                # Any non-protected recall anchor not in recent 20 is summarized away and requires retrieval
                 protected_segs = [s for s in visible_segments if deterministic_must_keep(s)]
                 recent_segs = visible_segments[-20:]
                 summary_seg = ContextSegmentV1(
@@ -266,9 +357,10 @@ def run_session_simulation(
                     content="HOST_SUMMARY_SIMULATED: compressed prior session context.",
                     relevance_ground_truth=0.8,
                 )
-                visible_segments = list({s.segment_id: s for s in (protected_segs + [summary_seg] + recent_segs)}.values())
+                new_vis = list({s.segment_id: s for s in (protected_segs + [summary_seg] + recent_segs)}.values())
+                _reset_visible(new_vis)
 
-            elif architecture_name == "deterministic_pruning":
+            elif arch_id == ArchitectureId.DETERMINISTIC_PRUNING:
                 compaction_count += 1
                 if last_compaction_turn > 0:
                     compaction_intervals.append(t_id - last_compaction_turn)
@@ -276,8 +368,9 @@ def run_session_simulation(
 
                 cache_econ.record_invalidation(t_id, current_context_tokens)
 
-                protected = [s for s in visible_segments if deterministic_must_keep(s)]
-                tool_segs = [s for s in visible_segments if not deterministic_must_keep(s)]
+                # Keep protected segments and non-tool segments unconditionally; prune only non-protected tool results
+                protected_and_non_tool = [s for s in visible_segments if deterministic_must_keep(s) or s.source_type != SourceType.TOOL_RESULT]
+                tool_segs = [s for s in visible_segments if s.source_type == SourceType.TOOL_RESULT and not deterministic_must_keep(s)]
 
                 kept_tools: list[ContextSegmentV1] = []
                 acc = 0
@@ -287,9 +380,9 @@ def run_session_simulation(
                         acc += s.token_count
                     else:
                         break
-                visible_segments = protected + list(reversed(kept_tools))
+                _reset_visible(protected_and_non_tool + list(reversed(kept_tools)))
 
-            elif "semantic_retroactive" in architecture_name:
+            elif is_retroactive:
                 compaction_count += 1
                 if last_compaction_turn > 0:
                     compaction_intervals.append(t_id - last_compaction_turn)
@@ -297,18 +390,19 @@ def run_session_simulation(
 
                 cache_econ.record_invalidation(t_id, current_context_tokens)
 
-                protected = [s for s in visible_segments if deterministic_must_keep(s)]
-                unprotected = [s for s in visible_segments if not deterministic_must_keep(s)]
+                protected_and_non_tool = [s for s in visible_segments if deterministic_must_keep(s) or s.source_type != SourceType.TOOL_RESULT]
+                unprotected_tools = [s for s in visible_segments if s.source_type == SourceType.TOOL_RESULT and not deterministic_must_keep(s)]
 
                 assert ranker is not None
                 scored = []
-                for s in unprotected:
+                for s in unprotected_tools:
                     semantic_decision_calls += 1
                     inp_hash = ranker.compute_semantic_input_hash(turn.user_prompt, s)
                     if inp_hash in seen_semantic_inputs:
                         semantic_cache_hits += 1
                     else:
                         seen_semantic_inputs.add(inp_hash)
+                        semantic_input_identities.append(inp_hash)
                     score = ranker.score(turn.user_prompt, s).relevance_score
                     scored.append((score, s))
 
@@ -322,9 +416,9 @@ def run_session_simulation(
                         acc += s.token_count
                     else:
                         break
-                visible_segments = protected + kept_tools
+                _reset_visible(protected_and_non_tool + kept_tools)
 
-            elif "write_time" in architecture_name:
+            elif is_write_time:
                 compaction_count += 1
                 if last_compaction_turn > 0:
                     compaction_intervals.append(t_id - last_compaction_turn)
@@ -332,33 +426,28 @@ def run_session_simulation(
 
                 cache_econ.record_invalidation(t_id, current_context_tokens)
 
-                protected = [s for s in visible_segments if deterministic_must_keep(s)]
-                unprotected = [s for s in visible_segments if not deterministic_must_keep(s)]
+                protected_and_non_tool = [s for s in visible_segments if deterministic_must_keep(s) or s.source_type != SourceType.TOOL_RESULT]
+                unprotected_tools = [s for s in visible_segments if s.source_type == SourceType.TOOL_RESULT and not deterministic_must_keep(s)]
                 kept_tools = []
                 acc = 0
-                for s in reversed(unprotected):
+                for s in reversed(unprotected_tools):
                     if acc + s.token_count <= visible_tool_budget_tokens:
                         kept_tools.append(s)
                         acc += s.token_count
                     else:
                         break
-                visible_segments = protected + list(reversed(kept_tools))
+                _reset_visible(protected_and_non_tool + list(reversed(kept_tools)))
 
-        # Check budget violation after compaction
-        post_unprotected = sum(
-            s.token_count for s in visible_segments if s.source_type == SourceType.TOOL_RESULT and not deterministic_must_keep(s)
-        )
-        if post_unprotected > visible_tool_budget_tokens and current_context_tokens >= compaction_trigger_tokens:
-            budget_violation_count += 1
-
-        # 6. Checkpoint Evaluation at end of turn
+        # 6. Checkpoint Evaluation at end of turn (O(1) via visible_anchor_counts)
         if turn.task_checkpoint:
             total_checkpoints += 1
             all_reqs_met = True
             for req_aid in turn.task_checkpoint.required_anchor_ids:
-                if not any(req_aid in s.critical_anchor_ids for s in visible_segments):
+                total_anchor_checks += 1
+                if visible_anchor_counts.get(req_aid, 0) > 0:
+                    available_anchor_checks += 1
+                else:
                     all_reqs_met = False
-                    break
             if all_reqs_met:
                 checkpoint_success_count += 1
 
@@ -390,14 +479,15 @@ def run_session_simulation(
     # Metrics
     task_success_rate = checkpoint_success_count / total_checkpoints if total_checkpoints > 0 else 1.0
     critical_recall_rate = recall_success / recall_attempted if recall_attempted > 0 else 1.0
+    crit_info_rate = available_anchor_checks / total_anchor_checks if total_anchor_checks > 0 else 1.0
     final_tokens = sum(s.token_count for s in visible_segments)
     final_floor = sum(s.token_count for s in visible_segments if deterministic_must_keep(s))
     is_thrashing = thrashing_detector.is_thrashing(compaction_intervals)
 
-    # Cost Model Accounting
+    # Cost Model Accounting using cumulative generation input tokens
     cost_breakdown = TotalSessionCostV1(
-        generation_input_tokens=final_tokens,
-        generation_output_tokens=100 * len(turns),
+        generation_input_tokens=cumulative_generation_input_tokens,
+        generation_output_tokens=100 * completed_turns,
         semantic_decision_calls=semantic_decision_calls,
         semantic_decision_input_tokens=semantic_decision_calls * 250,
         semantic_decision_output_tokens=semantic_decision_calls * 10,
@@ -414,20 +504,24 @@ def run_session_simulation(
     cost_per_task = (
         round(est_cost / checkpoint_success_count, 2) if checkpoint_success_count > 0 else None
     )
-    cost_per_100 = round(est_cost / (len(turns) / 100.0), 2)
+    cost_per_100 = round(est_cost / (completed_turns / 100.0), 2) if completed_turns > 0 else 0.0
 
-    quality_qualified = (task_success_rate >= 0.95 and critical_recall_rate >= 0.95)
+    quality_qualified = (task_success_rate >= 0.95 and critical_recall_rate >= 0.95 and crit_info_rate >= 0.95)
 
     return ArchitectureRunResult(
-        architecture_name=architecture_name,
+        architecture_name=display_name,
+        architecture_id=arch_id,
         window_class=window_label,
         task_success_rate=round(task_success_rate, 4),
         critical_anchor_recall=round(critical_recall_rate, 4),
+        critical_information_available_rate=round(crit_info_rate, 4),
         final_context_tokens=final_tokens,
         peak_context_tokens=peak_context_tokens,
         untouchable_context_floor=final_floor,
         window_overflow=window_overflow,
         first_overflow_turn=first_overflow_turn,
+        completed_turns=completed_turns,
+        session_completed=session_completed,
         compaction_count=compaction_count,
         compaction_thrashing=is_thrashing,
         structural_hard_stop=structural_hard_stop,
@@ -452,6 +546,7 @@ def run_session_simulation(
         semantic_decision_calls=semantic_decision_calls,
         semantic_unique_input_count=len(seen_semantic_inputs),
         semantic_cache_hits=semantic_cache_hits,
+        semantic_input_identities=semantic_input_identities,
     )
 
 
@@ -490,15 +585,29 @@ def generate_wave1_live_authorization_proposal(
     retro_calls = 0
     write_time_calls = 0
     unique_inputs = 0
+    collected_identities: list[str] = []
 
     for r in simulation_results:
-        if "retroactive" in r.architecture_name:
+        if r.architecture_id in (
+            ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+            ArchitectureId.SEMANTIC_RETROACTIVE_NOISY,
+            ArchitectureId.SEMANTIC_RETROACTIVE_NO_VALUE,
+        ):
             retro_calls = max(retro_calls, r.semantic_decision_calls)
-        elif "write_time" in r.architecture_name:
+        elif r.architecture_id in (
+            ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
+            ArchitectureId.SEMANTIC_WRITE_TIME_NOISY,
+            ArchitectureId.SEMANTIC_WRITE_TIME_NO_VALUE,
+        ):
             write_time_calls = max(write_time_calls, r.semantic_decision_calls)
             unique_inputs = max(unique_inputs, r.semantic_unique_input_count)
+            if r.semantic_input_identities:
+                collected_identities = r.semantic_input_identities
 
-    deduplicated_total = unique_inputs if unique_inputs > 0 else 240
+    if unique_inputs == 0:
+        raise ValueError("LIVE_AUTHORIZATION_PROPOSAL_BLOCKED: cannot derive call budget without observed semantic inputs")
+
+    deduplicated_total = unique_inputs
     safety_margin = 10
     max_ceiling = deduplicated_total + safety_margin
 
@@ -508,8 +617,19 @@ def generate_wave1_live_authorization_proposal(
     }
     schema_hash = hashlib.sha256(json.dumps(semantic_schema, sort_keys=True).encode("utf-8")).hexdigest()
 
+    # Build stratified MINIMUM_DIAGNOSTIC_LIVE_PLAN
+    # Stratified deterministic sampling covering write-time admission, recall, high/med/low relevance
+    diagnostic_plan_strata = [
+        {"stratum": "high_relevance_tool_output", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify admission and ranking of critical failure or test output"},
+        {"stratum": "medium_relevance_intermediate", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify admission boundary for build logs"},
+        {"stratum": "low_relevance_noise", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify suppression and hidden store placement"},
+        {"stratum": "recall_required_anchors", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify lossless recovery upon recall query"},
+        {"stratum": "repeated_prefix_stability", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify cache hit consistency on identical inputs"},
+    ]
+    min_diagnostic_calls = sum(s["sampled_calls"] for s in diagnostic_plan_strata)
+
     proposal: dict[str, Any] = {
-        "proposal_schema_version": "exp-c-wave1-live-auth-v1",
+        "proposal_schema_version": "exp-c-wave1-live-auth-v2",
         "candidate_sha": candidate_sha,
         "fixture_hash": fixture_hash,
         "semantic_input_schema_hash": schema_hash,
@@ -518,6 +638,11 @@ def generate_wave1_live_authorization_proposal(
         "deduplicated_total_calls": deduplicated_total,
         "safety_margin_calls": safety_margin,
         "maximum_call_ceiling": max_ceiling,
+        "full_replay_required_calls": deduplicated_total,
+        "minimum_diagnostic_live_plan": {
+            "total_diagnostic_calls": min_diagnostic_calls,
+            "strata": diagnostic_plan_strata,
+        },
         "payload_class": "SANITIZED_CONTEXT_SEGMENT_V1",
         "stop_conditions": [
             "HTTP 4xx/5xx consecutive errors >= 3",
