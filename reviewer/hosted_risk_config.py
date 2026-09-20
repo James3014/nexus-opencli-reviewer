@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 from typing import Any
@@ -25,6 +24,17 @@ _CANONICAL_CONFIG_KEYS = {
     "max_canary_quota",
     "allowed_hosts_whitelist",
 }
+
+
+def _reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous JSON objects instead of silently keeping the last key."""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("config.json contains duplicate JSON keys")
+        result[key] = value
+    return result
 
 
 class HostedPreflightStatus(str, Enum):
@@ -69,6 +79,13 @@ class HostedProviderConfigV1:
         if not hostname:
             raise ValueError("endpoint_origin must contain a valid hostname")
 
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("endpoint_origin contains an invalid port") from exc
+        if port == 0 or (port is None and parsed.netloc.endswith(":")):
+            raise ValueError("endpoint_origin contains an invalid port")
+
         # api_key_env_var_name validation: valid identifier, no secret values
         if not isinstance(self.api_key_env_var_name, str) or not self.api_key_env_var_name.strip():
             raise ValueError("api_key_env_var_name must be a non-empty string")
@@ -101,8 +118,12 @@ class HostedProviderConfigV1:
             if not isinstance(host, str) or not host.strip():
                 raise ValueError("allowed_hosts_whitelist entries must be non-empty strings")
             h = host.strip()
-            if "*" in h or "/" in h or ":" in h or "\\" in h or " " in h:
-                raise ValueError(f"allowed_hosts_whitelist entry {h!r} contains invalid characters or wildcard")
+            if h != host or any(char.isspace() for char in h):
+                raise ValueError(
+                    "allowed_hosts_whitelist entries must not contain surrounding or control whitespace"
+                )
+            if "*" in h or "/" in h or ":" in h or "\\" in h:
+                raise ValueError("allowed_hosts_whitelist entry contains invalid characters or wildcard")
             if h.startswith(".") or h.endswith("."):
                 raise ValueError(f"allowed_hosts_whitelist entry {h!r} must not start or end with dot")
 
@@ -202,7 +223,7 @@ def load_hosted_provider_config_from_root(private_eval_root: str | Path | None) 
     try:
         raw_bytes = config_file.read_bytes()
         text = raw_bytes.decode("utf-8")
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_reject_duplicate_object_pairs)
     except UnicodeDecodeError as exc:
         raise ValueError(f"config.json is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -221,7 +242,22 @@ def run_hosted_provider_zero_call_preflight(
     Zero network primitives are invoked.
     """
     if config is not None:
-        cfg = config
+        if type(config) is not HostedProviderConfigV1:
+            return HostedProviderPreflightV1(
+                status=HostedPreflightStatus.CONFIG_INVALID,
+                config_hash=None,
+                endpoint_origin=None,
+                endpoint_host=None,
+                max_canary_quota=None,
+                credential_name_present=False,
+                error_message="config must be an exact HostedProviderConfigV1 instance",
+            )
+        cfg = HostedProviderConfigV1(
+            endpoint_origin=config.endpoint_origin,
+            api_key_env_var_name=config.api_key_env_var_name,
+            max_canary_quota=config.max_canary_quota,
+            allowed_hosts_whitelist=config.allowed_hosts_whitelist,
+        )
     else:
         try:
             cfg = load_hosted_provider_config_from_root(private_eval_root)

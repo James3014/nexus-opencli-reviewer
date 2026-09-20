@@ -81,6 +81,23 @@ def test_invalid_endpoint_origin_rejected(bad_origin: str) -> None:
         load_hosted_provider_config_from_dict(data)
 
 
+@pytest.mark.parametrize(
+    "bad_origin",
+    [
+        "https://provider.example.invalid:notaport",
+        "https://provider.example.invalid:0",
+        "https://provider.example.invalid:99999",
+        "https://provider.example.invalid:",
+    ],
+)
+def test_invalid_endpoint_port_rejected(bad_origin: str) -> None:
+    data = _valid_data()
+    data["endpoint_origin"] = bad_origin
+
+    with pytest.raises(ValueError, match="invalid port"):
+        load_hosted_provider_config_from_dict(data)
+
+
 def test_host_not_in_whitelist_rejected() -> None:
     data = _valid_data()
     data["endpoint_origin"] = "https://unauthorized.example.invalid"
@@ -121,6 +138,23 @@ def test_wildcard_or_malformed_whitelist_rejected(wildcard_entry: str) -> None:
     data["allowed_hosts_whitelist"] = [wildcard_entry]
 
     with pytest.raises(ValueError):
+        load_hosted_provider_config_from_dict(data)
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        " provider.example.invalid",
+        "provider.example.invalid ",
+        "provider.\texample.invalid",
+        "provider.\nexample.invalid",
+    ],
+)
+def test_whitelist_whitespace_rejected(bad_host: str) -> None:
+    data = _valid_data()
+    data["allowed_hosts_whitelist"] = ["provider.example.invalid", bad_host]
+
+    with pytest.raises(ValueError, match="whitespace"):
         load_hosted_provider_config_from_dict(data)
 
 
@@ -232,6 +266,43 @@ def test_symlink_escape_rejected(tmp_path: Path) -> None:
 
     assert preflight.status is HostedPreflightStatus.CONFIG_INVALID
     assert "symlink pointing outside" in (preflight.error_message or "")
+
+
+def test_duplicate_json_keys_rejected(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        """{
+          "endpoint_origin": "https://provider.example.invalid",
+          "endpoint_origin": "https://provider.example.invalid",
+          "api_key_env_var_name": "SYNTHETIC_PROVIDER_API_KEY",
+          "max_canary_quota": 1,
+          "allowed_hosts_whitelist": ["provider.example.invalid"]
+        }""",
+        encoding="utf-8",
+    )
+
+    preflight = run_hosted_provider_zero_call_preflight(tmp_path)
+
+    assert preflight.status is HostedPreflightStatus.CONFIG_INVALID
+    assert "duplicate JSON keys" in (preflight.error_message or "")
+
+
+def test_preflight_rejects_untyped_config_without_invoking_it() -> None:
+    class ExecutableLookalike:
+        endpoint_origin = "https://provider.example.invalid"
+        endpoint_host = "provider.example.invalid"
+        max_canary_quota = 1
+        credential_name_present = True
+
+        def canonical_config_hash(self) -> str:
+            raise AssertionError("untyped config object must never be executed")
+
+    preflight = run_hosted_provider_zero_call_preflight(
+        config=ExecutableLookalike(),  # type: ignore[arg-type]
+    )
+
+    assert preflight.status is HostedPreflightStatus.CONFIG_INVALID
+    assert preflight.config_hash is None
 
 
 def test_code_in_data_attack_rejected(tmp_path: Path) -> None:
