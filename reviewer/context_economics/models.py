@@ -180,6 +180,30 @@ class ContextRelevanceRanker(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class SemanticInputIdentityV1:
+    """Exact versioned semantic input identity."""
+
+    semantic_input_schema_version: str
+    fixture_hash: str
+    semantic_contract_revision: str
+    current_task_hash: str
+    segment_id: str
+    segment_content_hash: str
+
+    def compute_identity_hash(self) -> str:
+        payload = {
+            "semantic_input_schema_version": self.semantic_input_schema_version,
+            "fixture_hash": self.fixture_hash,
+            "semantic_contract_revision": self.semantic_contract_revision,
+            "current_task_hash": self.current_task_hash,
+            "segment_id": self.segment_id,
+            "segment_content_hash": self.segment_content_hash,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+
 class SyntheticRankerMode(str, Enum):
     PERFECTISH = "PERFECTISH"
     NOISY = "NOISY"
@@ -191,22 +215,50 @@ class SyntheticJevRanker:
 
     ranker_id = "synthetic-jev-ranker"
     ranker_revision = "wave1-v2"
+    semantic_input_schema_version = "semantic-input-v1"
 
     def __init__(self, mode: SyntheticRankerMode, seed: str = "SYNTH_JEV_V2"):
         self.mode = mode
         self.seed = seed
 
-    def compute_semantic_input_hash(self, current_task: str, segment: ContextSegmentV1) -> str:
-        payload = {
-            "task": current_task,
-            "segment_id": segment.segment_id,
-            "content_hash": hashlib.sha256(segment.content.encode("utf-8")).hexdigest(),
-            "ranker_revision": self.ranker_revision,
-        }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    def build_semantic_input_identity(
+        self,
+        current_task: str,
+        segment: ContextSegmentV1,
+        *,
+        fixture_hash: str = "wave1-default-fixture",
+        contract_revision: str | None = None,
+    ) -> SemanticInputIdentityV1:
+        task_hash = hashlib.sha256(current_task.encode("utf-8")).hexdigest()
+        content_hash = hashlib.sha256(segment.content.encode("utf-8")).hexdigest()
+        rev = contract_revision or self.ranker_revision
+        return SemanticInputIdentityV1(
+            semantic_input_schema_version=self.semantic_input_schema_version,
+            fixture_hash=fixture_hash,
+            semantic_contract_revision=rev,
+            current_task_hash=task_hash,
+            segment_id=segment.segment_id,
+            segment_content_hash=content_hash,
+        )
 
-    def score(self, current_task: str, segment: ContextSegmentV1) -> RankerResult:
-        inp_hash = self.compute_semantic_input_hash(current_task, segment)
+    def compute_semantic_input_hash(
+        self,
+        current_task: str,
+        segment: ContextSegmentV1,
+        *,
+        fixture_hash: str = "wave1-default-fixture",
+        contract_revision: str | None = None,
+    ) -> str:
+        ident = self.build_semantic_input_identity(
+            current_task,
+            segment,
+            fixture_hash=fixture_hash,
+            contract_revision=contract_revision,
+        )
+        return ident.compute_identity_hash()
+
+    def score(self, current_task: str, segment: ContextSegmentV1, *, input_hash: str | None = None) -> RankerResult:
+        inp_hash = input_hash or self.compute_semantic_input_hash(current_task, segment)
         # Deterministic float in [0.0, 1.0] from hash
         hash_float = int(inp_hash[:8], 16) / 0xFFFFFFFF
 
@@ -327,7 +379,9 @@ class TotalSessionCostV1:
     rate_semantic_token_per_k: float = 0.8
     rate_semantic_output_per_k: float = 2.4
     rate_compaction_call_fixed: float = 2.0
+    rate_compaction_token_per_k: float = 0.5
     rate_recall_call_fixed: float = 0.2
+    rate_recall_token_per_k: float = 0.5
     rate_cache_read_per_k: float = 0.1
     rate_cache_write_per_k: float = 1.25
     rate_cache_miss_penalty_per_k: float = 0.5
@@ -341,7 +395,9 @@ class TotalSessionCostV1:
             + (self.semantic_decision_input_tokens / 1000.0) * self.rate_semantic_token_per_k
             + (self.semantic_decision_output_tokens / 1000.0) * self.rate_semantic_output_per_k
             + self.compaction_calls * self.rate_compaction_call_fixed
+            + (self.compaction_tokens / 1000.0) * self.rate_compaction_token_per_k
             + self.recall_calls * self.rate_recall_call_fixed
+            + (self.recall_tokens / 1000.0) * self.rate_recall_token_per_k
             + (self.cache_read_tokens / 1000.0) * self.rate_cache_read_per_k
             + (self.cache_write_tokens / 1000.0) * self.rate_cache_write_per_k
             + (self.cache_miss_penalty_tokens / 1000.0) * self.rate_cache_miss_penalty_per_k

@@ -27,6 +27,7 @@ from reviewer.context_economics.models import (
     ContextSegmentV1,
     CriticalAnchorV1,
     RecallStoreV1,
+    SemanticInputIdentityV1,
     SessionTurnV1,
     SourceType,
     SyntheticJevRanker,
@@ -85,8 +86,11 @@ class ArchitectureRunResult:
     semantic_decision_calls: int
     semantic_unique_input_count: int
     semantic_cache_hits: int
+    semantic_unique_input_ids: list[str] = field(default_factory=list)
     semantic_input_identities: list[str] = field(default_factory=list)
+    semantic_records: list[dict[str, Any]] = field(default_factory=list)
 
+    intended_turns: int = 1000
     notes: str = ""
 
 
@@ -119,6 +123,9 @@ def run_session_simulation(
     compaction_trigger_fraction: float = 0.75,  # Trigger when context >= 75% of window
     synthetic_ranker_mode: SyntheticRankerMode | None = None,
     allow_recall_execution: bool = True,
+    fixture_hash: str = "wave1-default-fixture",
+    intended_turns: int = 1000,
+    semantic_contract_revision: str | None = None,
 ) -> ArchitectureRunResult:
     """Execute a single architecture simulation through the long session."""
     # Normalize architecture_id
@@ -174,7 +181,8 @@ def run_session_simulation(
 
     semantic_decision_calls = 0
     seen_semantic_inputs: set[str] = set()
-    semantic_input_identities: list[str] = []
+    semantic_unique_input_ids: list[str] = []
+    semantic_records: list[dict[str, Any]] = []
     semantic_cache_hits = 0
 
     max_visible_tool_tokens_observed = 0
@@ -259,15 +267,39 @@ def run_session_simulation(
                 elif seg.source_type == SourceType.TOOL_RESULT:
                     # Non-protected tool result undergoes semantic scoring
                     assert ranker is not None
+                    contract_rev = semantic_contract_revision or "wave1-write-time-v1"
+                    ident = ranker.build_semantic_input_identity(
+                        turn.user_prompt,
+                        seg,
+                        fixture_hash=fixture_hash,
+                        contract_revision=contract_rev,
+                    )
+                    inp_hash = ident.compute_identity_hash()
                     semantic_decision_calls += 1
-                    inp_hash = ranker.compute_semantic_input_hash(turn.user_prompt, seg)
                     if inp_hash in seen_semantic_inputs:
                         semantic_cache_hits += 1
                     else:
                         seen_semantic_inputs.add(inp_hash)
-                        semantic_input_identities.append(inp_hash)
+                        semantic_unique_input_ids.append(inp_hash)
+                        if len(seg.critical_anchor_ids) > 0 or "recall-req" in seg.segment_id:
+                            stratum = "recall_required"
+                        elif seg.content_class == "noisy_log" or seg.relevance_ground_truth < 0.2:
+                            stratum = "low_relevance"
+                        elif seg.relevance_ground_truth >= 0.7:
+                            stratum = "high_relevance"
+                        else:
+                            stratum = "medium_relevance"
+                        semantic_records.append({
+                            "semantic_input_id": inp_hash,
+                            "identity": ident,
+                            "stratum": stratum,
+                            "segment_id": seg.segment_id,
+                            "turn_id": t_id,
+                            "content_hash": ident.segment_content_hash,
+                            "relevance_ground_truth": seg.relevance_ground_truth,
+                        })
 
-                    score = ranker.score(turn.user_prompt, seg).relevance_score
+                    score = ranker.score(turn.user_prompt, seg, input_hash=inp_hash).relevance_score
                     if score >= 0.5:
                         _add_segment(seg)
                     else:
@@ -395,15 +427,41 @@ def run_session_simulation(
 
                 assert ranker is not None
                 scored = []
+                contract_rev = semantic_contract_revision or "wave1-retroactive-v1"
                 for s in unprotected_tools:
+                    ident = ranker.build_semantic_input_identity(
+                        turn.user_prompt,
+                        s,
+                        fixture_hash=fixture_hash,
+                        contract_revision=contract_rev,
+                    )
+                    inp_hash = ident.compute_identity_hash()
                     semantic_decision_calls += 1
-                    inp_hash = ranker.compute_semantic_input_hash(turn.user_prompt, s)
                     if inp_hash in seen_semantic_inputs:
                         semantic_cache_hits += 1
                     else:
                         seen_semantic_inputs.add(inp_hash)
-                        semantic_input_identities.append(inp_hash)
-                    score = ranker.score(turn.user_prompt, s).relevance_score
+                        semantic_unique_input_ids.append(inp_hash)
+                        if len(s.critical_anchor_ids) > 0 or "recall-req" in s.segment_id:
+                            stratum = "recall_required"
+                        elif t_id - s.created_at_turn >= 30:
+                            stratum = "stale_or_repeated_noise"
+                        elif s.relevance_ground_truth >= 0.7:
+                            stratum = "high_relevance"
+                        elif s.relevance_ground_truth >= 0.3:
+                            stratum = "medium_relevance"
+                        else:
+                            stratum = "low_relevance"
+                        semantic_records.append({
+                            "semantic_input_id": inp_hash,
+                            "identity": ident,
+                            "stratum": stratum,
+                            "segment_id": s.segment_id,
+                            "turn_id": t_id,
+                            "content_hash": ident.segment_content_hash,
+                            "relevance_ground_truth": s.relevance_ground_truth,
+                        })
+                    score = ranker.score(turn.user_prompt, s, input_hash=inp_hash).relevance_score
                     scored.append((score, s))
 
                 scored.sort(key=lambda x: x[0], reverse=True)
@@ -546,7 +604,10 @@ def run_session_simulation(
         semantic_decision_calls=semantic_decision_calls,
         semantic_unique_input_count=len(seen_semantic_inputs),
         semantic_cache_hits=semantic_cache_hits,
-        semantic_input_identities=semantic_input_identities,
+        semantic_unique_input_ids=semantic_unique_input_ids,
+        semantic_input_identities=semantic_unique_input_ids,
+        semantic_records=semantic_records,
+        intended_turns=intended_turns,
     )
 
 
@@ -558,13 +619,31 @@ def evaluate_semantic_value(
     """Evaluate whether candidate provides measurable semantic value over deterministic baseline.
 
     Strict measurement-derived comparison:
-    - Quality must not be degraded (success and recall not worse).
-    - Measurable economic / context improvement exceeding epsilon.
-    Returns 'MEASURABLE', 'NONE', or 'DISQUALIFIED'.
+    - Matched budget invariant: budgets must be identical (NON_COMPARABLE_BUDGET).
+    - Comparable session invariant: window class and intended turns must match (NON_COMPARABLE_SESSION).
+    - Window overflow or incomplete session must be rejected (NON_COMPARABLE_WINDOW_OVERFLOW, NON_COMPARABLE_SESSION).
+    - Quality gate must use critical_information_available_rate (DISQUALIFIED).
+    - Measurable economic / context improvement exceeding epsilon (MEASURABLE vs NONE).
     """
-    if candidate.task_success_rate < deterministic_baseline.task_success_rate:
+    if candidate.visible_tool_budget_tokens != deterministic_baseline.visible_tool_budget_tokens:
+        return "NON_COMPARABLE_BUDGET"
+
+    if candidate.window_class != deterministic_baseline.window_class:
+        return "NON_COMPARABLE_SESSION"
+
+    if candidate.intended_turns != deterministic_baseline.intended_turns:
+        return "NON_COMPARABLE_SESSION"
+
+    if candidate.window_overflow or deterministic_baseline.window_overflow:
+        return "NON_COMPARABLE_WINDOW_OVERFLOW"
+
+    if not candidate.session_completed or not deterministic_baseline.session_completed:
+        return "NON_COMPARABLE_SESSION"
+
+    if candidate.task_success_rate < deterministic_baseline.task_success_rate - 0.001:
         return "DISQUALIFIED"
-    if candidate.critical_anchor_recall < deterministic_baseline.critical_anchor_recall:
+
+    if candidate.critical_information_available_rate < deterministic_baseline.critical_information_available_rate - 0.001:
         return "DISQUALIFIED"
 
     # Compare total session cost and compaction count
@@ -582,71 +661,152 @@ def generate_wave1_live_authorization_proposal(
     simulation_results: Sequence[ArchitectureRunResult],
 ) -> dict[str, Any]:
     """Mechanically derive the live-call authorization proposal from actual simulation accounting."""
-    retro_calls = 0
-    write_time_calls = 0
-    unique_inputs = 0
-    collected_identities: list[str] = []
-
-    for r in simulation_results:
-        if r.architecture_id in (
+    retro_results = [
+        r
+        for r in simulation_results
+        if r.architecture_id
+        in (
             ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
             ArchitectureId.SEMANTIC_RETROACTIVE_NOISY,
             ArchitectureId.SEMANTIC_RETROACTIVE_NO_VALUE,
-        ):
-            retro_calls = max(retro_calls, r.semantic_decision_calls)
-        elif r.architecture_id in (
+        )
+    ]
+    write_time_results = [
+        r
+        for r in simulation_results
+        if r.architecture_id
+        in (
             ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
             ArchitectureId.SEMANTIC_WRITE_TIME_NOISY,
             ArchitectureId.SEMANTIC_WRITE_TIME_NO_VALUE,
-        ):
-            write_time_calls = max(write_time_calls, r.semantic_decision_calls)
-            unique_inputs = max(unique_inputs, r.semantic_unique_input_count)
-            if r.semantic_input_identities:
-                collected_identities = r.semantic_input_identities
+        )
+    ]
 
-    if unique_inputs == 0:
-        raise ValueError("LIVE_AUTHORIZATION_PROPOSAL_BLOCKED: cannot derive call budget without observed semantic inputs")
+    if not retro_results or all(len(r.semantic_unique_input_ids) == 0 for r in retro_results):
+        raise ValueError("LIVE_AUTHORIZATION_PROPOSAL_BLOCKED: missing retroactive trace")
 
-    deduplicated_total = unique_inputs
-    safety_margin = 10
-    max_ceiling = deduplicated_total + safety_margin
+    if not write_time_results or all(len(r.semantic_unique_input_ids) == 0 for r in write_time_results):
+        raise ValueError("LIVE_AUTHORIZATION_PROPOSAL_BLOCKED: missing write-time trace")
+
+    retroactive_ids: list[str] = []
+    retro_raw_calls = 0
+    all_records: dict[str, dict[str, Any]] = {}
+
+    for r in retro_results:
+        retro_raw_calls = max(retro_raw_calls, r.semantic_decision_calls)
+        for s_id in r.semantic_unique_input_ids:
+            if s_id not in retroactive_ids:
+                retroactive_ids.append(s_id)
+        for rec in r.semantic_records:
+            all_records.setdefault(rec["semantic_input_id"], rec)
+
+    write_time_ids: list[str] = []
+    write_time_raw_calls = 0
+    for r in write_time_results:
+        write_time_raw_calls = max(write_time_raw_calls, r.semantic_decision_calls)
+        for s_id in r.semantic_unique_input_ids:
+            if s_id not in write_time_ids:
+                write_time_ids.append(s_id)
+        for rec in r.semantic_records:
+            all_records.setdefault(rec["semantic_input_id"], rec)
+
+    union_ids = set(retroactive_ids) | set(write_time_ids)
+    retroactive_unique_calls = len(retroactive_ids)
+    write_time_unique_calls = len(write_time_ids)
+    cross_arm_duplicates = len(retroactive_ids) + len(write_time_ids) - len(union_ids)
+    union_unique_calls = len(union_ids)
+    full_replay_required_calls = union_unique_calls
+
+    strata_map: dict[str, list[dict[str, Any]]] = {
+        "high_relevance": [],
+        "medium_relevance": [],
+        "low_relevance": [],
+        "recall_required": [],
+        "stale_or_repeated_noise": [],
+    }
+
+    for s_id in sorted(union_ids):
+        rec = all_records.get(s_id)
+        if rec:
+            st = rec.get("stratum", "medium_relevance")
+            if st in strata_map:
+                strata_map[st].append(rec)
+            else:
+                strata_map["medium_relevance"].append(rec)
+        else:
+            strata_map["medium_relevance"].append({
+                "semantic_input_id": s_id,
+                "stratum": "medium_relevance",
+                "segment_id": "unknown",
+                "turn_id": 0,
+                "content_hash": "unknown",
+            })
+
+    diagnostic_sample: list[dict[str, Any]] = []
+    strata_summary: dict[str, int] = {}
+    for stratum_name in (
+        "high_relevance",
+        "medium_relevance",
+        "low_relevance",
+        "recall_required",
+        "stale_or_repeated_noise",
+    ):
+        items = strata_map[stratum_name]
+        items.sort(key=lambda x: str(x["semantic_input_id"]))
+        sampled = items[:5]
+        for it in sampled:
+            diagnostic_sample.append({
+                "semantic_input_id": it["semantic_input_id"],
+                "stratum": stratum_name,
+                "segment_id": it["segment_id"],
+                "turn_id": it["turn_id"],
+                "content_hash": it["content_hash"],
+            })
+        strata_summary[stratum_name] = len(sampled)
+
+    diagnostic_sample_size = len(diagnostic_sample)
+    diagnostic_unique_calls = len({s["semantic_input_id"] for s in diagnostic_sample})
+    sample_bytes = json.dumps(diagnostic_sample, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    diagnostic_sample_hash = hashlib.sha256(sample_bytes).hexdigest()
+    diagnostic_max_call_ceiling = diagnostic_unique_calls + 5
+    diagnostic_claim_ceiling = "REAL_JEV_RANKING_SIGNAL_MEASURED"
 
     semantic_schema = {
-        "input_fields": ["current_task", "segment_id", "content_hash", "ranker_revision"],
-        "ranker_revision": "wave1-v2",
+        "input_fields": [
+            "semantic_input_schema_version",
+            "fixture_hash",
+            "semantic_contract_revision",
+            "current_task_hash",
+            "segment_id",
+            "segment_content_hash",
+        ],
+        "schema_version": "semantic-input-v1",
     }
     schema_hash = hashlib.sha256(json.dumps(semantic_schema, sort_keys=True).encode("utf-8")).hexdigest()
 
-    # Build stratified MINIMUM_DIAGNOSTIC_LIVE_PLAN
-    # Stratified deterministic sampling covering write-time admission, recall, high/med/low relevance
-    diagnostic_plan_strata = [
-        {"stratum": "high_relevance_tool_output", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify admission and ranking of critical failure or test output"},
-        {"stratum": "medium_relevance_intermediate", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify admission boundary for build logs"},
-        {"stratum": "low_relevance_noise", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify suppression and hidden store placement"},
-        {"stratum": "recall_required_anchors", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify lossless recovery upon recall query"},
-        {"stratum": "repeated_prefix_stability", "sampled_calls": min(5, len(collected_identities)), "target_behavior": "verify cache hit consistency on identical inputs"},
-    ]
-    min_diagnostic_calls = sum(s["sampled_calls"] for s in diagnostic_plan_strata)
-
     proposal: dict[str, Any] = {
-        "proposal_schema_version": "exp-c-wave1-live-auth-v2",
+        "proposal_schema_version": "exp-c-wave1-live-auth-v3",
         "candidate_sha": candidate_sha,
         "fixture_hash": fixture_hash,
         "semantic_input_schema_hash": schema_hash,
-        "retroactive_raw_calls": retro_calls,
-        "write_time_raw_calls": write_time_calls,
-        "deduplicated_total_calls": deduplicated_total,
-        "safety_margin_calls": safety_margin,
-        "maximum_call_ceiling": max_ceiling,
-        "full_replay_required_calls": deduplicated_total,
-        "minimum_diagnostic_live_plan": {
-            "total_diagnostic_calls": min_diagnostic_calls,
-            "strata": diagnostic_plan_strata,
-        },
+        "retroactive_raw_calls": retro_raw_calls,
+        "write_time_raw_calls": write_time_raw_calls,
+        "retroactive_unique_calls": retroactive_unique_calls,
+        "write_time_unique_calls": write_time_unique_calls,
+        "cross_arm_duplicates": cross_arm_duplicates,
+        "union_unique_calls": union_unique_calls,
+        "full_replay_required_calls": full_replay_required_calls,
+        "diagnostic_sample_size": diagnostic_sample_size,
+        "diagnostic_unique_calls": diagnostic_unique_calls,
+        "diagnostic_sample_hash": diagnostic_sample_hash,
+        "diagnostic_max_call_ceiling": diagnostic_max_call_ceiling,
+        "diagnostic_claim_ceiling": diagnostic_claim_ceiling,
+        "diagnostic_strata_summary": strata_summary,
+        "diagnostic_sample": diagnostic_sample,
         "payload_class": "SANITIZED_CONTEXT_SEGMENT_V1",
         "stop_conditions": [
             "HTTP 4xx/5xx consecutive errors >= 3",
-            "Call count reaches maximum_call_ceiling",
+            "Call count reaches diagnostic_max_call_ceiling",
             "Auth token expired or invalid",
             "Owner abort",
         ],

@@ -55,6 +55,7 @@ def run_full_wave1_matrix(candidate_sha: str | None = None) -> tuple[list[Archit
             window_size_tokens=200_000,
             visible_tool_budget_tokens=60_000,
             synthetic_ranker_mode=ranker_mode,
+            fixture_hash=fixture_hash,
         )
         res.architecture_name = display_name
         if arch_key == ArchitectureId.DETERMINISTIC_PRUNING:
@@ -86,6 +87,7 @@ def run_full_wave1_matrix(candidate_sha: str | None = None) -> tuple[list[Archit
             window_size_tokens=1_000_000,
             visible_tool_budget_tokens=60_000,
             synthetic_ranker_mode=ranker_mode,
+            fixture_hash=fixture_hash,
         )
         res.architecture_name = display_name
         if arch_key == ArchitectureId.DETERMINISTIC_PRUNING:

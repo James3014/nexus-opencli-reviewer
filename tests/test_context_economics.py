@@ -16,6 +16,7 @@ from reviewer.context_economics.models import (
     SyntheticJevRanker,
     SyntheticRankerMode,
     TaskCheckpointV1,
+    TotalSessionCostV1,
     VisibilityState,
     deterministic_must_keep,
 )
@@ -317,19 +318,18 @@ def test_m8_negative_control_semantic_no_value_detected() -> None:
     assert status == "NONE"
 
 
-def test_false_positive_control_recall_drop_disqualified() -> None:
-    """False-positive control: Even if semantic looks cheaper, recall degradation must result in DISQUALIFIED."""
+def test_false_positive_control_critical_info_drop_disqualified() -> None:
+    """False-positive control: Even if semantic looks cheaper, critical information degradation must result in DISQUALIFIED."""
     gen = SessionFixtureGenerator(seed="TEST_FP_SEED")
     turns, anchors, _ = gen.generate_1000_turn_session()
     res_det = run_session_simulation(turns[:30], anchors, "deterministic_pruning")
 
-    # Manually create a run result that is cheaper but with degraded recall
-    res_cheaper_bad_recall = copy.deepcopy(res_det)
-    # Simulate degraded recall and lower cost
-    object.__setattr__(res_cheaper_bad_recall, "critical_anchor_recall", res_det.critical_anchor_recall - 0.1)
-    object.__setattr__(res_cheaper_bad_recall, "estimated_total_cost", res_det.estimated_total_cost * 0.5)
+    # Manually create a run result that is cheaper but with degraded critical info availability
+    res_cheaper_bad_info = copy.deepcopy(res_det)
+    object.__setattr__(res_cheaper_bad_info, "critical_information_available_rate", res_det.critical_information_available_rate - 0.1)
+    object.__setattr__(res_cheaper_bad_info, "estimated_total_cost", res_det.estimated_total_cost * 0.5)
 
-    status = evaluate_semantic_value(res_cheaper_bad_recall, res_det)
+    status = evaluate_semantic_value(res_cheaper_bad_info, res_det)
     assert status == "DISQUALIFIED"
 
 
@@ -389,20 +389,28 @@ def test_proposal_stratified_diagnostic_live_plan_and_hash_recomputation() -> No
     """Test that proposal contains MINIMUM_DIAGNOSTIC_LIVE_PLAN and proposal_hash verifies correctly."""
     gen = SessionFixtureGenerator(seed="TEST_DIAG_PLAN")
     turns, anchors, fhash = gen.generate_1000_turn_session()
-    res_sem = run_session_simulation(
+    res_write = run_session_simulation(
         turns[:30],
         anchors,
         ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
         synthetic_ranker_mode=SyntheticRankerMode.PERFECTISH,
+        fixture_hash=fhash,
     )
-    proposal = generate_wave1_live_authorization_proposal("c6bda4d97384cedfb3ea2150cd7a9754c1a4d834", fhash, [res_sem])
+    res_retro = run_session_simulation(
+        turns[:30],
+        anchors,
+        ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        synthetic_ranker_mode=SyntheticRankerMode.PERFECTISH,
+        compaction_trigger_fraction=0.01,  # trigger compaction so retroactive arm evaluates segments
+        fixture_hash=fhash,
+    )
+    proposal = generate_wave1_live_authorization_proposal("c6bda4d97384cedfb3ea2150cd7a9754c1a4d834", fhash, [res_write, res_retro])
 
-    assert "minimum_diagnostic_live_plan" in proposal
     assert "full_replay_required_calls" in proposal
-    assert proposal["full_replay_required_calls"] == proposal["deduplicated_total_calls"]
-    diag_plan = proposal["minimum_diagnostic_live_plan"]
-    assert diag_plan["total_diagnostic_calls"] > 0
-    assert len(diag_plan["strata"]) == 5
+    assert proposal["full_replay_required_calls"] == proposal["union_unique_calls"]
+    assert proposal["diagnostic_sample_size"] > 0
+    assert proposal["diagnostic_unique_calls"] > 0
+    assert proposal["diagnostic_claim_ceiling"] == "REAL_JEV_RANKING_SIGNAL_MEASURED"
 
     # Verify proposal_hash recomputation
     import hashlib
@@ -412,3 +420,330 @@ def test_proposal_stratified_diagnostic_live_plan_and_hash_recomputation() -> No
     p_bytes = json.dumps(p_copy, sort_keys=True, separators=(",", ":")).encode("utf-8")
     expected_hash = hashlib.sha256(p_bytes).hexdigest()
     assert claimed_hash == expected_hash
+
+
+# ---------------------------------------------------------------------------
+# Tests P1 to P10: Strengthened proposal and comparison oracle verification
+# ---------------------------------------------------------------------------
+
+def test_p1_p2_p3_cross_arm_union_and_deduplication() -> None:
+    """P1, P2, P3: Retroactive-only and write-time-only IDs exist in union, and duplicates are counted once."""
+    gen = SessionFixtureGenerator(seed="TEST_P123")
+    _, _, fhash = gen.generate_1000_turn_session()
+
+    # Create synthetic run results with controlled semantic IDs
+    res_retro = ArchitectureRunResult(
+        architecture_name="Retroactive",
+        architecture_id=ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        window_class="~200K",
+        task_success_rate=1.0,
+        critical_anchor_recall=1.0,
+        critical_information_available_rate=1.0,
+        final_context_tokens=1000,
+        peak_context_tokens=1000,
+        untouchable_context_floor=500,
+        window_overflow=False,
+        first_overflow_turn=None,
+        completed_turns=1000,
+        session_completed=True,
+        compaction_count=1,
+        compaction_thrashing=False,
+        structural_hard_stop=False,
+        predicted_hard_stop_turn=None,
+        prediction_status="NO_GROWTH",
+        prefix_invalidations=0,
+        tokens_invalidated_by_rewrite=0,
+        estimated_total_cost=100.0,
+        cost_breakdown=TotalSessionCostV1(),
+        cost_per_successful_task=5.0,
+        cost_per_100_turns=10.0,
+        quality_qualified=True,
+        semantic_value_status="NOT_APPLICABLE",
+        visible_tool_budget_tokens=60_000,
+        max_visible_tool_tokens_observed=10_000,
+        budget_violation_count=0,
+        recall_needed=0,
+        recall_attempted=0,
+        recall_success=0,
+        missed_recall=0,
+        unnecessary_recall=0,
+        semantic_decision_calls=2,
+        semantic_unique_input_count=2,
+        semantic_cache_hits=0,
+        semantic_unique_input_ids=["shared_id_1", "retro_only_id_2"],
+        semantic_records=[
+            {"semantic_input_id": "shared_id_1", "stratum": "high_relevance", "segment_id": "s1", "turn_id": 1, "content_hash": "c1"},
+            {"semantic_input_id": "retro_only_id_2", "stratum": "recall_required", "segment_id": "s2", "turn_id": 2, "content_hash": "c2"},
+        ],
+    )
+
+    res_write = copy.deepcopy(res_retro)
+    object.__setattr__(res_write, "architecture_id", ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH)
+    object.__setattr__(res_write, "semantic_unique_input_ids", ["shared_id_1", "write_only_id_3"])
+    object.__setattr__(res_write, "semantic_records", [
+        {"semantic_input_id": "shared_id_1", "stratum": "high_relevance", "segment_id": "s1", "turn_id": 1, "content_hash": "c1"},
+        {"semantic_input_id": "write_only_id_3", "stratum": "low_relevance", "segment_id": "s3", "turn_id": 3, "content_hash": "c3"},
+    ])
+
+    proposal = generate_wave1_live_authorization_proposal("test_candidate_sha", fhash, [res_retro, res_write])
+
+    # Check P1: Retroactive-only ID is in union
+    # Check P2: Write-time-only ID is in union
+    # Check P3: Duplicate ID counted once
+    assert proposal["retroactive_unique_calls"] == 2
+    assert proposal["write_time_unique_calls"] == 2
+    assert proposal["cross_arm_duplicates"] == 1
+    assert proposal["union_unique_calls"] == 3
+    assert proposal["full_replay_required_calls"] == 3
+
+    union_sample_ids = {s["semantic_input_id"] for s in proposal["diagnostic_sample"]}
+    assert "shared_id_1" in union_sample_ids
+    assert "retro_only_id_2" in union_sample_ids
+    assert "write_only_id_3" in union_sample_ids
+
+
+def test_p4_stratified_diagnostic_plan_samples_all_five_strata() -> None:
+    """P4: Stratified diagnostic plan samples actual IDs across all 5 strata."""
+    gen = SessionFixtureGenerator(seed="TEST_P4")
+    _, _, fhash = gen.generate_1000_turn_session()
+
+    strata_names = ["high_relevance", "medium_relevance", "low_relevance", "recall_required", "stale_or_repeated_noise"]
+    records = []
+    unique_ids = []
+    for i, s_name in enumerate(strata_names):
+        s_id = f"test_id_stratum_{i}"
+        unique_ids.append(s_id)
+        records.append({
+            "semantic_input_id": s_id,
+            "stratum": s_name,
+            "segment_id": f"seg_{i}",
+            "turn_id": i + 1,
+            "content_hash": f"hash_{i}",
+        })
+
+    res_retro = ArchitectureRunResult(
+        architecture_name="Retro",
+        architecture_id=ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        window_class="~200K",
+        task_success_rate=1.0,
+        critical_anchor_recall=1.0,
+        critical_information_available_rate=1.0,
+        final_context_tokens=1000,
+        peak_context_tokens=1000,
+        untouchable_context_floor=500,
+        window_overflow=False,
+        first_overflow_turn=None,
+        completed_turns=1000,
+        session_completed=True,
+        compaction_count=1,
+        compaction_thrashing=False,
+        structural_hard_stop=False,
+        predicted_hard_stop_turn=None,
+        prediction_status="NO_GROWTH",
+        prefix_invalidations=0,
+        tokens_invalidated_by_rewrite=0,
+        estimated_total_cost=100.0,
+        cost_breakdown=TotalSessionCostV1(),
+        cost_per_successful_task=5.0,
+        cost_per_100_turns=10.0,
+        quality_qualified=True,
+        semantic_value_status="NOT_APPLICABLE",
+        visible_tool_budget_tokens=60_000,
+        max_visible_tool_tokens_observed=10_000,
+        budget_violation_count=0,
+        recall_needed=0,
+        recall_attempted=0,
+        recall_success=0,
+        missed_recall=0,
+        unnecessary_recall=0,
+        semantic_decision_calls=len(unique_ids),
+        semantic_unique_input_count=len(unique_ids),
+        semantic_cache_hits=0,
+        semantic_unique_input_ids=unique_ids[:3],
+        semantic_records=records[:3],
+    )
+    res_write = copy.deepcopy(res_retro)
+    object.__setattr__(res_write, "architecture_id", ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH)
+    object.__setattr__(res_write, "semantic_unique_input_ids", unique_ids[2:])
+    object.__setattr__(res_write, "semantic_records", records[2:])
+
+    proposal = generate_wave1_live_authorization_proposal("sha_p4", fhash, [res_retro, res_write])
+    assert proposal["diagnostic_claim_ceiling"] == "REAL_JEV_RANKING_SIGNAL_MEASURED"
+
+    sample_strata = {s["stratum"] for s in proposal["diagnostic_sample"]}
+    for expected_s in strata_names:
+        assert expected_s in sample_strata
+        assert proposal["diagnostic_strata_summary"][expected_s] >= 1
+
+
+def test_p5_missing_retroactive_trace_blocks_proposal() -> None:
+    """P5: Missing retroactive trace blocks proposal."""
+    gen = SessionFixtureGenerator(seed="TEST_P5")
+    _, _, fhash = gen.generate_1000_turn_session()
+
+    res_write = ArchitectureRunResult(
+        architecture_name="WriteTime",
+        architecture_id=ArchitectureId.SEMANTIC_WRITE_TIME_PERFECTISH,
+        window_class="~200K",
+        task_success_rate=1.0,
+        critical_anchor_recall=1.0,
+        critical_information_available_rate=1.0,
+        final_context_tokens=1000,
+        peak_context_tokens=1000,
+        untouchable_context_floor=500,
+        window_overflow=False,
+        first_overflow_turn=None,
+        completed_turns=1000,
+        session_completed=True,
+        compaction_count=1,
+        compaction_thrashing=False,
+        structural_hard_stop=False,
+        predicted_hard_stop_turn=None,
+        prediction_status="NO_GROWTH",
+        prefix_invalidations=0,
+        tokens_invalidated_by_rewrite=0,
+        estimated_total_cost=100.0,
+        cost_breakdown=TotalSessionCostV1(),
+        cost_per_successful_task=5.0,
+        cost_per_100_turns=10.0,
+        quality_qualified=True,
+        semantic_value_status="NOT_APPLICABLE",
+        visible_tool_budget_tokens=60_000,
+        max_visible_tool_tokens_observed=10_000,
+        budget_violation_count=0,
+        recall_needed=0,
+        recall_attempted=0,
+        recall_success=0,
+        missed_recall=0,
+        unnecessary_recall=0,
+        semantic_decision_calls=1,
+        semantic_unique_input_count=1,
+        semantic_cache_hits=0,
+        semantic_unique_input_ids=["id_w1"],
+        semantic_records=[{"semantic_input_id": "id_w1", "stratum": "high_relevance", "segment_id": "s1", "turn_id": 1, "content_hash": "c1"}],
+    )
+
+    with pytest.raises(ValueError, match="LIVE_AUTHORIZATION_PROPOSAL_BLOCKED: missing retroactive trace"):
+        generate_wave1_live_authorization_proposal("sha_p5", fhash, [res_write])
+
+
+def test_p6_missing_write_time_trace_blocks_proposal() -> None:
+    """P6: Missing write-time trace blocks proposal."""
+    gen = SessionFixtureGenerator(seed="TEST_P6")
+    _, _, fhash = gen.generate_1000_turn_session()
+
+    res_retro = ArchitectureRunResult(
+        architecture_name="Retro",
+        architecture_id=ArchitectureId.SEMANTIC_RETROACTIVE_PERFECTISH,
+        window_class="~200K",
+        task_success_rate=1.0,
+        critical_anchor_recall=1.0,
+        critical_information_available_rate=1.0,
+        final_context_tokens=1000,
+        peak_context_tokens=1000,
+        untouchable_context_floor=500,
+        window_overflow=False,
+        first_overflow_turn=None,
+        completed_turns=1000,
+        session_completed=True,
+        compaction_count=1,
+        compaction_thrashing=False,
+        structural_hard_stop=False,
+        predicted_hard_stop_turn=None,
+        prediction_status="NO_GROWTH",
+        prefix_invalidations=0,
+        tokens_invalidated_by_rewrite=0,
+        estimated_total_cost=100.0,
+        cost_breakdown=TotalSessionCostV1(),
+        cost_per_successful_task=5.0,
+        cost_per_100_turns=10.0,
+        quality_qualified=True,
+        semantic_value_status="NOT_APPLICABLE",
+        visible_tool_budget_tokens=60_000,
+        max_visible_tool_tokens_observed=10_000,
+        budget_violation_count=0,
+        recall_needed=0,
+        recall_attempted=0,
+        recall_success=0,
+        missed_recall=0,
+        unnecessary_recall=0,
+        semantic_decision_calls=1,
+        semantic_unique_input_count=1,
+        semantic_cache_hits=0,
+        semantic_unique_input_ids=["id_r1"],
+        semantic_records=[{"semantic_input_id": "id_r1", "stratum": "high_relevance", "segment_id": "s1", "turn_id": 1, "content_hash": "c1"}],
+    )
+
+    with pytest.raises(ValueError, match="LIVE_AUTHORIZATION_PROPOSAL_BLOCKED: missing write-time trace"):
+        generate_wave1_live_authorization_proposal("sha_p6", fhash, [res_retro])
+
+
+def test_p7_overflow_candidate_vs_baseline_returns_non_comparable_overflow() -> None:
+    """P7: Window overflow candidate vs baseline returns NON_COMPARABLE_WINDOW_OVERFLOW."""
+    gen = SessionFixtureGenerator(seed="TEST_P7")
+    turns, anchors, _ = gen.generate_1000_turn_session()
+    res_det = run_session_simulation(turns[:30], anchors, "deterministic_pruning")
+
+    res_overflow = copy.deepcopy(res_det)
+    object.__setattr__(res_overflow, "window_overflow", True)
+    object.__setattr__(res_overflow, "session_completed", False)
+
+    # Candidate overflow
+    assert evaluate_semantic_value(res_overflow, res_det) == "NON_COMPARABLE_WINDOW_OVERFLOW"
+    # Baseline overflow
+    assert evaluate_semantic_value(res_det, res_overflow) == "NON_COMPARABLE_WINDOW_OVERFLOW"
+
+
+def test_p8_mismatched_budget_returns_non_comparable_budget() -> None:
+    """P8: 60K vs 90K budget comparison returns NON_COMPARABLE_BUDGET."""
+    gen = SessionFixtureGenerator(seed="TEST_P8")
+    turns, anchors, _ = gen.generate_1000_turn_session()
+    res_60k = run_session_simulation(turns[:30], anchors, "deterministic_pruning", visible_tool_budget_tokens=60_000)
+    res_90k = run_session_simulation(turns[:30], anchors, "deterministic_pruning", visible_tool_budget_tokens=90_000)
+
+    assert evaluate_semantic_value(res_60k, res_90k) == "NON_COMPARABLE_BUDGET"
+    assert evaluate_semantic_value(res_90k, res_60k) == "NON_COMPARABLE_BUDGET"
+
+
+def test_p9_critical_information_available_rate_regression_returns_disqualified() -> None:
+    """P9: critical_information_available_rate regression returns DISQUALIFIED."""
+    gen = SessionFixtureGenerator(seed="TEST_P9")
+    turns, anchors, _ = gen.generate_1000_turn_session()
+    res_baseline = run_session_simulation(turns[:30], anchors, "deterministic_pruning")
+
+    res_cand = copy.deepcopy(res_baseline)
+    object.__setattr__(res_cand, "critical_information_available_rate", res_baseline.critical_information_available_rate - 0.05)
+    object.__setattr__(res_cand, "estimated_total_cost", res_baseline.estimated_total_cost * 0.5)
+
+    assert evaluate_semantic_value(res_cand, res_baseline) == "DISQUALIFIED"
+
+
+def test_p10_compaction_and_recall_tokens_affect_total_cost() -> None:
+    """P10: Compaction_tokens and recall_tokens rate consumption directly affects compute_total_cost()."""
+    base_cost = TotalSessionCostV1(
+        generation_input_tokens=10_000,
+        generation_output_tokens=1_000,
+        compaction_tokens=0,
+        recall_tokens=0,
+    )
+    c0 = base_cost.compute_total_cost()
+
+    cost_with_compaction = TotalSessionCostV1(
+        generation_input_tokens=10_000,
+        generation_output_tokens=1_000,
+        compaction_tokens=10_000,
+        recall_tokens=0,
+    )
+    c1 = cost_with_compaction.compute_total_cost()
+    # 10_000 tokens * (0.5 / 1000) = 5.0 normalized cost increase
+    assert round(c1 - c0, 2) == 5.0
+
+    cost_with_recall = TotalSessionCostV1(
+        generation_input_tokens=10_000,
+        generation_output_tokens=1_000,
+        compaction_tokens=0,
+        recall_tokens=10_000,
+    )
+    c2 = cost_with_recall.compute_total_cost()
+    # 10_000 tokens * (0.5 / 1000) = 5.0 normalized cost increase
+    assert round(c2 - c0, 2) == 5.0
