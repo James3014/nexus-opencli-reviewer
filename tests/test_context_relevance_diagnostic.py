@@ -13,16 +13,24 @@ import shutil
 import tempfile
 import pytest
 
+import concurrent.futures
+import threading
+
 from reviewer.context_economics.diagnostic_contract import (
     ContextRelevanceDiagnosticAuthorizationV1,
     ContextRelevanceDiagnosticExecutor,
+    ContextRelevanceLiveDiagnosticExecutor,
     ContextRelevanceProviderStateV1,
     ContextRelevanceQuestionContractV1,
     DiagnosticExecutionJournal,
+    DiagnosticJournalState,
     DiagnosticOutcomeStatus,
     DiagnosticSamplePacketV1,
+    build_context_relevance_provider_request,
+    generate_context_relevance_authorization_preview,
     generate_diagnostic_live_packet_artifact,
     generate_wave1_diagnostic_sample_packets,
+    get_authoritative_h2b_wire_descriptor,
 )
 from reviewer.risk_model_adapter import F4QuestionContractV1
 
@@ -409,3 +417,314 @@ def test_real_deterministic_stratified_sample_generation() -> None:
     assert artifact["max_calls"] == 25
     assert artifact["claim_ceiling"] == "REAL_JEV_RANKING_SIGNAL_MEASURED"
     assert len(artifact["packet_hash"]) == 64
+
+
+# ===========================================================================
+# Zero-Call Preflight & Live Executor Tests (Tests L1 to L15)
+# ===========================================================================
+
+def _make_live_authorization(
+    journal: DiagnosticExecutionJournal,
+    candidate_sha: str = "98e8f18a637e2aecffa45a5c225f8de50bccfe82",
+    authorized_ids: tuple[str, ...] = ("id1",),
+    max_calls: int | None = None,
+    wire_hash: str | None = None,
+    q_hash: str | None = None,
+    root_hash: str | None = None,
+    ns_hash: str | None = None,
+    sample_hash: str = "1" * 64,
+) -> ContextRelevanceDiagnosticAuthorizationV1:
+    wire = get_authoritative_h2b_wire_descriptor()
+    q_contract = ContextRelevanceQuestionContractV1()
+    s_hash = ContextRelevanceProviderStateV1.compute_schema_hash()
+    effective_max = len(authorized_ids) if max_calls is None else max_calls
+    return ContextRelevanceDiagnosticAuthorizationV1(
+        live_contract_revision=candidate_sha,
+        sample_source_revision="1a82954e0ddcf90427bbad3dd36dfbea732f1f4e",
+        fixture_hash="479e7484b13118398a0ce34885d3f629ed7701a30f1bb6e94a1fc46aab116102",
+        diagnostic_sample_hash=sample_hash,
+        question_contract_hash=q_hash or q_contract.contract_hash,
+        provider_state_schema_hash=s_hash,
+        wire_contract_hash=wire_hash or wire.canonical_wire_hash(),
+        endpoint_host="diagnostic.provider.internal",
+        journal_root_resolved_hash=root_hash or journal.get_root_resolved_hash(),
+        journal_namespace_hash=ns_hash or journal.get_namespace_hash(),
+        authorized_semantic_input_ids=authorized_ids,
+        authorized_backup_sample_ids=(),
+        max_calls=effective_max,
+        diagnostic_packet_hash="d3120e10f83a80da9e84ed5ec4e13064a6af160fb53d6b00f8fa0f304125ea99",
+    )
+
+
+def test_l1_committed_packet_separates_source_revision_from_live_candidate() -> None:
+    """L1: Committed packet does not confuse previous harness revision with live executor Candidate."""
+    packet_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "diagnostic-live-packet.json")
+    assert os.path.exists(packet_path), "diagnostic-live-packet.json must exist"
+    with open(packet_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    assert "candidate_sha" not in data, "candidate_sha must NOT be in committed packet"
+    assert data["sample_source_revision"] == "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e"
+    assert data["schema_version"] == "context-relevance-diagnostic-live-packet-v2"
+    assert len(data["packet_hash"]) == 64
+
+
+def test_l2_packet_hash_distinct_from_authorization_hash(clean_journal_dir: str) -> None:
+    """L2: packet_hash != authorization_hash subject semantics."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth, preview = generate_context_relevance_authorization_preview(
+        live_contract_revision="98e8f18a637e2aecffa45a5c225f8de50bccfe82",
+        journal_root_resolved_path=journal.resolved_root,
+        authorized_semantic_input_ids=("id1",),
+    )
+    auth_hash = preview["authorization_hash"]
+    packet_hash = auth.diagnostic_packet_hash
+    assert packet_hash != auth_hash, "packet_hash and authorization_hash must have distinct subject semantics"
+    assert len(packet_hash) == 64
+    assert len(auth_hash) == 64
+
+
+def test_l3_missing_nexus_private_eval_root_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L3: missing NEXUS_PRIVATE_EVAL_ROOT in live mode -> fails closed."""
+    monkeypatch.delenv("NEXUS_PRIVATE_EVAL_ROOT", raising=False)
+    with pytest.raises(RuntimeError, match="LIVE_DIAGNOSTIC_NOT_SENT_PRIVATE_ROOT_UNAVAILABLE"):
+        DiagnosticExecutionJournal(root_dir=None, is_live_executor=True)
+
+
+def test_l4_different_physical_journal_root_yields_not_sent(clean_journal_dir: str) -> None:
+    """L4: different physical journal root -> authorization mismatch -> NOT_SENT."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, root_hash="f" * 64)
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    res = executor.execute_sample(packet, "op1", "exp1")
+    assert res.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "journal_root_resolved_hash mismatch" in (res.error_message or "")
+
+
+def test_l5_different_namespace_yields_not_sent(clean_journal_dir: str) -> None:
+    """L5: different namespace -> authorization mismatch -> NOT_SENT."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir, namespace="ns_actual")
+    auth = _make_live_authorization(journal, ns_hash="e" * 64)
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    res = executor.execute_sample(packet, "op1", "exp1")
+    assert res.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "journal_namespace_hash mismatch" in (res.error_message or "")
+
+
+def test_l6_concurrent_same_sample_attempts_exactly_one_claim_winner(clean_journal_dir: str) -> None:
+    """L6: two concurrent same-sample attempts -> exactly one atomic claim winner."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, authorized_ids=("id_concurrent",))
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor1 = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    executor2 = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id_concurrent")
+    barrier = threading.Barrier(2)
+
+    def run_exec(ex: ContextRelevanceLiveDiagnosticExecutor, op_id: str):
+        barrier.wait()
+        return ex.execute_sample(packet, op_id, "exp1")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(run_exec, executor1, "op_worker1")
+        f2 = pool.submit(run_exec, executor2, "op_worker2")
+        r1 = f1.result()
+        r2 = f2.result()
+
+    results = [r1, r2]
+    statuses = [r.status for r in results]
+    assert statuses.count(DiagnosticOutcomeStatus.OBSERVED_OK) == 1
+    assert statuses.count(DiagnosticOutcomeStatus.NOT_SENT) == 1
+    loser = [r for r in results if r.status == DiagnosticOutcomeStatus.NOT_SENT][0]
+    assert "ALREADY_CLAIMED" in (loser.error_message or "")
+    assert executor1.physical_network_attempts + executor2.physical_network_attempts == 0
+
+
+def test_l7_process_restart_from_request_attempt_started_no_second_dispatch(clean_journal_dir: str) -> None:
+    """L7: process/restart from REQUEST_ATTEMPT_STARTED -> no second dispatch eligibility."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, authorized_ids=("id_crash",))
+    auth_hash = auth.compute_authorization_hash()
+
+    # Pre-claim and write REQUEST_ATTEMPT_STARTED to simulate crash during flight
+    journal.try_atomic_claim("exp1", "id_crash", auth_hash, "op_dead")
+    journal.write_state_atomic(
+        "id_crash",
+        auth_hash,
+        DiagnosticJournalState.REQUEST_ATTEMPT_STARTED,
+        operation_id="op_dead",
+        attempt_count=1,
+    )
+
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor_restarted = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id_crash")
+    res = executor_restarted.execute_sample(packet, "op_restart", "exp1")
+
+    assert res.status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN
+    assert "no second dispatch eligibility" in (res.error_message or "")
+    assert executor_restarted.physical_network_attempts == 0
+
+    state = journal.read_state("id_crash", auth_hash)
+    assert state is not None
+    assert state["journal_state"] == DiagnosticJournalState.OUTCOME_UNKNOWN.value
+
+
+def test_l8_outcome_unknown_halts_subsequent_samples(clean_journal_dir: str) -> None:
+    """L8: OUTCOME_UNKNOWN -> all subsequent samples NOT_SENT."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, authorized_ids=("id1", "id2", "id3"))
+    auth_hash = auth.compute_authorization_hash()
+
+    # Inject interrupted attempt on id2
+    journal.try_atomic_claim("exp1", "id2", auth_hash, "op_dead")
+    journal.write_state_atomic(
+        "id2",
+        auth_hash,
+        DiagnosticJournalState.REQUEST_ATTEMPT_STARTED,
+        operation_id="op_dead",
+        attempt_count=1,
+    )
+
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    p1 = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    p2 = _make_dummy_packet(sample_id="s2", semantic_input_id="id2")
+    p3 = _make_dummy_packet(sample_id="s3", semantic_input_id="id3")
+
+    results = executor.execute_batch([p1, p2, p3], "op_batch", "exp1")
+    assert len(results) == 3
+    assert results[0].status == DiagnosticOutcomeStatus.OBSERVED_OK
+    assert results[1].status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN
+    assert results[2].status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "BATCH_HALTED_DUE_TO_OUTCOME_UNKNOWN" in (results[2].error_message or "")
+
+
+def test_l9_unauthorized_semantic_input_id_yields_zero_dispatch(clean_journal_dir: str) -> None:
+    """L9: unauthorized semantic_input_id -> zero dispatch."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, authorized_ids=("id_valid",))
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id_unauthorized")
+    res = executor.execute_sample(packet, "op1", "exp1")
+    assert res.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "Unauthorized" in (res.error_message or "")
+    assert executor.physical_network_attempts == 0
+    assert executor.total_claims_consumed == 0
+
+
+def test_l10_authorization_candidate_revision_mismatch_yields_zero_dispatch(clean_journal_dir: str) -> None:
+    """L10: authorization Candidate/live-contract revision mismatch -> zero dispatch."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, candidate_sha="1" * 40)
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha="2" * 40
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    res = executor.execute_sample(packet, "op1", "exp1")
+    assert res.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "live_contract_revision mismatch" in (res.error_message or "")
+    assert executor.physical_network_attempts == 0
+
+
+def test_l11_wire_hash_mismatch_yields_zero_dispatch(clean_journal_dir: str) -> None:
+    """L11: wire hash mismatch -> zero dispatch."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, wire_hash="0" * 64)
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    res = executor.execute_sample(packet, "op1", "exp1")
+    assert res.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "wire_contract_hash mismatch" in (res.error_message or "")
+    assert executor.physical_network_attempts == 0
+
+
+def test_l12_question_contract_mismatch_yields_zero_dispatch(clean_journal_dir: str) -> None:
+    """L12: question contract mismatch -> zero dispatch."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, q_hash="0" * 64)
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    res = executor.execute_sample(packet, "op1", "exp1")
+    assert res.status == DiagnosticOutcomeStatus.NOT_SENT
+    assert "question_contract_hash mismatch" in (res.error_message or "")
+    assert executor.physical_network_attempts == 0
+
+
+def test_l13_zero_call_preflight_network_attempts_zero(clean_journal_dir: str) -> None:
+    """L13: zero-call preflight network attempts = 0."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, authorized_ids=("id1", "id2"))
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    p1 = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    p2 = _make_dummy_packet(sample_id="s2", semantic_input_id="id2")
+    results = executor.execute_batch([p1, p2], "op1", "exp1")
+    assert len(results) == 2
+    assert executor.physical_network_attempts == 0
+
+
+def test_l14_zero_call_preflight_api_key_reads_zero(clean_journal_dir: str) -> None:
+    """L14: zero-call preflight API key reads = 0."""
+    journal = DiagnosticExecutionJournal(root_dir=clean_journal_dir)
+    auth = _make_live_authorization(journal, authorized_ids=("id1",))
+    wire = get_authoritative_h2b_wire_descriptor()
+    q = ContextRelevanceQuestionContractV1()
+    executor = ContextRelevanceLiveDiagnosticExecutor(
+        auth, q, wire, journal, current_candidate_sha=auth.live_contract_revision
+    )
+    packet = _make_dummy_packet(sample_id="s1", semantic_input_id="id1")
+    executor.execute_sample(packet, "op1", "exp1")
+    assert executor.api_key_reads == 0
+
+
+def test_l15_risk_contract_cannot_substitute_relevance_contract() -> None:
+    """L15: risk contract cannot substitute relevance contract."""
+    wire = get_authoritative_h2b_wire_descriptor()
+    risk_contract = F4QuestionContractV1()
+    p_state = ContextRelevanceProviderStateV1(
+        current_task="task",
+        segment_text="segment",
+        source_type="TOOL_RESULT",
+        age_or_stage_metadata="turn_1",
+    )
+    with pytest.raises(TypeError, match="must be ContextRelevanceQuestionContractV1"):
+        build_context_relevance_provider_request(risk_contract, p_state, wire)  # type: ignore[arg-type]

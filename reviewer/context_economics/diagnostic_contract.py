@@ -16,6 +16,7 @@ from enum import Enum
 import hashlib
 import json
 import os
+import re
 from typing import Any, Sequence
 
 from reviewer.context_economics.fixtures import SessionFixtureGenerator
@@ -25,6 +26,10 @@ from reviewer.context_economics.models import (
     SyntheticRankerMode,
 )
 from reviewer.context_economics.simulation import run_session_simulation
+from reviewer.hosted_wire_contract import (
+    HostedProviderWireDescriptorV1,
+    load_wire_descriptor_from_dict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +152,9 @@ class ContextRelevanceProviderStateV1:
             "age_or_stage_metadata": self.age_or_stage_metadata,
         }
 
+    def as_payload(self) -> dict[str, str]:
+        return self.canonical_payload()
+
     def canonical_serialization(self) -> str:
         return json.dumps(self.canonical_payload(), sort_keys=True, separators=(",", ":"))
 
@@ -211,21 +219,34 @@ class DiagnosticSamplePacketV1:
 class ContextRelevanceDiagnosticAuthorizationV1:
     """Durable batch authorization for Context Relevance Diagnostic experiment."""
 
-    candidate_sha: str
-    fixture_hash: str
-    diagnostic_sample_hash: str
-    question_contract_hash: str
-    provider_state_schema_hash: str
-    wire_contract_hash: str
-    endpoint_host: str
-    authorized_semantic_input_ids: tuple[str, ...]
+    live_contract_revision: str = ""
+    sample_source_revision: str = "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e"
+    fixture_hash: str = ""
+    diagnostic_sample_hash: str = ""
+    question_contract_hash: str = ""
+    provider_state_schema_hash: str = ""
+    wire_contract_hash: str = ""
+    endpoint_host: str = ""
+    authorized_semantic_input_ids: tuple[str, ...] = ()
+    journal_root_resolved_hash: str = ""
+    journal_namespace_hash: str = ""
     authorized_backup_sample_ids: tuple[str, ...] = ()
     max_calls: int = 0
-    journal_namespace_hash: str = ""
+    diagnostic_packet_hash: str = ""
+    authorization_schema_version: str = "ContextRelevanceDiagnosticAuthorizationV1"
+    candidate_sha: str = ""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.candidate_sha, str) or len(self.candidate_sha) != 40:
-            raise ValueError("candidate_sha must be a 40-character hex commit SHA")
+        if not self.live_contract_revision and self.candidate_sha:
+            object.__setattr__(self, "live_contract_revision", self.candidate_sha)
+        elif not self.candidate_sha and self.live_contract_revision:
+            object.__setattr__(self, "candidate_sha", self.live_contract_revision)
+
+        if not isinstance(self.live_contract_revision, str) or len(self.live_contract_revision) != 40:
+            raise ValueError("live_contract_revision (or candidate_sha) must be a 40-character hex commit SHA")
+
+        if not isinstance(self.sample_source_revision, str) or len(self.sample_source_revision) != 40:
+            raise ValueError("sample_source_revision must be a 40-character hex commit SHA")
 
         for name, val in (
             ("fixture_hash", self.fixture_hash),
@@ -233,9 +254,16 @@ class ContextRelevanceDiagnosticAuthorizationV1:
             ("question_contract_hash", self.question_contract_hash),
             ("provider_state_schema_hash", self.provider_state_schema_hash),
             ("wire_contract_hash", self.wire_contract_hash),
-            ("journal_namespace_hash", self.journal_namespace_hash),
         ):
             if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdef" for c in val):
+                raise ValueError(f"{name} must be a valid 64-character lowercase hexadecimal hash")
+
+        for name, val in (
+            ("journal_root_resolved_hash", self.journal_root_resolved_hash),
+            ("journal_namespace_hash", self.journal_namespace_hash),
+            ("diagnostic_packet_hash", self.diagnostic_packet_hash),
+        ):
+            if val and (len(val) != 64 or not all(c in "0123456789abcdef" for c in val)):
                 raise ValueError(f"{name} must be a valid 64-character lowercase hexadecimal hash")
 
         if not isinstance(self.endpoint_host, str) or not self.endpoint_host.strip():
@@ -248,25 +276,52 @@ class ContextRelevanceDiagnosticAuthorizationV1:
             )
 
     def compute_authorization_hash(self) -> str:
+        endpoint_host_hash = hashlib.sha256(self.endpoint_host.encode("utf-8")).hexdigest()
         payload = {
-            "candidate_sha": self.candidate_sha,
-            "fixture_hash": self.fixture_hash,
-            "diagnostic_sample_hash": self.diagnostic_sample_hash,
-            "question_contract_hash": self.question_contract_hash,
-            "provider_state_schema_hash": self.provider_state_schema_hash,
-            "wire_contract_hash": self.wire_contract_hash,
-            "endpoint_host": self.endpoint_host,
-            "authorized_semantic_input_ids": list(self.authorized_semantic_input_ids),
+            "authorization_schema_version": self.authorization_schema_version,
             "authorized_backup_sample_ids": list(self.authorized_backup_sample_ids),
-            "max_calls": self.max_calls,
+            "authorized_semantic_input_ids": list(self.authorized_semantic_input_ids),
+            "diagnostic_packet_hash": self.diagnostic_packet_hash,
+            "diagnostic_sample_hash": self.diagnostic_sample_hash,
+            "endpoint_host_hash": endpoint_host_hash,
+            "fixture_hash": self.fixture_hash,
             "journal_namespace_hash": self.journal_namespace_hash,
+            "journal_root_resolved_hash": self.journal_root_resolved_hash,
+            "live_contract_revision": self.live_contract_revision,
+            "max_calls": self.max_calls,
+            "provider_state_schema_hash": self.provider_state_schema_hash,
+            "question_contract_hash": self.question_contract_hash,
+            "sample_source_revision": self.sample_source_revision,
+            "wire_contract_hash": self.wire_contract_hash,
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
+    def generate_public_preview(self) -> dict[str, Any]:
+        endpoint_host_hash = hashlib.sha256(self.endpoint_host.encode("utf-8")).hexdigest()
+        auth_hash = self.compute_authorization_hash()
+        return {
+            "authorization_schema_version": self.authorization_schema_version,
+            "authorization_hash": auth_hash,
+            "diagnostic_packet_hash": self.diagnostic_packet_hash,
+            "live_contract_revision": self.live_contract_revision,
+            "sample_source_revision": self.sample_source_revision,
+            "fixture_hash": self.fixture_hash,
+            "sample_hash": self.diagnostic_sample_hash,
+            "question_contract_hash": self.question_contract_hash,
+            "provider_state_schema_hash": self.provider_state_schema_hash,
+            "wire_contract_hash": self.wire_contract_hash,
+            "endpoint_host_hash": endpoint_host_hash,
+            "journal_root_hash": self.journal_root_resolved_hash,
+            "journal_namespace_hash": self.journal_namespace_hash,
+            "exact_sample_count": len(self.authorized_semantic_input_ids),
+            "max_calls": self.max_calls,
+            "unbound_calls": 0,
+        }
+
 
 # ---------------------------------------------------------------------------
-# 5. Outcome Status & Journal
+# 5. Outcome Status & Journal State Machine
 # ---------------------------------------------------------------------------
 
 class DiagnosticOutcomeStatus(str, Enum):
@@ -277,22 +332,53 @@ class DiagnosticOutcomeStatus(str, Enum):
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
 
 
+class DiagnosticJournalState(str, Enum):
+    """Lifecycle states of the durable context-relevance diagnostic journal."""
+
+    PREPARED = "PREPARED"
+    REQUEST_ATTEMPT_STARTED = "REQUEST_ATTEMPT_STARTED"
+    OBSERVED_OK = "OBSERVED_OK"
+    OBSERVED_CLIENT_FAILURE = "OBSERVED_CLIENT_FAILURE"
+    OBSERVED_PROVIDER_FAILURE = "OBSERVED_PROVIDER_FAILURE"
+    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+    NOT_SENT = "NOT_SENT"
+
+
 class DiagnosticExecutionJournal:
     """Private execution journal outside git repos with strict permissions."""
 
-    def __init__(self, root_dir: str | None = None, namespace: str = "wave1-diag"):
+    def __init__(
+        self,
+        root_dir: str | None = None,
+        namespace: str = "wave1-diag",
+        *,
+        is_live_executor: bool = False,
+    ):
         self.namespace = namespace
-        self.root_dir = root_dir or os.environ.get(
-            "NEXUS_PRIVATE_EVAL_ROOT", "/tmp/nexus-private-eval"
-        )
-        self.journal_dir = os.path.join(self.root_dir, "context-economics-diagnostic-journal")
+        self.is_live_executor = is_live_executor
+
+        if root_dir is not None:
+            raw_root = root_dir
+        else:
+            env_root = os.environ.get("NEXUS_PRIVATE_EVAL_ROOT")
+            if not env_root:
+                raise RuntimeError(
+                    "LIVE_DIAGNOSTIC_NOT_SENT_PRIVATE_ROOT_UNAVAILABLE: "
+                    "NEXUS_PRIVATE_EVAL_ROOT environment variable must be set; fallback to /tmp forbidden"
+                )
+            raw_root = env_root
+
+        if os.path.islink(raw_root):
+            raise ValueError(f"Journal root {raw_root} must not be a symlink")
+
+        self.resolved_root = os.path.realpath(raw_root)
+        self.journal_dir = os.path.join(self.resolved_root, "context-economics-diagnostic-journal")
         self._ensure_safe_dir()
 
     def _ensure_safe_dir(self) -> None:
         if os.path.islink(self.journal_dir):
             raise ValueError(f"Journal dir {self.journal_dir} must not be a symlink")
 
-        # Check outside git repository
         parent = os.path.abspath(self.journal_dir)
         while parent and parent != "/":
             if os.path.isdir(os.path.join(parent, ".git")):
@@ -305,11 +391,87 @@ class DiagnosticExecutionJournal:
         except OSError:
             pass
 
+    def get_root_resolved_hash(self) -> str:
+        return hashlib.sha256(self.resolved_root.encode("utf-8")).hexdigest()
+
     def get_namespace_hash(self) -> str:
         return hashlib.sha256(self.namespace.encode("utf-8")).hexdigest()
 
     def get_log_path(self) -> str:
         return os.path.join(self.journal_dir, f"journal-{self.get_namespace_hash()[:16]}.jsonl")
+
+    def get_claim_path(self, semantic_input_id: str, authorization_hash: str) -> str:
+        claim_key = hashlib.sha256(f"{semantic_input_id}:{authorization_hash}".encode("utf-8")).hexdigest()
+        return os.path.join(self.journal_dir, f"claim-{claim_key}.json")
+
+    def try_atomic_claim(
+        self,
+        experiment_id: str,
+        semantic_input_id: str,
+        authorization_hash: str,
+        operation_id: str,
+    ) -> bool:
+        """Atomically claim a sample for execution."""
+        claim_path = self.get_claim_path(semantic_input_id, authorization_hash)
+        claim_data = {
+            "experiment_id": experiment_id,
+            "semantic_input_id": semantic_input_id,
+            "authorization_hash": authorization_hash,
+            "operation_id": operation_id,
+        }
+        encoded = json.dumps(claim_data, sort_keys=True, indent=2).encode("utf-8")
+        try:
+            fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return False
+
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return True
+
+    def get_state_path(self, semantic_input_id: str, authorization_hash: str) -> str:
+        state_key = hashlib.sha256(f"{semantic_input_id}:{authorization_hash}".encode("utf-8")).hexdigest()
+        return os.path.join(self.journal_dir, f"state-{state_key}.json")
+
+    def read_state(self, semantic_input_id: str, authorization_hash: str) -> dict[str, Any] | None:
+        spath = self.get_state_path(semantic_input_id, authorization_hash)
+        if not os.path.exists(spath):
+            return None
+        try:
+            with open(spath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def write_state_atomic(
+        self,
+        semantic_input_id: str,
+        authorization_hash: str,
+        state: DiagnosticJournalState,
+        operation_id: str,
+        attempt_count: int,
+        extra_fields: dict[str, Any] | None = None,
+    ) -> None:
+        spath = self.get_state_path(semantic_input_id, authorization_hash)
+        tmp_path = f"{spath}.tmp.{os.getpid()}"
+        data = {
+            "semantic_input_id": semantic_input_id,
+            "authorization_hash": authorization_hash,
+            "operation_id": operation_id,
+            "journal_state": state.value,
+            "attempt_count": attempt_count,
+        }
+        if extra_fields:
+            data.update(extra_fields)
+        encoded = json.dumps(data, sort_keys=True, indent=2).encode("utf-8")
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(encoded)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, spath)
 
     def record_attempt(
         self,
@@ -360,7 +522,7 @@ class DiagnosticExecutionJournal:
 
 
 # ---------------------------------------------------------------------------
-# 6. Zero-Call Executor
+# 6. Zero-Call & Live Diagnostic Executors
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -486,6 +648,390 @@ class ContextRelevanceDiagnosticExecutor:
         return results
 
 
+def get_authoritative_h2b_wire_descriptor() -> HostedProviderWireDescriptorV1:
+    """Return the authoritative H2B wire contract descriptor."""
+    data = {
+        "contract_schema_version": "f4-hosted-wire-v1",
+        "http_method": "POST",
+        "request_path": "/v1/systemone",
+        "auth_mode": "BEARER",
+        "auth_header_name": "Authorization",
+        "content_type": "application/json",
+        "expected_model_identifier": "jev-latest",
+        "request_template_kind": "systemone_noul",
+        "response_probability_path": "answers.decision.noul",
+        "api_version_source": "OPENAPI_INFO_0.2.0_PATH_V1",
+        "provider_schema_identity": "typesafe-openapi-0.2.0-systemone-v1",
+    }
+    return load_wire_descriptor_from_dict(data)
+
+
+def build_context_relevance_provider_request(
+    question_contract: ContextRelevanceQuestionContractV1,
+    provider_state: ContextRelevanceProviderStateV1,
+    wire_descriptor: HostedProviderWireDescriptorV1,
+) -> dict[str, Any]:
+    """Deterministic builder for Context Relevance provider request wire payload.
+
+    Zero-network, zero-secret: serializes official SystemOne format using
+    the frozen Context Relevance question instructions and sanitized provider state.
+    """
+    if not isinstance(question_contract, ContextRelevanceQuestionContractV1):
+        raise TypeError(
+            f"question_contract must be ContextRelevanceQuestionContractV1, got {type(question_contract).__name__}"
+        )
+    if question_contract.primitive != "NOUL":
+        raise ValueError(f"Context relevance wire requires primitive='NOUL', got {question_contract.primitive!r}")
+
+    if wire_descriptor.http_method != "POST":
+        raise ValueError(f"Only POST method is supported, got {wire_descriptor.http_method!r}")
+    if wire_descriptor.request_template_kind != "systemone_noul":
+        raise ValueError(
+            f"Requires request_template_kind='systemone_noul', got {wire_descriptor.request_template_kind!r}"
+        )
+    if wire_descriptor.response_probability_path != "answers.decision.noul":
+        raise ValueError(
+            f"Requires response_probability_path='answers.decision.noul', got {wire_descriptor.response_probability_path!r}"
+        )
+
+    body_dict: dict[str, Any] = {
+        "model": wire_descriptor.expected_model_identifier,
+        "questions": {
+            "decision": {
+                "type": "noul",
+                "instructions": question_contract.question_statement,
+            }
+        },
+        "state": provider_state.as_payload(),
+    }
+    encoded = json.dumps(body_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    body_payload_hash = hashlib.sha256(encoded).hexdigest()
+
+    return {
+        "method": wire_descriptor.http_method,
+        "request_path": wire_descriptor.request_path,
+        "auth_header_name": wire_descriptor.auth_header_name,
+        "content_type": wire_descriptor.content_type,
+        "body_dict": body_dict,
+        "body_json": encoded.decode("utf-8"),
+        "body_payload_hash": body_payload_hash,
+    }
+
+
+class ContextRelevanceLiveDiagnosticExecutor:
+    """Live diagnostic executor with zero-call hard gate for Context Relevance."""
+
+    owner_live_authorization_required: bool = True
+    allow_physical_network_calls: bool = False  # Hard gate: frozen OFF in this gate
+
+    def __init__(
+        self,
+        authorization: ContextRelevanceDiagnosticAuthorizationV1,
+        question_contract: ContextRelevanceQuestionContractV1,
+        wire_descriptor: HostedProviderWireDescriptorV1,
+        journal: DiagnosticExecutionJournal,
+        *,
+        current_candidate_sha: str,
+        api_key_env_var_name: str = "JEV_API_KEY",
+        owner_runtime_authorization_granted: bool = False,
+    ):
+        if not isinstance(question_contract, ContextRelevanceQuestionContractV1):
+            raise TypeError("question_contract must be ContextRelevanceQuestionContractV1")
+
+        self.authorization = authorization
+        self.question_contract = question_contract
+        self.wire_descriptor = wire_descriptor
+        self.journal = journal
+        self.current_candidate_sha = current_candidate_sha
+        self.api_key_env_var_name = api_key_env_var_name
+        self.owner_runtime_authorization_granted = owner_runtime_authorization_granted
+
+        self.physical_network_attempts = 0
+        self.api_key_reads = 0
+        self.total_claims_consumed = 0
+
+    def preflight_check(self) -> tuple[bool, str | None]:
+        """Perform zero-call, zero-network preflight verification."""
+        # 1. Candidate revision check
+        if self.authorization.live_contract_revision != self.current_candidate_sha:
+            return (
+                False,
+                f"Authorization live_contract_revision mismatch: auth={self.authorization.live_contract_revision} current={self.current_candidate_sha}",
+            )
+
+        # 2. Wire hash check
+        wire_hash = self.wire_descriptor.canonical_wire_hash()
+        if self.authorization.wire_contract_hash != wire_hash:
+            return (
+                False,
+                f"Authorization wire_contract_hash mismatch: auth={self.authorization.wire_contract_hash} expected={wire_hash}",
+            )
+
+        # 3. Question contract check
+        if self.authorization.question_contract_hash != self.question_contract.contract_hash:
+            return (
+                False,
+                f"Authorization question_contract_hash mismatch: auth={self.authorization.question_contract_hash} expected={self.question_contract.contract_hash}",
+            )
+
+        # 4. Journal physical root resolved hash check
+        actual_root_hash = self.journal.get_root_resolved_hash()
+        if self.authorization.journal_root_resolved_hash != actual_root_hash:
+            return (
+                False,
+                f"Authorization journal_root_resolved_hash mismatch: auth={self.authorization.journal_root_resolved_hash} actual={actual_root_hash}",
+            )
+
+        # 5. Journal namespace hash check
+        actual_ns_hash = self.journal.get_namespace_hash()
+        if self.authorization.journal_namespace_hash != actual_ns_hash:
+            return (
+                False,
+                f"Authorization journal_namespace_hash mismatch: auth={self.authorization.journal_namespace_hash} actual={actual_ns_hash}",
+            )
+
+        # 6. Credential metadata check (zero-call: only verify name is non-empty string, do not read secret!)
+        if not self.api_key_env_var_name or not isinstance(self.api_key_env_var_name, str):
+            return False, "api_key_env_var_name must be a non-empty string"
+
+        return True, None
+
+    def execute_sample(
+        self,
+        packet: DiagnosticSamplePacketV1,
+        operation_id: str,
+        experiment_id: str,
+    ) -> DiagnosticExecutionResult:
+        # Preflight check
+        ok, reason = self.preflight_check()
+        if not ok:
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.NOT_SENT,
+                request_hash=packet.compute_packet_hash(),
+                response_hash=None,
+                error_message=reason,
+            )
+
+        # Authorized ID check
+        if packet.semantic_input_id not in self.authorization.authorized_semantic_input_ids:
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.NOT_SENT,
+                request_hash=packet.compute_packet_hash(),
+                response_hash=None,
+                error_message="Unauthorized semantic_input_id: sample not in authorized list",
+            )
+
+        auth_hash = self.authorization.compute_authorization_hash()
+
+        # Check existing state in journal (restart check)
+        existing_state = self.journal.read_state(packet.semantic_input_id, auth_hash)
+        if existing_state:
+            curr_j_state = existing_state.get("journal_state")
+            if curr_j_state == DiagnosticJournalState.REQUEST_ATTEMPT_STARTED.value:
+                # Process disappeared or restarted after REQUEST_ATTEMPT_STARTED:
+                # Mark OUTCOME_UNKNOWN and forbid second dispatch!
+                self.journal.write_state_atomic(
+                    packet.semantic_input_id,
+                    auth_hash,
+                    DiagnosticJournalState.OUTCOME_UNKNOWN,
+                    operation_id=operation_id,
+                    attempt_count=existing_state.get("attempt_count", 1),
+                    extra_fields={"reason": "RECONCILE_ONLY_PREVIOUS_ATTEMPT_INTERRUPTED"},
+                )
+                return DiagnosticExecutionResult(
+                    sample_id=packet.sample_id,
+                    semantic_input_id=packet.semantic_input_id,
+                    status=DiagnosticOutcomeStatus.OUTCOME_UNKNOWN,
+                    request_hash=packet.compute_packet_hash(),
+                    response_hash=None,
+                    error_message="RECONCILE_ONLY: previous attempt interrupted at REQUEST_ATTEMPT_STARTED; no second dispatch eligibility",
+                )
+            elif curr_j_state in (
+                DiagnosticJournalState.OBSERVED_OK.value,
+                DiagnosticJournalState.OBSERVED_CLIENT_FAILURE.value,
+                DiagnosticJournalState.OBSERVED_PROVIDER_FAILURE.value,
+                DiagnosticJournalState.OUTCOME_UNKNOWN.value,
+                DiagnosticJournalState.NOT_SENT.value,
+            ):
+                return DiagnosticExecutionResult(
+                    sample_id=packet.sample_id,
+                    semantic_input_id=packet.semantic_input_id,
+                    status=DiagnosticOutcomeStatus(curr_j_state),
+                    request_hash=packet.compute_packet_hash(),
+                    response_hash=None,
+                    error_message=f"Replay blocked: sample already in terminal state {curr_j_state}",
+                )
+
+        # Atomic per-sample claim
+        claimed = self.journal.try_atomic_claim(
+            experiment_id=experiment_id,
+            semantic_input_id=packet.semantic_input_id,
+            authorization_hash=auth_hash,
+            operation_id=operation_id,
+        )
+        if not claimed:
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.NOT_SENT,
+                request_hash=packet.compute_packet_hash(),
+                response_hash=None,
+                error_message="ALREADY_CLAIMED: atomic sample claim exists",
+            )
+
+        self.total_claims_consumed += 1
+
+        # Check call ceiling
+        if self.total_claims_consumed > self.authorization.max_calls:
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.NOT_SENT,
+                request_hash=packet.compute_packet_hash(),
+                response_hash=None,
+                error_message="MAX_CALLS_EXHAUSTED",
+            )
+
+        # PREPARED state
+        self.journal.write_state_atomic(
+            packet.semantic_input_id,
+            auth_hash,
+            DiagnosticJournalState.PREPARED,
+            operation_id=operation_id,
+            attempt_count=0,
+        )
+
+        # Build wire request (zero-call serialization inspection)
+        req = build_context_relevance_provider_request(
+            self.question_contract,
+            packet.provider_state,
+            self.wire_descriptor,
+        )
+
+        # Zero-call gate check: network calls frozen
+        if not self.owner_runtime_authorization_granted or not self.allow_physical_network_calls:
+            # Zero-call preflight: record terminal state as OBSERVED_OK in dry-run
+            self.journal.write_state_atomic(
+                packet.semantic_input_id,
+                auth_hash,
+                DiagnosticJournalState.OBSERVED_OK,
+                operation_id=operation_id,
+                attempt_count=0,
+                extra_fields={"zero_call_preflight": True, "request_payload_hash": req["body_payload_hash"]},
+            )
+            return DiagnosticExecutionResult(
+                sample_id=packet.sample_id,
+                semantic_input_id=packet.semantic_input_id,
+                status=DiagnosticOutcomeStatus.OBSERVED_OK,
+                request_hash=req["body_payload_hash"],
+                response_hash=hashlib.sha256(b"zero_call_preflight_simulated").hexdigest(),
+                error_message=None,
+            )
+
+        # If live execution were enabled (it is frozen in this gate):
+        self.journal.write_state_atomic(
+            packet.semantic_input_id,
+            auth_hash,
+            DiagnosticJournalState.REQUEST_ATTEMPT_STARTED,
+            operation_id=operation_id,
+            attempt_count=1,
+        )
+        self.physical_network_attempts += 1
+        raise RuntimeError("PHYSICAL_NETWORK_CALLS_FROZEN_IN_ZERO_CALL_GATE")
+
+    def execute_batch(
+        self,
+        packets: Sequence[DiagnosticSamplePacketV1],
+        operation_id: str,
+        experiment_id: str,
+    ) -> list[DiagnosticExecutionResult]:
+        results: list[DiagnosticExecutionResult] = []
+        stopped_due_to_unknown = False
+
+        for p in packets:
+            if stopped_due_to_unknown:
+                results.append(
+                    DiagnosticExecutionResult(
+                        sample_id=p.sample_id,
+                        semantic_input_id=p.semantic_input_id,
+                        status=DiagnosticOutcomeStatus.NOT_SENT,
+                        request_hash=p.compute_packet_hash(),
+                        response_hash=None,
+                        error_message="BATCH_HALTED_DUE_TO_OUTCOME_UNKNOWN",
+                    )
+                )
+                continue
+
+            res = self.execute_sample(p, operation_id, experiment_id)
+            results.append(res)
+            if res.status == DiagnosticOutcomeStatus.OUTCOME_UNKNOWN:
+                stopped_due_to_unknown = True
+
+        return results
+
+
+def generate_context_relevance_authorization_preview(
+    live_contract_revision: str,
+    sample_source_revision: str = "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e",
+    fixture_hash: str = "479e7484b13118398a0ce34885d3f629ed7701a30f1bb6e94a1fc46aab116102",
+    diagnostic_sample_hash: str = "5c0365d7d179ca233fbec0db46cc2d5698f1cce550ab69dd3d59e98eacdba8f5",
+    question_contract_hash: str = "a7b75a88641668c1eb4bb460cd0f5ad8ffc3dff94e53b34bbc4791fcfff7aac9",
+    provider_state_schema_hash: str = "bdfcd045b233a84618a7b26ffc963838ab41c480f3d694c989b4efa8910a70ac",
+    wire_contract_hash: str = "586a75c42a22cb6f6cb03afd81cdea33695dd377384f75a1d24d3b81382cb66e",
+    endpoint_host: str = "api.jev.ai",
+    journal_root_resolved_path: str = "/var/run/nexus-private-eval",
+    journal_namespace: str = "wave1-diag",
+    authorized_semantic_input_ids: Sequence[str] = (),
+    diagnostic_packet_hash: str = "d3120e10f83a80da9e84ed5ec4e13064a6af160fb53d6b00f8fa0f304125ea99",
+) -> tuple[ContextRelevanceDiagnosticAuthorizationV1, dict[str, Any]]:
+    """Generate exact durable ContextRelevanceDiagnosticAuthorizationV1 and preview dict."""
+    root_resolved = os.path.realpath(journal_root_resolved_path) if journal_root_resolved_path else "/var/run/nexus-private-eval"
+    root_hash = hashlib.sha256(root_resolved.encode("utf-8")).hexdigest()
+    ns_hash = hashlib.sha256(journal_namespace.encode("utf-8")).hexdigest()
+    endpoint_host_hash = hashlib.sha256(endpoint_host.encode("utf-8")).hexdigest()
+
+    auth = ContextRelevanceDiagnosticAuthorizationV1(
+        authorization_schema_version="ContextRelevanceDiagnosticAuthorizationV1",
+        live_contract_revision=live_contract_revision,
+        sample_source_revision=sample_source_revision,
+        fixture_hash=fixture_hash,
+        diagnostic_sample_hash=diagnostic_sample_hash,
+        question_contract_hash=question_contract_hash,
+        provider_state_schema_hash=provider_state_schema_hash,
+        wire_contract_hash=wire_contract_hash,
+        endpoint_host=endpoint_host,
+        journal_root_resolved_hash=root_hash,
+        journal_namespace_hash=ns_hash,
+        authorized_semantic_input_ids=tuple(authorized_semantic_input_ids),
+        authorized_backup_sample_ids=(),
+        max_calls=len(authorized_semantic_input_ids),
+        diagnostic_packet_hash=diagnostic_packet_hash,
+    )
+    auth_hash = auth.compute_authorization_hash()
+
+    preview = {
+        "live_contract_revision": live_contract_revision,
+        "sample_source_revision": sample_source_revision,
+        "fixture_hash": fixture_hash,
+        "sample_hash": diagnostic_sample_hash,
+        "question_contract_hash": question_contract_hash,
+        "provider_state_schema_hash": provider_state_schema_hash,
+        "wire_contract_hash": wire_contract_hash,
+        "endpoint_host_hash": endpoint_host_hash,
+        "journal_root_hash": root_hash,
+        "journal_namespace_hash": ns_hash,
+        "exact_sample_count": len(authorized_semantic_input_ids),
+        "max_calls": len(authorized_semantic_input_ids),
+        "unbound_calls": 0,
+        "authorization_hash": auth_hash,
+    }
+    return auth, preview
+
+
 # ---------------------------------------------------------------------------
 # 7. Deterministic Stratified Sample Generator
 # ---------------------------------------------------------------------------
@@ -608,17 +1154,23 @@ def generate_wave1_diagnostic_sample_packets(
 
 
 def generate_diagnostic_live_packet_artifact(
-    candidate_sha: str,
+    sample_source_revision: str = "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e",
     seed: str = "EXP_C_WAVE1_V2",
+    candidate_sha: str | None = None,
 ) -> dict[str, Any]:
     """Generate physical zero-call diagnostic packet artifact."""
+    if candidate_sha and (not sample_source_revision or sample_source_revision == "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e"):
+        effective_source_rev = candidate_sha
+    else:
+        effective_source_rev = sample_source_revision
+
     packets, strata_counts, sample_hash, fixture_hash = generate_wave1_diagnostic_sample_packets(seed=seed)
     q_contract = ContextRelevanceQuestionContractV1()
     p_schema_hash = ContextRelevanceProviderStateV1.compute_schema_hash()
 
     packet_data: dict[str, Any] = {
-        "schema_version": "context-relevance-diagnostic-live-packet-v1",
-        "candidate_sha": candidate_sha,
+        "schema_version": "context-relevance-diagnostic-live-packet-v2",
+        "sample_source_revision": effective_source_rev,
         "fixture_hash": fixture_hash,
         "sample_hash": sample_hash,
         "question_contract_hash": q_contract.contract_hash,
@@ -645,16 +1197,12 @@ if __name__ == "__main__":
     import argparse
     import subprocess
     parser = argparse.ArgumentParser(description="Generate diagnostic live packet artifact")
-    parser.add_argument("--candidate-sha", default=None, help="Candidate git SHA")
+    parser.add_argument("--sample-source-revision", default="1a82954e0ddcf90427bbad3dd36dfbea732f1f4e", help="Sample source revision")
+    parser.add_argument("--candidate-sha", default=None, help="Candidate git SHA (alias for source revision)")
     parser.add_argument("--output", default=None, help="Output file path")
     args = parser.parse_args()
-    sha = args.candidate_sha
-    if not sha:
-        try:
-            sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode("utf-8").strip()
-        except Exception:
-            sha = "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e"
-    artifact = generate_diagnostic_live_packet_artifact(candidate_sha=sha)
+    source_rev = args.candidate_sha or args.sample_source_revision
+    artifact = generate_diagnostic_live_packet_artifact(sample_source_revision=source_rev)
     serialized = json.dumps(artifact, indent=2)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:

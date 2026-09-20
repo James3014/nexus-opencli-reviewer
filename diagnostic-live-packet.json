@@ -1,6 +1,6 @@
 {
-  "schema_version": "context-relevance-diagnostic-live-packet-v1",
-  "candidate_sha": "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e",
+  "schema_version": "context-relevance-diagnostic-live-packet-v2",
+  "sample_source_revision": "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e",
   "fixture_hash": "479e7484b13118398a0ce34885d3f629ed7701a30f1bb6e94a1fc46aab116102",
   "sample_hash": "5c0365d7d179ca233fbec0db46cc2d5698f1cce550ab69dd3d59e98eacdba8f5",
   "question_contract_hash": "a7b75a88641668c1eb4bb460cd0f5ad8ffc3dff94e53b34bbc4791fcfff7aac9",
@@ -49,5 +49,5 @@
     "Auth token expired or invalid",
     "Owner abort"
   ],
-  "packet_hash": "8ac132369dfb0f3d04ae6b0ef4e641acfab4ebe0ee5c8e47763976b91eb6567d"
+  "packet_hash": "d3120e10f83a80da9e84ed5ec4e13064a6af160fb53d6b00f8fa0f304125ea99"
 }
