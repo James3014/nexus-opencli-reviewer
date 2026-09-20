@@ -187,6 +187,7 @@ def test_selective_operating_point_fitting_is_fit_partition_only() -> None:
             [_prediction(cert_case, 0.9)],
             F4QuestionContractV1(),
             prediction_source_hash="b" * 64,
+            calibration_contract_revision="c" * 40,
         )
 
 
@@ -215,6 +216,7 @@ def test_selective_fit_freezes_abstention_region_and_evidence_identity() -> None
         ],
         F4QuestionContractV1(),
         prediction_source_hash="b" * 64,
+        calibration_contract_revision="c" * 40,
     )
     assert frozen.same_threshold == pytest.approx(0.74)
     assert frozen.escalation_threshold == pytest.approx(0.74)
@@ -223,6 +225,7 @@ def test_selective_fit_freezes_abstention_region_and_evidence_identity() -> None
         F4QuestionContractV1(),
     )
     assert frozen.prediction_source_hash == "b" * 64
+    assert frozen.calibration_contract_revision == "c" * 40
 
 
 def test_selective_middle_band_is_abstention_and_reduces_coverage() -> None:
@@ -271,7 +274,11 @@ def test_certification_criteria_preserve_pre_registered_values() -> None:
 
 
 def test_zero_call_preview_fails_closed_without_current_projection() -> None:
-    preview = build_zero_call_authorization_preview([], _config())
+    preview = build_zero_call_authorization_preview(
+        [],
+        _config(),
+        calibration_contract_revision="c" * 40,
+    )
     assert preview.status is (
         F4AuthorizationPreviewStatus.CURRENT_STATE_PROJECTION_REQUIRED
     )
@@ -306,6 +313,7 @@ def test_zero_call_preview_builds_four_exact_25_call_batches() -> None:
     preview = build_zero_call_authorization_preview(
         cases,
         _config(quota=25),
+        calibration_contract_revision="c" * 40,
     )
     assert preview.status is F4AuthorizationPreviewStatus.READY
     assert len(preview.batches) == 4
@@ -348,6 +356,7 @@ def test_heldout_cases_never_enter_calibration_call_plan() -> None:
     preview = build_zero_call_authorization_preview(
         fit + cert + held,
         _config(),
+        calibration_contract_revision="c" * 40,
     )
     planned = {
         case_id
@@ -420,7 +429,11 @@ def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
 def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
     fit = [_case(i, F4CalibrationSplit.CALIBRATION_FIT, high=i < 30) for i in range(50)]
     cert = [_case(100 + i, F4CalibrationSplit.CALIBRATION_CERT, high=i < 30) for i in range(50)]
-    first = build_zero_call_authorization_preview(fit + cert, _config())
+    first = build_zero_call_authorization_preview(
+        fit + cert,
+        _config(),
+        calibration_contract_revision="c" * 40,
+    )
 
     original = fit[0]
     altered = F4CalibrationCaseV1(
@@ -433,7 +446,11 @@ def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
         subgroup=original.subgroup,
         truth_provenance_hash=original.truth_provenance_hash,
     )
-    second = build_zero_call_authorization_preview([altered] + fit[1:] + cert, _config())
+    second = build_zero_call_authorization_preview(
+        [altered] + fit[1:] + cert,
+        _config(),
+        calibration_contract_revision="c" * 40,
+    )
 
     assert first.corpus_manifest_hash != second.corpus_manifest_hash
     assert [b.authorization_hash for b in first.batches] != [
@@ -491,3 +508,28 @@ def test_freeze_manifest_is_bound_to_current_contract() -> None:
     assert manifest["lineage_separation"]["current_noul_operating_point"] == (
         "UNBOUND_UNTIL_CALIBRATION_FIT"
     )
+
+
+def test_authorization_preview_binds_calibration_contract_revision() -> None:
+    fit = [
+        _case(i, F4CalibrationSplit.CALIBRATION_FIT, high=i < 30)
+        for i in range(50)
+    ]
+    cert = [
+        _case(100 + i, F4CalibrationSplit.CALIBRATION_CERT, high=i < 30)
+        for i in range(50)
+    ]
+    first = build_zero_call_authorization_preview(
+        fit + cert,
+        _config(),
+        calibration_contract_revision="c" * 40,
+    )
+    second = build_zero_call_authorization_preview(
+        fit + cert,
+        _config(),
+        calibration_contract_revision="d" * 40,
+    )
+    assert first.plan_hash != second.plan_hash
+    assert [b.authorization_hash for b in first.batches] != [
+        b.authorization_hash for b in second.batches
+    ]

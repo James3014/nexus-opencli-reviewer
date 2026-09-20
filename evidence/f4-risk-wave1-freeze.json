@@ -121,6 +121,9 @@
     "corpus_manifest_hash_required_before_calls": true,
     "corpus_manifest_binds_truth_and_provider_payload_hash": true,
     "authorization_batches_bind_corpus_manifest_hash": true,
-    "operating_point_artifact_requires_prediction_source_hash": true
+    "operating_point_artifact_requires_prediction_source_hash": true,
+    "calibration_contract_revision_required": true,
+    "authorization_batches_bind_calibration_contract_revision": true,
+    "frozen_f4_source_revision_is_distinct_from_calibration_contract_revision": true
   }
 }

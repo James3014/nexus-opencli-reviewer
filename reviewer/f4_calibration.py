@@ -51,6 +51,7 @@ HISTORICAL_V232_UTILITY_SHA256 = (
 )
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _ID = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 
 
@@ -227,6 +228,7 @@ class F4FrozenOperatingPointV1:
     fit_prediction_hash: str
     fit_corpus_manifest_hash: str
     prediction_source_hash: str
+    calibration_contract_revision: str
     question_contract_hash: str
     input_schema_hash: str
 
@@ -235,6 +237,10 @@ class F4FrozenOperatingPointV1:
             same_threshold=self.same_threshold,
             escalation_threshold=self.escalation_threshold,
         )
+        if not _HEX40.fullmatch(self.calibration_contract_revision):
+            raise ValueError(
+                "calibration_contract_revision must be lowercase git sha"
+            )
         for name, value in (
             ("fit_case_ids_hash", self.fit_case_ids_hash),
             ("fit_prediction_hash", self.fit_prediction_hash),
@@ -317,6 +323,7 @@ class F4CalibrationBatchPreviewV1:
     case_ids: tuple[str, ...]
     provider_payload_hashes: tuple[str, ...]
     corpus_manifest_hash: str
+    calibration_contract_revision: str
     authorization_hash: str
 
 
@@ -324,6 +331,7 @@ class F4CalibrationBatchPreviewV1:
 class F4AuthorizationPreviewV1:
     status: F4AuthorizationPreviewStatus
     source_revision: str
+    calibration_contract_revision: str
     config_hash: str
     wire_contract_hash: str
     question_contract_hash: str
@@ -733,35 +741,41 @@ def fit_selective_operating_point(
     contract: F4QuestionContractV1,
     *,
     prediction_source_hash: str,
+    calibration_contract_revision: str,
 ) -> F4FrozenOperatingPointV1:
-    """Fit SAME/ESCALATE/ABSTAIN boundaries on CALIBRATION_FIT only.
-
-    Selection is deterministic:
-    1. zero high-risk SAME decisions / critical misses;
-    2. maximize benign pass-through over all controls;
-    3. maximize high-risk selective coverage;
-    4. maximize total decision coverage;
-    5. minimize false escalation;
-    6. deterministic threshold tie-break.
-    """
+    """Fit SAME/ESCALATE/ABSTAIN boundaries on CALIBRATION_FIT only."""
     if not _HEX64.fullmatch(prediction_source_hash):
         raise ValueError("prediction_source_hash must be lowercase sha256")
+    if not _HEX40.fullmatch(calibration_contract_revision):
+        raise ValueError(
+            "calibration_contract_revision must be lowercase git sha"
+        )
     if not cases or any(
         case.split is not F4CalibrationSplit.CALIBRATION_FIT
         for case in cases
     ):
-        raise ValueError("operating-point fitting is restricted to CALIBRATION_FIT")
+        raise ValueError(
+            "operating-point fitting is restricted to CALIBRATION_FIT"
+        )
     pmap = _prediction_map(predictions)
     if set(pmap) != {case.case_id for case in cases}:
-        raise ValueError("predictions must match exact CALIBRATION_FIT case IDs")
+        raise ValueError(
+            "predictions must match exact CALIBRATION_FIT case IDs"
+        )
     if any(p.status is not ProviderCallStatus.OK for p in predictions):
-        raise ValueError("operating-point fitting requires complete provider coverage")
+        raise ValueError(
+            "operating-point fitting requires complete provider coverage"
+        )
 
     probabilities = sorted(
         {
             0.0,
             1.0,
-            *(float(p.probability) for p in predictions if p.probability is not None),
+            *(
+                float(p.probability)
+                for p in predictions
+                if p.probability is not None
+            ),
         }
     )
     best: tuple[tuple[float, ...], F4SelectiveOperatingPointV1] | None = None
@@ -778,7 +792,10 @@ def fit_selective_operating_point(
                 predictions,
                 point,
             )
-            if metrics.high_risk_errors != 0 or metrics.critical_misses != 0:
+            if (
+                metrics.high_risk_errors != 0
+                or metrics.critical_misses != 0
+            ):
                 continue
             score = (
                 metrics.benign_pass_through_rate,
@@ -794,7 +811,8 @@ def fit_selective_operating_point(
 
     if best is None:
         raise ValueError(
-            "no selective operating point satisfies zero-miss calibration-fit invariant"
+            "no selective operating point satisfies zero-miss "
+            "calibration-fit invariant"
         )
     chosen = best[1]
     return F4FrozenOperatingPointV1(
@@ -802,8 +820,12 @@ def fit_selective_operating_point(
         escalation_threshold=chosen.escalation_threshold,
         fit_case_ids_hash=_ids_hash(case.case_id for case in cases),
         fit_prediction_hash=_prediction_hash(predictions),
-        fit_corpus_manifest_hash=canonical_corpus_manifest_hash(cases, contract),
+        fit_corpus_manifest_hash=canonical_corpus_manifest_hash(
+            cases,
+            contract,
+        ),
         prediction_source_hash=prediction_source_hash,
+        calibration_contract_revision=calibration_contract_revision,
         question_contract_hash=contract.contract_hash,
         input_schema_hash=contract.input_schema_hash,
     )
@@ -907,6 +929,7 @@ def validate_corpus(
 def _authorization_batch_hash(
     *,
     source_revision: str,
+    calibration_contract_revision: str,
     config_hash: str,
     wire_contract_hash: str,
     contract: F4QuestionContractV1,
@@ -920,6 +943,7 @@ def _authorization_batch_hash(
         {
             "schema": "f4-calibration-batch-authorization-preview.v1",
             "source_revision": source_revision,
+            "calibration_contract_revision": calibration_contract_revision,
             "config_hash": config_hash,
             "wire_contract_hash": wire_contract_hash,
             "question_contract_hash": contract.contract_hash,
@@ -940,6 +964,7 @@ def build_zero_call_authorization_preview(
     config: HostedProviderConfigV1,
     contract: F4QuestionContractV1 | None = None,
     *,
+    calibration_contract_revision: str,
     source_revision: str = F4_FROZEN_SOURCE_REVISION,
     wire_contract_hash: str = F4_FROZEN_WIRE_CONTRACT_HASH,
     required_fit_count: int = 50,
@@ -951,6 +976,10 @@ def build_zero_call_authorization_preview(
     The function performs no credential lookup and imports no network client.
     """
     contract = contract or F4QuestionContractV1()
+    if not _HEX40.fullmatch(calibration_contract_revision):
+        raise ValueError(
+            "calibration_contract_revision must be lowercase git sha"
+        )
     counts = validate_corpus(cases)
     fit = sorted(
         (
@@ -975,6 +1004,7 @@ def build_zero_call_authorization_preview(
     plan_payload = {
         "schema": "f4-calibration-zero-call-plan.v1",
         "source_revision": source_revision,
+        "calibration_contract_revision": calibration_contract_revision,
         "config_hash": config.canonical_config_hash(),
         "wire_contract_hash": wire_contract_hash,
         "question_contract_hash": contract.contract_hash,
@@ -996,6 +1026,7 @@ def build_zero_call_authorization_preview(
                 F4AuthorizationPreviewStatus.CURRENT_STATE_PROJECTION_REQUIRED
             ),
             source_revision=source_revision,
+            calibration_contract_revision=calibration_contract_revision,
             config_hash=config.canonical_config_hash(),
             wire_contract_hash=wire_contract_hash,
             question_contract_hash=contract.contract_hash,
@@ -1018,6 +1049,7 @@ def build_zero_call_authorization_preview(
         return F4AuthorizationPreviewV1(
             status=F4AuthorizationPreviewStatus.INVALID_CORPUS,
             source_revision=source_revision,
+            calibration_contract_revision=calibration_contract_revision,
             config_hash=config.canonical_config_hash(),
             wire_contract_hash=wire_contract_hash,
             question_contract_hash=contract.contract_hash,
@@ -1062,8 +1094,10 @@ def build_zero_call_authorization_preview(
                     case_ids=case_ids,
                     provider_payload_hashes=payload_hashes,
                     corpus_manifest_hash=corpus_manifest_hash,
+                    calibration_contract_revision=calibration_contract_revision,
                     authorization_hash=_authorization_batch_hash(
                         source_revision=source_revision,
+                        calibration_contract_revision=calibration_contract_revision,
                         config_hash=config.canonical_config_hash(),
                         wire_contract_hash=wire_contract_hash,
                         contract=contract,
@@ -1080,6 +1114,7 @@ def build_zero_call_authorization_preview(
     return F4AuthorizationPreviewV1(
         status=F4AuthorizationPreviewStatus.READY,
         source_revision=source_revision,
+        calibration_contract_revision=calibration_contract_revision,
         config_hash=config.canonical_config_hash(),
         wire_contract_hash=wire_contract_hash,
         question_contract_hash=contract.contract_hash,
