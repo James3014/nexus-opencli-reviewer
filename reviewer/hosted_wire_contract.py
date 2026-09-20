@@ -23,6 +23,9 @@ from reviewer.risk_model_adapter import (
 )
 
 _VALID_HEADER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+_F4_PROVIDER_QUESTION_NAME = "decision"
+_F4_REQUEST_TEMPLATE_KIND = "systemone_noul"
+_F4_RESPONSE_PROBABILITY_PATH = "answers.decision.noul"
 _CANONICAL_DESCRIPTOR_KEYS = {
     "contract_schema_version",
     "http_method",
@@ -257,15 +260,28 @@ def assemble_hosted_canary_dry_run(
     ):
         raise ValueError("provider_request_id must be a bounded visible ASCII-like token")
 
-    # 2. Build dry-run payload
-    # Semantic mapping strictly preserves ProviderVisibleRiskStateV1 + F4QuestionContractV1
+    # 2. Bind the F4 NOUL mapping to the authoritative SystemOne schema.
+    if wire.request_template_kind != _F4_REQUEST_TEMPLATE_KIND:
+        raise ValueError(
+            "F4 hosted canary requires request_template_kind='systemone_noul'"
+        )
+    if wire.response_probability_path != _F4_RESPONSE_PROBABILITY_PATH:
+        raise ValueError(
+            "F4 hosted canary requires response_probability_path='answers.decision.noul'"
+        )
+    if contract.primitive != "NOUL":
+        raise ValueError("F4 hosted canary requires the frozen NOUL primitive")
+
+    # The provider-visible body contains only the official SystemOneRequest fields.
+    # provider_request_id and contract_hash remain local provenance/authorization
+    # identities and are intentionally not sent to the provider.
     body_payload: dict[str, Any] = {
         "model": wire.expected_model_identifier,
-        "provider_request_id": provider_request_id,
-        "question_contract": {
-            "primitive": contract.primitive,
-            "contract_hash": contract.contract_hash,
-            "question_statement": contract.question_statement,
+        "questions": {
+            _F4_PROVIDER_QUESTION_NAME: {
+                "type": "noul",
+                "instructions": contract.question_statement,
+            }
         },
         "state": state.as_payload(),
     }
@@ -278,7 +294,6 @@ def assemble_hosted_canary_dry_run(
     header_names = (
         "Accept",
         "Content-Type",
-        "X-Provider-Request-Id",
         wire.auth_header_name,
     )
     endpoint_host_hash = hashlib.sha256(

@@ -31,15 +31,15 @@ def _valid_wire_data() -> dict[str, object]:
     return {
         "contract_schema_version": "f4-hosted-wire-v1",
         "http_method": "POST",
-        "request_path": "/v1/decision",
+        "request_path": "/v1/systemone",
         "auth_mode": "BEARER",
         "auth_header_name": "Authorization",
         "content_type": "application/json",
-        "expected_model_identifier": "test-model-v1",
-        "request_template_kind": "systemone_choice",
-        "response_probability_path": "answers.decision.probabilities.ESCALATE",
-        "api_version_source": "HEADER_OR_PAYLOAD",
-        "provider_schema_identity": "test-provider-v1",
+        "expected_model_identifier": "jev-latest",
+        "request_template_kind": "systemone_noul",
+        "response_probability_path": "answers.decision.noul",
+        "api_version_source": "OPENAPI_INFO_0.2.0_PATH_V1",
+        "provider_schema_identity": "typesafe-openapi-0.2.0-systemone-v1",
     }
 
 
@@ -59,7 +59,7 @@ def test_valid_wire_descriptor_parsing() -> None:
     wire = load_wire_descriptor_from_dict(data)
 
     assert wire.http_method == "POST"
-    assert wire.request_path == "/v1/decision"
+    assert wire.request_path == "/v1/systemone"
     assert wire.auth_mode == HostedAuthMode.BEARER
     assert wire.auth_header_name == "Authorization"
     assert len(wire.canonical_wire_hash()) == 64
@@ -131,7 +131,6 @@ def test_authorization_requires_exact_hash_bindings() -> None:
         "Accept",
         "Authorization",
         "Content-Type",
-        "X-Provider-Request-Id",
     )
     assert not hasattr(dry_run, "target_origin")
     assert not hasattr(dry_run, "target_path")
@@ -260,3 +259,79 @@ def test_dry_run_has_no_secret_materialization_parameter() -> None:
 
     signature = inspect.signature(assemble_hosted_canary_dry_run)
     assert "synthetic_key" not in signature.parameters
+
+
+
+def test_f4_dry_run_hash_matches_authoritative_noul_systemone_body() -> None:
+    import hashlib
+
+    cfg = _valid_config()
+    wire = load_wire_descriptor_from_dict(_valid_wire_data())
+    contract = F4QuestionContractV1()
+    state = _state()
+    auth = LiveCanaryAuthorizationV1(
+        config_hash=cfg.canonical_config_hash(),
+        wire_contract_hash=wire.canonical_wire_hash(),
+        endpoint_host="provider.example.invalid",
+        question_contract_hash=contract.contract_hash,
+        max_calls=1,
+    )
+
+    dry_run = assemble_hosted_canary_dry_run(
+        cfg, wire, auth, state, contract, "req-authoritative-noul"
+    )
+
+    expected_body = {
+        "model": "jev-latest",
+        "questions": {
+            "decision": {
+                "type": "noul",
+                "instructions": contract.question_statement,
+            }
+        },
+        "state": state.as_payload(),
+    }
+    encoded = json.dumps(
+        expected_body, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+    assert dry_run.body_payload_hash == hashlib.sha256(encoded).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "message"),
+    [
+        (
+            "request_template_kind",
+            "systemone_choice",
+            "systemone_noul",
+        ),
+        (
+            "response_probability_path",
+            "answers.decision.probabilities.ESCALATE",
+            "answers.decision.noul",
+        ),
+    ],
+)
+def test_f4_dry_run_rejects_historical_choice_wire_mapping(
+    field_name: str,
+    bad_value: str,
+    message: str,
+) -> None:
+    cfg = _valid_config()
+    data = _valid_wire_data()
+    data[field_name] = bad_value
+    wire = load_wire_descriptor_from_dict(data)
+    contract = F4QuestionContractV1()
+    auth = LiveCanaryAuthorizationV1(
+        config_hash=cfg.canonical_config_hash(),
+        wire_contract_hash=wire.canonical_wire_hash(),
+        endpoint_host="provider.example.invalid",
+        question_contract_hash=contract.contract_hash,
+        max_calls=1,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        assemble_hosted_canary_dry_run(
+            cfg, wire, auth, _state(), contract, "req-reject-historical-choice"
+        )
