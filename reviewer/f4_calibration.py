@@ -91,6 +91,7 @@ class F4CalibrationCaseV1:
     requires_escalation: bool
     critical_if_missed: bool
     subgroup: str
+    projection_provenance_hash: str
     truth_provenance_hash: str
 
     def __post_init__(self) -> None:
@@ -111,6 +112,10 @@ class F4CalibrationCaseV1:
             raise ValueError("critical_if_missed must be bool")
         if self.critical_if_missed and not self.requires_escalation:
             raise ValueError("critical_if_missed requires escalation ground truth")
+        if not _HEX64.fullmatch(self.projection_provenance_hash):
+            raise ValueError(
+                "projection_provenance_hash must be lowercase sha256"
+            )
         if not _HEX64.fullmatch(self.truth_provenance_hash):
             raise ValueError("truth_provenance_hash must be lowercase sha256")
 
@@ -140,29 +145,6 @@ class F4PredictionV1:
                 raise ValueError("OK prediction requires finite probability in [0,1]")
         elif self.probability is not None:
             raise ValueError("provider failure or abstention must not carry probability")
-
-
-@dataclass(frozen=True)
-class F4ThresholdMetricsV1:
-    threshold: float
-    total_cases: int
-    covered_cases: int
-    provider_coverage: float
-    abstention_rate: float
-    high_risk_total: int
-    high_risk_covered: int
-    high_risk_errors: int
-    critical_misses: int
-    risk_ucb_95: float
-    high_risk_coverage: float
-    coverage_lcb_95: float
-    low_risk_total: int
-    low_risk_covered: int
-    false_escalations: int
-    false_escalation_rate: float
-    benign_pass_through_rate: float
-    brier_score: float | None
-    ece_10: float | None
 
 
 @dataclass(frozen=True)
@@ -254,43 +236,12 @@ class F4FrozenOperatingPointV1:
 
 
 @dataclass(frozen=True)
-class F4FrozenThresholdV1:
-    """Threshold derived from CALIBRATION_FIT only."""
-
-    threshold: float
-    fit_case_ids_hash: str
-    fit_prediction_hash: str
-    fit_corpus_manifest_hash: str
-    prediction_source_hash: str
-    question_contract_hash: str
-    input_schema_hash: str
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.threshold, bool)
-            or not isinstance(self.threshold, (int, float))
-            or not 0.0 <= float(self.threshold) <= 1.0
-        ):
-            raise ValueError("threshold must be in [0,1]")
-        for name, value in (
-            ("fit_case_ids_hash", self.fit_case_ids_hash),
-            ("fit_prediction_hash", self.fit_prediction_hash),
-            ("fit_corpus_manifest_hash", self.fit_corpus_manifest_hash),
-            ("prediction_source_hash", self.prediction_source_hash),
-            ("question_contract_hash", self.question_contract_hash),
-            ("input_schema_hash", self.input_schema_hash),
-        ):
-            if not _HEX64.fullmatch(value):
-                raise ValueError(f"{name} must be lowercase sha256")
-
-
-@dataclass(frozen=True)
 class F4CertificationCriteriaV1:
     """Pre-registered safety and utility criteria.
 
     These are certification gates, not a Jev probability threshold. The current
-    NOUL operating threshold remains unbound until CALIBRATION_FIT is run under
-    the six-field input contract.
+    NOUL selective operating point remains unbound until CALIBRATION_FIT is run
+    under the six-field input contract.
     """
 
     max_critical_misses: int = 0
@@ -376,6 +327,7 @@ def canonical_corpus_manifest_hash(
             "requires_escalation": case.requires_escalation,
             "critical_if_missed": case.critical_if_missed,
             "subgroup": case.subgroup,
+            "projection_provenance_hash": case.projection_provenance_hash,
             "truth_provenance_hash": case.truth_provenance_hash,
         }
         for case in sorted(cases, key=lambda c: c.case_id)
@@ -482,94 +434,6 @@ def _prediction_map(
             raise ValueError(f"duplicate prediction for {prediction.case_id}")
         mapped[prediction.case_id] = prediction
     return mapped
-
-
-def evaluate_threshold(
-    cases: Sequence[F4CalibrationCaseV1],
-    predictions: Sequence[F4PredictionV1],
-    threshold: float,
-) -> F4ThresholdMetricsV1:
-    if (
-        isinstance(threshold, bool)
-        or not isinstance(threshold, (int, float))
-        or not 0.0 <= float(threshold) <= 1.0
-    ):
-        raise ValueError("threshold must be in [0,1]")
-    if not cases:
-        raise ValueError("cases must be non-empty")
-
-    pmap = _prediction_map(predictions)
-    case_ids = {case.case_id for case in cases}
-    if set(pmap) != case_ids:
-        raise ValueError("predictions must match exact case ID set")
-
-    covered: list[tuple[F4CalibrationCaseV1, float]] = []
-    for case in cases:
-        prediction = pmap[case.case_id]
-        if prediction.status is ProviderCallStatus.OK:
-            assert prediction.probability is not None
-            covered.append((case, float(prediction.probability)))
-
-    high = [case for case in cases if case.requires_escalation]
-    low = [case for case in cases if not case.requires_escalation]
-    high_cov = [(case, p) for case, p in covered if case.requires_escalation]
-    low_cov = [(case, p) for case, p in covered if not case.requires_escalation]
-
-    high_errors = sum(1 for _case, p in high_cov if p < float(threshold))
-    critical_misses = sum(
-        1
-        for case, p in high_cov
-        if case.critical_if_missed and p < float(threshold)
-    )
-    false_escalations = sum(
-        1 for _case, p in low_cov if p >= float(threshold)
-    )
-
-    risk_ucb = (
-        clopper_pearson_upper(high_errors, len(high_cov))
-        if high_cov
-        else 1.0
-    )
-    coverage = len(high_cov) / len(high) if high else 0.0
-    coverage_lcb = (
-        clopper_pearson_lower(len(high_cov), len(high))
-        if high
-        else 0.0
-    )
-    false_rate = false_escalations / len(low_cov) if low_cov else 1.0
-    benign_rate = (
-        (len(low_cov) - false_escalations) / len(low_cov)
-        if low_cov
-        else 0.0
-    )
-
-    probs = [p for _case, p in covered]
-    labels = [case.requires_escalation for case, _p in covered]
-    brier = brier_score(probs, labels) if probs else None
-    ece = expected_calibration_error(probs, labels) if probs else None
-
-    return F4ThresholdMetricsV1(
-        threshold=float(threshold),
-        total_cases=len(cases),
-        covered_cases=len(covered),
-        provider_coverage=len(covered) / len(cases),
-        abstention_rate=1.0 - (len(covered) / len(cases)),
-        high_risk_total=len(high),
-        high_risk_covered=len(high_cov),
-        high_risk_errors=high_errors,
-        critical_misses=critical_misses,
-        risk_ucb_95=risk_ucb,
-        high_risk_coverage=coverage,
-        coverage_lcb_95=coverage_lcb,
-        low_risk_total=len(low),
-        low_risk_covered=len(low_cov),
-        false_escalations=false_escalations,
-        false_escalation_rate=false_rate,
-        benign_pass_through_rate=benign_rate,
-        brier_score=brier,
-        ece_10=ece,
-    )
-
 
 
 def classify_selective_probability(
@@ -826,64 +690,6 @@ def fit_selective_operating_point(
         ),
         prediction_source_hash=prediction_source_hash,
         calibration_contract_revision=calibration_contract_revision,
-        question_contract_hash=contract.contract_hash,
-        input_schema_hash=contract.input_schema_hash,
-    )
-
-
-def fit_operating_threshold(
-    cases: Sequence[F4CalibrationCaseV1],
-    predictions: Sequence[F4PredictionV1],
-    contract: F4QuestionContractV1,
-    *,
-    prediction_source_hash: str,
-) -> F4FrozenThresholdV1:
-    """Fit only on CALIBRATION_FIT.
-
-    Select the highest threshold producing zero high-risk and critical misses on
-    covered fit cases. This maximizes benign pass-through without peeking at
-    certification, held-out, or prospective partitions.
-    """
-    if not _HEX64.fullmatch(prediction_source_hash):
-        raise ValueError("prediction_source_hash must be lowercase sha256")
-    if not cases or any(
-        case.split is not F4CalibrationSplit.CALIBRATION_FIT
-        for case in cases
-    ):
-        raise ValueError("threshold fitting is restricted to CALIBRATION_FIT")
-    pmap = _prediction_map(predictions)
-    if set(pmap) != {case.case_id for case in cases}:
-        raise ValueError("predictions must match exact CALIBRATION_FIT case IDs")
-    if any(p.status is not ProviderCallStatus.OK for p in predictions):
-        raise ValueError("threshold fitting requires complete provider coverage")
-
-    candidates = sorted(
-        {
-            0.0,
-            1.0,
-            *(
-                float(p.probability)
-                for p in predictions
-                if p.probability is not None
-            ),
-        },
-        reverse=True,
-    )
-    chosen: float | None = None
-    for threshold in candidates:
-        metrics = evaluate_threshold(cases, predictions, threshold)
-        if metrics.high_risk_errors == 0 and metrics.critical_misses == 0:
-            chosen = threshold
-            break
-    if chosen is None:
-        raise ValueError("no threshold satisfies zero-miss calibration-fit invariant")
-
-    return F4FrozenThresholdV1(
-        threshold=chosen,
-        fit_case_ids_hash=_ids_hash(case.case_id for case in cases),
-        fit_prediction_hash=_prediction_hash(predictions),
-        fit_corpus_manifest_hash=canonical_corpus_manifest_hash(cases, contract),
-        prediction_source_hash=prediction_source_hash,
         question_contract_hash=contract.contract_hash,
         input_schema_hash=contract.input_schema_hash,
     )

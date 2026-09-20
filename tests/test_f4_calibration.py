@@ -16,9 +16,7 @@ from reviewer.f4_calibration import (
     clopper_pearson_lower,
     clopper_pearson_upper,
     evaluate_selective_operating_point,
-    evaluate_threshold,
     expected_calibration_error,
-    fit_operating_threshold,
     fit_selective_operating_point,
 )
 from reviewer.hosted_risk_config import HostedProviderConfigV1
@@ -54,6 +52,7 @@ def _case(
         requires_escalation=high,
         critical_if_missed=high,
         subgroup="HIGH_RISK" if high else "CONTROL",
+        projection_provenance_hash=f"{(i + 1) % 16:x}" * 64,
         truth_provenance_hash=f"{i % 16:x}" * 64,
     )
 
@@ -94,6 +93,7 @@ def test_provider_payload_contains_no_truth_or_raw_prompt() -> None:
         "allowed_path_count",
     }
     assert "requires_escalation" not in payload
+    assert "projection_provenance_hash" not in payload
     assert "truth_provenance_hash" not in payload
     assert "prompt_state" not in payload
 
@@ -108,6 +108,7 @@ def test_ground_truth_cannot_mark_control_as_critical() -> None:
             requires_escalation=False,
             critical_if_missed=True,
             subgroup="CONTROL",
+            projection_provenance_hash="b" * 64,
             truth_provenance_hash="a" * 64,
         )
 
@@ -410,6 +411,7 @@ def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
         requires_escalation=True,
         critical_if_missed=False,
         subgroup="AMBIGUOUS",
+        projection_provenance_hash="b" * 64,
         truth_provenance_hash="a" * 64,
     )
     low = F4CalibrationCaseV1(
@@ -420,6 +422,7 @@ def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
         requires_escalation=False,
         critical_if_missed=False,
         subgroup="AMBIGUOUS",
+        projection_provenance_hash="b" * 64,
         truth_provenance_hash="a" * 64,
     )
     assert high.provider_payload_hash(contract) == low.provider_payload_hash(contract)
@@ -444,6 +447,7 @@ def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
         requires_escalation=False,
         critical_if_missed=False,
         subgroup=original.subgroup,
+        projection_provenance_hash=original.projection_provenance_hash,
         truth_provenance_hash=original.truth_provenance_hash,
     )
     second = build_zero_call_authorization_preview(
@@ -533,3 +537,36 @@ def test_authorization_preview_binds_calibration_contract_revision() -> None:
     assert [b.authorization_hash for b in first.batches] != [
         b.authorization_hash for b in second.batches
     ]
+
+
+def test_projection_provenance_change_changes_corpus_commitment() -> None:
+    contract = F4QuestionContractV1()
+    original = _case(
+        1,
+        F4CalibrationSplit.CALIBRATION_FIT,
+        high=True,
+    )
+    changed = F4CalibrationCaseV1(
+        case_id=original.case_id,
+        lineage_id=original.lineage_id,
+        split=original.split,
+        state=original.state,
+        requires_escalation=original.requires_escalation,
+        critical_if_missed=original.critical_if_missed,
+        subgroup=original.subgroup,
+        projection_provenance_hash="f" * 64,
+        truth_provenance_hash=original.truth_provenance_hash,
+    )
+    assert original.provider_payload_hash(contract) == changed.provider_payload_hash(contract)
+    assert canonical_corpus_manifest_hash([original], contract) != (
+        canonical_corpus_manifest_hash([changed], contract)
+    )
+
+
+def test_no_legacy_single_threshold_certification_path_remains() -> None:
+    import reviewer.f4_calibration as module
+
+    assert not hasattr(module, "F4ThresholdMetricsV1")
+    assert not hasattr(module, "F4FrozenThresholdV1")
+    assert not hasattr(module, "evaluate_threshold")
+    assert not hasattr(module, "fit_operating_threshold")

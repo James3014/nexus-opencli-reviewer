@@ -109,7 +109,11 @@
       "identity_drift_starts_new_window": true,
       "criteria_activation": "NOT_IN_WAVE1"
     },
-    "calibration_fit_rule": "FIT_SELECTIVE_SAME_ESCALATE_ABSTAIN_OPERATING_POINT_ON_CALIBRATION_FIT_ONLY"
+    "calibration_fit_rule": "FIT_SELECTIVE_SAME_ESCALATE_ABSTAIN_OPERATING_POINT_ON_CALIBRATION_FIT_ONLY",
+    "projection_provenance_hash_required": true,
+    "truth_provenance_hash_required": true,
+    "projection_must_be_frozen_before_adjudication": true,
+    "model_probability_must_be_hidden_until_truth_freeze": true
   },
   "external_effects": {
     "wave1_provider_calls": 0,
@@ -124,6 +128,8 @@
     "operating_point_artifact_requires_prediction_source_hash": true,
     "calibration_contract_revision_required": true,
     "authorization_batches_bind_calibration_contract_revision": true,
-    "frozen_f4_source_revision_is_distinct_from_calibration_contract_revision": true
+    "frozen_f4_source_revision_is_distinct_from_calibration_contract_revision": true,
+    "corpus_manifest_binds_projection_provenance_hash": true,
+    "single_threshold_legacy_path": "REMOVED"
   }
 }
