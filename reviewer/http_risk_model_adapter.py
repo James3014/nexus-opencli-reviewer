@@ -118,8 +118,11 @@ class HttpRiskModelAdapter:
         self.endpoint = endpoint.strip()
         self.timeout_seconds = float(timeout_seconds)
 
-        # Pre-build an opener that forbids external redirects
-        self._opener = urllib.request.build_opener(NoRedirectHandler)
+        # Pre-build an opener that ignores environment proxies and forbids external redirects
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            NoRedirectHandler,
+        )
 
     def evaluate(
         self,
