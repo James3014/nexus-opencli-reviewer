@@ -10,6 +10,7 @@ from reviewer.f4_calibration import (
     F4PredictionV1,
     brier_score,
     build_zero_call_authorization_preview,
+    canonical_corpus_manifest_hash,
     certify_metrics,
     clopper_pearson_lower,
     clopper_pearson_upper,
@@ -178,6 +179,7 @@ def test_threshold_fitting_is_fit_partition_only() -> None:
             [cert_case],
             [_prediction(cert_case, 0.9)],
             F4QuestionContractV1(),
+            prediction_source_hash="b" * 64,
         )
 
 
@@ -205,8 +207,14 @@ def test_threshold_fit_chooses_highest_zero_miss_cutoff() -> None:
             _prediction(low, 0.40),
         ],
         F4QuestionContractV1(),
+        prediction_source_hash="b" * 64,
     )
     assert frozen.threshold == pytest.approx(0.74)
+    assert frozen.fit_corpus_manifest_hash == canonical_corpus_manifest_hash(
+        [high1, high2, low],
+        F4QuestionContractV1(),
+    )
+    assert frozen.prediction_source_hash == "b" * 64
 
 
 def test_certification_criteria_preserve_pre_registered_values() -> None:
@@ -333,3 +341,106 @@ def test_certify_metrics_reports_failure_reasons() -> None:
     assert not passed
     assert "CRITICAL_MISS" in failures
     assert "FALSE_ESCALATION" in failures
+
+
+def test_truth_change_changes_corpus_commitment_not_provider_payload() -> None:
+    contract = F4QuestionContractV1()
+    state = _state(1)
+    high = F4CalibrationCaseV1(
+        case_id="case-same",
+        lineage_id="lineage-same",
+        split=F4CalibrationSplit.CALIBRATION_FIT,
+        state=state,
+        requires_escalation=True,
+        critical_if_missed=False,
+        subgroup="AMBIGUOUS",
+        truth_provenance_hash="a" * 64,
+    )
+    low = F4CalibrationCaseV1(
+        case_id="case-same",
+        lineage_id="lineage-same",
+        split=F4CalibrationSplit.CALIBRATION_FIT,
+        state=state,
+        requires_escalation=False,
+        critical_if_missed=False,
+        subgroup="AMBIGUOUS",
+        truth_provenance_hash="a" * 64,
+    )
+    assert high.provider_payload_hash(contract) == low.provider_payload_hash(contract)
+    assert canonical_corpus_manifest_hash([high], contract) != canonical_corpus_manifest_hash([low], contract)
+
+
+def test_batch_authorization_binds_ground_truth_corpus_commitment() -> None:
+    fit = [_case(i, F4CalibrationSplit.CALIBRATION_FIT, high=i < 30) for i in range(50)]
+    cert = [_case(100 + i, F4CalibrationSplit.CALIBRATION_CERT, high=i < 30) for i in range(50)]
+    first = build_zero_call_authorization_preview(fit + cert, _config())
+
+    original = fit[0]
+    altered = F4CalibrationCaseV1(
+        case_id=original.case_id,
+        lineage_id=original.lineage_id,
+        split=original.split,
+        state=original.state,
+        requires_escalation=False,
+        critical_if_missed=False,
+        subgroup=original.subgroup,
+        truth_provenance_hash=original.truth_provenance_hash,
+    )
+    second = build_zero_call_authorization_preview([altered] + fit[1:] + cert, _config())
+
+    assert first.corpus_manifest_hash != second.corpus_manifest_hash
+    assert [b.authorization_hash for b in first.batches] != [
+        b.authorization_hash for b in second.batches
+    ]
+
+
+def test_wave1_module_has_no_network_or_credential_read_surface() -> None:
+    import ast
+    import inspect
+    import reviewer.f4_calibration as module
+
+    source = inspect.getsource(module)
+    tree = ast.parse(source)
+    imported_roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_roots.add(node.module.split(".", 1)[0])
+
+    assert imported_roots.isdisjoint(
+        {"socket", "http", "urllib", "requests", "httpx", "aiohttp"}
+    )
+    assert "os.environ" not in source
+    assert "TYPESAFE_API_KEY" not in source
+
+
+def test_freeze_manifest_is_bound_to_current_contract() -> None:
+    import json
+    from pathlib import Path
+    from reviewer.f4_calibration import (
+        F4_FROZEN_ADAPTER_ID,
+        F4_FROZEN_ADAPTER_REVISION,
+        F4_FROZEN_MODEL_ALIAS,
+        F4_FROZEN_PROVIDER_SCHEMA_IDENTITY,
+        F4_FROZEN_SOURCE_REVISION,
+        F4_FROZEN_WIRE_CONTRACT_HASH,
+    )
+
+    manifest = json.loads(
+        Path("evidence/f4-risk-wave1-freeze.json").read_text()
+    )
+    frozen = manifest["frozen_source"]
+    contract = F4QuestionContractV1()
+
+    assert frozen["revision"] == F4_FROZEN_SOURCE_REVISION
+    assert frozen["wire_contract_hash"] == F4_FROZEN_WIRE_CONTRACT_HASH
+    assert frozen["question_contract_hash"] == contract.contract_hash
+    assert frozen["input_schema_hash"] == contract.input_schema_hash
+    assert frozen["provider_schema_identity"] == F4_FROZEN_PROVIDER_SCHEMA_IDENTITY
+    assert frozen["model_alias"] == F4_FROZEN_MODEL_ALIAS
+    assert frozen["adapter_id"] == F4_FROZEN_ADAPTER_ID
+    assert frozen["adapter_revision"] == F4_FROZEN_ADAPTER_REVISION
+    assert manifest["lineage_separation"]["current_noul_operating_threshold"] == (
+        "UNBOUND_UNTIL_CALIBRATION_FIT"
+    )

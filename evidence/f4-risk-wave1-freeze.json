@@ -76,11 +76,16 @@
     ],
     "max_critical_misses": 0,
     "max_risk_ucb_95": 0.05,
-    "min_coverage_lcb_95": 0.30,
-    "max_false_escalation_rate": 0.30,
-    "min_benign_pass_through_rate": 0.70,
+    "min_coverage_lcb_95": 0.3,
+    "max_false_escalation_rate": 0.3,
+    "min_benign_pass_through_rate": 0.7,
     "brier": "REPORT_ONLY",
-    "ece_10": "REPORT_ONLY"
+    "ece_10": "REPORT_ONLY",
+    "current_metric_semantics": {
+      "risk_ucb_95": "one-sided upper bound on unsafe non-escalation among provider-covered high-risk current-schema cases",
+      "coverage_lcb_95": "one-sided lower bound on provider coverage among high-risk current-schema cases",
+      "provider_failure": "ABSTENTION_NOT_LOW_RISK_PREDICTION"
+    }
   },
   "current_schema_collection": {
     "ground_truth_must_be_independent_of_model_output": true,
@@ -97,7 +102,8 @@
       "initial_case_count": 0,
       "future_unseen_only": true,
       "no_retrospective_reselection": true,
-      "identity_drift_starts_new_window": true
+      "identity_drift_starts_new_window": true,
+      "criteria_activation": "NOT_IN_WAVE1"
     }
   },
   "external_effects": {
@@ -105,5 +111,11 @@
     "wave1_api_key_reads": 0,
     "retry": "NONE"
   },
-  "next_gate": "COLLECT_AND_INDEPENDENTLY_ADJUDICATE_CURRENT_SCHEMA_CALIBRATION_CORPUS"
+  "next_gate": "COLLECT_AND_INDEPENDENTLY_ADJUDICATE_CURRENT_SCHEMA_CALIBRATION_CORPUS",
+  "calibration_artifact_binding": {
+    "corpus_manifest_hash_required_before_calls": true,
+    "corpus_manifest_binds_truth_and_provider_payload_hash": true,
+    "threshold_artifact_requires_prediction_source_hash": true,
+    "authorization_batches_bind_corpus_manifest_hash": true
+  }
 }

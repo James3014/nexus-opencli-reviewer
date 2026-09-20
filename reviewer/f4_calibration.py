@@ -164,6 +164,8 @@ class F4FrozenThresholdV1:
     threshold: float
     fit_case_ids_hash: str
     fit_prediction_hash: str
+    fit_corpus_manifest_hash: str
+    prediction_source_hash: str
     question_contract_hash: str
     input_schema_hash: str
 
@@ -177,6 +179,8 @@ class F4FrozenThresholdV1:
         for name, value in (
             ("fit_case_ids_hash", self.fit_case_ids_hash),
             ("fit_prediction_hash", self.fit_prediction_hash),
+            ("fit_corpus_manifest_hash", self.fit_corpus_manifest_hash),
+            ("prediction_source_hash", self.prediction_source_hash),
             ("question_contract_hash", self.question_contract_hash),
             ("input_schema_hash", self.input_schema_hash),
         ):
@@ -222,6 +226,7 @@ class F4CalibrationBatchPreviewV1:
     batch_index: int
     case_ids: tuple[str, ...]
     provider_payload_hashes: tuple[str, ...]
+    corpus_manifest_hash: str
     authorization_hash: str
 
 
@@ -238,6 +243,7 @@ class F4AuthorizationPreviewV1:
     calibration_cert_count: int
     missing_fit_count: int
     missing_cert_count: int
+    corpus_manifest_hash: str
     batches: tuple[F4CalibrationBatchPreviewV1, ...]
     plan_hash: str
     reason: str | None
@@ -253,6 +259,30 @@ def _canonical_hash(value: object) -> str:
         ensure_ascii=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def canonical_corpus_manifest_hash(
+    cases: Sequence[F4CalibrationCaseV1],
+    contract: F4QuestionContractV1,
+) -> str:
+    """Commit exact case identity, truth, provenance, split, and model-visible payload.
+
+    The hash binds labels without placing labels in the provider payload.
+    """
+    payload = [
+        {
+            "case_id": case.case_id,
+            "lineage_id": case.lineage_id,
+            "split": case.split.value,
+            "provider_payload_hash": case.provider_payload_hash(contract),
+            "requires_escalation": case.requires_escalation,
+            "critical_if_missed": case.critical_if_missed,
+            "subgroup": case.subgroup,
+            "truth_provenance_hash": case.truth_provenance_hash,
+        }
+        for case in sorted(cases, key=lambda c: c.case_id)
+    ]
+    return _canonical_hash(payload)
 
 
 def _binomial_cdf(k: int, n: int, p: float) -> float:
@@ -463,6 +493,8 @@ def fit_operating_threshold(
     cases: Sequence[F4CalibrationCaseV1],
     predictions: Sequence[F4PredictionV1],
     contract: F4QuestionContractV1,
+    *,
+    prediction_source_hash: str,
 ) -> F4FrozenThresholdV1:
     """Fit only on CALIBRATION_FIT.
 
@@ -470,6 +502,8 @@ def fit_operating_threshold(
     covered fit cases. This maximizes benign pass-through without peeking at
     certification, held-out, or prospective partitions.
     """
+    if not _HEX64.fullmatch(prediction_source_hash):
+        raise ValueError("prediction_source_hash must be lowercase sha256")
     if not cases or any(
         case.split is not F4CalibrationSplit.CALIBRATION_FIT
         for case in cases
@@ -506,6 +540,8 @@ def fit_operating_threshold(
         threshold=chosen,
         fit_case_ids_hash=_ids_hash(case.case_id for case in cases),
         fit_prediction_hash=_prediction_hash(predictions),
+        fit_corpus_manifest_hash=canonical_corpus_manifest_hash(cases, contract),
+        prediction_source_hash=prediction_source_hash,
         question_contract_hash=contract.contract_hash,
         input_schema_hash=contract.input_schema_hash,
     )
@@ -558,6 +594,7 @@ def _authorization_batch_hash(
     batch_index: int,
     case_ids: Sequence[str],
     payload_hashes: Sequence[str],
+    corpus_manifest_hash: str,
 ) -> str:
     return _canonical_hash(
         {
@@ -571,6 +608,7 @@ def _authorization_batch_hash(
             "batch_index": batch_index,
             "case_ids": list(case_ids),
             "provider_payload_hashes": list(payload_hashes),
+            "corpus_manifest_hash": corpus_manifest_hash,
             "max_calls": len(case_ids),
             "retry": "NONE",
         }
@@ -612,6 +650,7 @@ def build_zero_call_authorization_preview(
     )
     missing_fit = max(0, required_fit_count - len(fit))
     missing_cert = max(0, required_cert_count - len(cert))
+    corpus_manifest_hash = canonical_corpus_manifest_hash(cases, contract)
 
     plan_payload = {
         "schema": "f4-calibration-zero-call-plan.v1",
@@ -624,6 +663,7 @@ def build_zero_call_authorization_preview(
         "required_cert_count": required_cert_count,
         "observed_counts": {k.value: v for k, v in counts.items()},
         "max_calls_per_batch": config.max_canary_quota,
+        "corpus_manifest_hash": corpus_manifest_hash,
         "historical_text_corpus_sha256": HISTORICAL_V231_CORPUS_SHA256,
         "historical_reference_only": True,
         "retry": "NONE",
@@ -645,6 +685,7 @@ def build_zero_call_authorization_preview(
             calibration_cert_count=len(cert),
             missing_fit_count=missing_fit,
             missing_cert_count=missing_cert,
+            corpus_manifest_hash=corpus_manifest_hash,
             batches=(),
             plan_hash=plan_hash,
             reason=(
@@ -666,6 +707,7 @@ def build_zero_call_authorization_preview(
             calibration_cert_count=len(cert),
             missing_fit_count=0,
             missing_cert_count=0,
+            corpus_manifest_hash=corpus_manifest_hash,
             batches=(),
             plan_hash=plan_hash,
             reason="Calibration partitions must match frozen exact target counts.",
@@ -699,6 +741,7 @@ def build_zero_call_authorization_preview(
                     batch_index=batch_index,
                     case_ids=case_ids,
                     provider_payload_hashes=payload_hashes,
+                    corpus_manifest_hash=corpus_manifest_hash,
                     authorization_hash=_authorization_batch_hash(
                         source_revision=source_revision,
                         config_hash=config.canonical_config_hash(),
@@ -708,6 +751,7 @@ def build_zero_call_authorization_preview(
                         batch_index=batch_index,
                         case_ids=case_ids,
                         payload_hashes=payload_hashes,
+                        corpus_manifest_hash=corpus_manifest_hash,
                     ),
                 )
             )
@@ -725,6 +769,7 @@ def build_zero_call_authorization_preview(
         calibration_cert_count=len(cert),
         missing_fit_count=0,
         missing_cert_count=0,
+        corpus_manifest_hash=corpus_manifest_hash,
         batches=tuple(batches),
         plan_hash=plan_hash,
         reason=None,
