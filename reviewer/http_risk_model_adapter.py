@@ -332,7 +332,7 @@ class HttpRiskModelAdapter:
         if (
             isinstance(raw_prob, bool)
             or not isinstance(raw_prob, (int, float))
-            or not 0.0 <= float(raw_prob) <= 1.0
+            or not 0.0 <= raw_prob <= 1.0
         ):
             return RiskModelResult(
                 status=ProviderCallStatus.INVALID_RESPONSE,

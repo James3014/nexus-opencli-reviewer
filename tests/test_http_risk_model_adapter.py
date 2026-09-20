@@ -106,6 +106,20 @@ def test_http_adapter_out_of_range_probability(bad_prob: object) -> None:
         assert res.probability is None
 
 
+def test_http_adapter_huge_integer_probability_fails_closed() -> None:
+    body = json.dumps({"probability": 10**400}).encode("utf-8")
+    with LocalRiskModelFakeServer(response_body=body) as server:
+        adapter = HttpRiskModelAdapter(server.endpoint)
+        res = adapter.evaluate(
+            _state(),
+            F4QuestionContractV1(),
+            "req-huge-probability",
+        )
+
+        assert res.status is ProviderCallStatus.INVALID_RESPONSE
+        assert res.probability is None
+
+
 def test_http_adapter_rate_limit_429() -> None:
     with LocalRiskModelFakeServer(response_code=429, response_body=b'{"error": "rate limited"}') as server:
         adapter = HttpRiskModelAdapter(server.endpoint)
@@ -213,7 +227,12 @@ def test_env_proxy_egress_bypass_regression(monkeypatch: pytest.MonkeyPatch) -> 
     directly to the requested target (failing closed as NETWORK_UNAVAILABLE
     if the target port has no listener, with 0 requests sent to the proxy trap).
     """
-    with LocalRiskModelFakeServer() as proxy_trap:
+    with (
+        LocalRiskModelFakeServer(
+            response_body=b'{"probability": 0.42}'
+        ) as target_server,
+        LocalRiskModelFakeServer() as proxy_trap,
+    ):
         monkeypatch.setenv("http_proxy", proxy_trap.endpoint)
         monkeypatch.setenv("HTTP_PROXY", proxy_trap.endpoint)
         monkeypatch.setenv("https_proxy", proxy_trap.endpoint)
@@ -221,31 +240,36 @@ def test_env_proxy_egress_bypass_regression(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch.setenv("no_proxy", "")
         monkeypatch.setenv("NO_PROXY", "")
 
-        # Target an unused loopback port (port 9 is discarded / unused)
-        adapter = HttpRiskModelAdapter("http://127.0.0.1:9", timeout_seconds=1.0)
+        adapter = HttpRiskModelAdapter(target_server.endpoint, timeout_seconds=1.0)
         res = adapter.evaluate(_state(), F4QuestionContractV1(), "req-proxy-regression")
 
-        # Proxy trap must receive ZERO requests
         assert len(proxy_trap.received_requests) == 0
-        assert res.status is ProviderCallStatus.NETWORK_UNAVAILABLE
-        assert res.probability is None
+        assert len(target_server.received_requests) == 1
+        assert res.status is ProviderCallStatus.OK
+        assert res.probability == pytest.approx(0.42)
 
 
 def test_synthetic_proxy_credentials_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure synthetic proxy credentials in env vars are ignored and never leaked."""
-    with LocalRiskModelFakeServer() as proxy_trap:
-        # Construct proxy URL with synthetic credentials pointing to trap
+    with (
+        LocalRiskModelFakeServer(
+            response_body=b'{"probability": 0.24}'
+        ) as target_server,
+        LocalRiskModelFakeServer() as proxy_trap,
+    ):
         host_port = proxy_trap.endpoint.replace("http://", "")
         credentialed_proxy = f"http://fake-user:fake-password@{host_port}"
 
         monkeypatch.setenv("http_proxy", credentialed_proxy)
         monkeypatch.setenv("HTTP_PROXY", credentialed_proxy)
         monkeypatch.setenv("no_proxy", "")
+        monkeypatch.setenv("NO_PROXY", "")
 
-        adapter = HttpRiskModelAdapter("http://127.0.0.1:9", timeout_seconds=1.0)
+        adapter = HttpRiskModelAdapter(target_server.endpoint, timeout_seconds=1.0)
         res = adapter.evaluate(_state(), F4QuestionContractV1(), "req-proxy-creds")
 
         assert len(proxy_trap.received_requests) == 0
-        assert res.status is ProviderCallStatus.NETWORK_UNAVAILABLE
-        assert res.probability is None
+        assert len(target_server.received_requests) == 1
+        assert res.status is ProviderCallStatus.OK
+        assert res.probability == pytest.approx(0.24)
 
