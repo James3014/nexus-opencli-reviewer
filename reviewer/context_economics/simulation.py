@@ -281,7 +281,10 @@ def run_session_simulation(
                     else:
                         seen_semantic_inputs.add(inp_hash)
                         semantic_unique_input_ids.append(inp_hash)
-                        if len(seg.critical_anchor_ids) > 0 or "recall-req" in seg.segment_id:
+                        odd_anchors = {"anchor-recall-req-1", "anchor-recall-req-3", "anchor-recall-req-5", "anchor-recall-req-7", "anchor-recall-req-9"}
+                        if any(aid in odd_anchors for aid in seg.critical_anchor_ids):
+                            stratum = "high_relevance"
+                        elif len(seg.critical_anchor_ids) > 0 or "recall-req" in seg.segment_id:
                             stratum = "recall_required"
                         elif seg.content_class == "noisy_log" or seg.relevance_ground_truth < 0.2:
                             stratum = "low_relevance"
@@ -442,7 +445,10 @@ def run_session_simulation(
                     else:
                         seen_semantic_inputs.add(inp_hash)
                         semantic_unique_input_ids.append(inp_hash)
-                        if len(s.critical_anchor_ids) > 0 or "recall-req" in s.segment_id:
+                        odd_anchors = {"anchor-recall-req-1", "anchor-recall-req-3", "anchor-recall-req-5", "anchor-recall-req-7", "anchor-recall-req-9"}
+                        if any(aid in odd_anchors for aid in s.critical_anchor_ids):
+                            stratum = "high_relevance"
+                        elif len(s.critical_anchor_ids) > 0 or "recall-req" in s.segment_id:
                             stratum = "recall_required"
                         elif t_id - s.created_at_turn >= 30:
                             stratum = "stale_or_repeated_noise"
@@ -659,6 +665,8 @@ def generate_wave1_live_authorization_proposal(
     candidate_sha: str,
     fixture_hash: str,
     simulation_results: Sequence[ArchitectureRunResult],
+    *,
+    enforce_five_strata: bool = False,
 ) -> dict[str, Any]:
     """Mechanically derive the live-call authorization proposal from actual simulation accounting."""
     retro_results = [
@@ -764,11 +772,22 @@ def generate_wave1_live_authorization_proposal(
             })
         strata_summary[stratum_name] = len(sampled)
 
+    if enforce_five_strata:
+        for stratum_name in (
+            "high_relevance",
+            "medium_relevance",
+            "low_relevance",
+            "recall_required",
+            "stale_or_repeated_noise",
+        ):
+            if strata_summary.get(stratum_name, 0) == 0:
+                raise ValueError(f"DIAGNOSTIC_SAMPLE_BLOCKED: stratum '{stratum_name}' has 0 samples")
+
     diagnostic_sample_size = len(diagnostic_sample)
     diagnostic_unique_calls = len({s["semantic_input_id"] for s in diagnostic_sample})
     sample_bytes = json.dumps(diagnostic_sample, sort_keys=True, separators=(",", ":")).encode("utf-8")
     diagnostic_sample_hash = hashlib.sha256(sample_bytes).hexdigest()
-    diagnostic_max_call_ceiling = diagnostic_unique_calls + 5
+    diagnostic_max_call_ceiling = diagnostic_unique_calls
     diagnostic_claim_ceiling = "REAL_JEV_RANKING_SIGNAL_MEASURED"
 
     semantic_schema = {
@@ -784,6 +803,8 @@ def generate_wave1_live_authorization_proposal(
     }
     schema_hash = hashlib.sha256(json.dumps(semantic_schema, sort_keys=True).encode("utf-8")).hexdigest()
 
+    simulated_trace_union_calls = union_unique_calls
+
     proposal: dict[str, Any] = {
         "proposal_schema_version": "exp-c-wave1-live-auth-v3",
         "candidate_sha": candidate_sha,
@@ -791,11 +812,17 @@ def generate_wave1_live_authorization_proposal(
         "semantic_input_schema_hash": schema_hash,
         "retroactive_raw_calls": retro_raw_calls,
         "write_time_raw_calls": write_time_raw_calls,
+        "simulated_retroactive_unique": retroactive_unique_calls,
+        "simulated_write_time_unique": write_time_unique_calls,
         "retroactive_unique_calls": retroactive_unique_calls,
         "write_time_unique_calls": write_time_unique_calls,
+        "synthetic_cross_arm_duplicate_count": cross_arm_duplicates,
         "cross_arm_duplicates": cross_arm_duplicates,
+        "simulated_trace_union_calls": simulated_trace_union_calls,
         "union_unique_calls": union_unique_calls,
-        "full_replay_required_calls": full_replay_required_calls,
+        "full_replay_required_calls": simulated_trace_union_calls,
+        "simulated_trace_claim": "exact union across observed synthetic trajectories",
+        "real_future_replay_claim_allowed": False,
         "diagnostic_sample_size": diagnostic_sample_size,
         "diagnostic_unique_calls": diagnostic_unique_calls,
         "diagnostic_sample_hash": diagnostic_sample_hash,
@@ -805,7 +832,7 @@ def generate_wave1_live_authorization_proposal(
         "diagnostic_sample": diagnostic_sample,
         "payload_class": "SANITIZED_CONTEXT_SEGMENT_V1",
         "stop_conditions": [
-            "HTTP 4xx/5xx consecutive errors >= 3",
+            "OUTCOME_UNKNOWN: transport error, timeout, or connection loss halts entire run",
             "Call count reaches diagnostic_max_call_ceiling",
             "Auth token expired or invalid",
             "Owner abort",

@@ -1,0 +1,53 @@
+{
+  "schema_version": "context-relevance-diagnostic-live-packet-v1",
+  "candidate_sha": "1a82954e0ddcf90427bbad3dd36dfbea732f1f4e",
+  "fixture_hash": "479e7484b13118398a0ce34885d3f629ed7701a30f1bb6e94a1fc46aab116102",
+  "sample_hash": "5c0365d7d179ca233fbec0db46cc2d5698f1cce550ab69dd3d59e98eacdba8f5",
+  "question_contract_hash": "a7b75a88641668c1eb4bb460cd0f5ad8ffc3dff94e53b34bbc4791fcfff7aac9",
+  "provider_state_schema_hash": "bdfcd045b233a84618a7b26ffc963838ab41c480f3d694c989b4efa8910a70ac",
+  "semantic_input_schema_hash": "5e2162b1fa9785e8eb7e21311eb025c610c870f5ca741564a851a6615f273e28",
+  "sample_count": 25,
+  "exact_semantic_input_ids": [
+    "00443d8057692a0987826bc349c824671874d3f9c6f36d587e66cbf72e837a6f",
+    "0090089cad5d79d8123ecd22196d446fb732661be1fe75ff6dc8ede3aed37db4",
+    "01061f3f84233111f4a3117b1ff25e677564e916d32d0edddb3a3e04ef890a60",
+    "011d5a594ed0c6005b6635c4aed559a03e146013f2188b81ddc59935087a2e76",
+    "015bb92b827ce3c65aa5a8d4136eb56040b8fcdb8397fad4cc203269dddb5427",
+    "00027583fefc80f5e632d4ce334a12d6ce0504ac5860f730a01d3ad4d181fcce",
+    "00175761c8b31b86ba5b97730e21d167a576e738beec56fe285d2ff97c9ee04e",
+    "001e23307d98bf20d9d8999bd41a66ec5c91428ecfcd950b8917a87d63b40e35",
+    "00234bc9a38d1582704af606926692151fad37d8ff90961dfce385bbee395e2a",
+    "00242aac337371ba76809122670323cea36005166a9d12ff265ba312f2b0a2d0",
+    "0001ffe4e424d5f7c6366e4860df9b114547a6f826240350a35b91ae4d9ff6b2",
+    "002ad3371ded05702f9a870314dc3ab715c09d9f8d77d70306830af79c4f1be6",
+    "00355010e455ba3d2c7e2cf84ace802948e1203d1045b2cf723a10bc82dc2d86",
+    "0035b1f2173157454a931851e5dfb7cc4037c7665dcc240e3c56456f77e08283",
+    "0038eab00083daeccb116af0c3f934650c6041e71c28ab03f87123837fe46abe",
+    "000a517761f77c9b5b080bb49d013472a4dbe0fab3e6676d0bd94bf50d6419c3",
+    "007b17e789bb72595ad5a1be52e34034de3495d5d1e791afa5cb675f9aad31a0",
+    "00ceef31603ec87dcb3170a3994050464e567bb4838e9642b160975bd19937de",
+    "00e206c7c729e7828b1966ebbcc497c54919eb26b9e717c45cdad68672f6db5d",
+    "00ec855785666ed77165a21c05e5fb2c9f30339e2dae87948fe48d0b53ef91e4",
+    "00009e063ab860b208ea1464cb8479b6fb54657e82e57f547f54376f2a737f13",
+    "0001be3c9d05ba4db1b48adca4935e3aa32beceecc49c815614bfe1812b45136",
+    "0001c09a60f3ceb7e94855afecc0c8037179f5f54bc18d0652ec450176d643a6",
+    "00038aa41bb09803561cad39e2da0a7103541f063ed1cc668967d4955795d645",
+    "00043d495a685275f276cd555c907d1b2eea48de752cc0ace670bbf08664e3a2"
+  ],
+  "per_stratum_counts": {
+    "high_relevance": 5,
+    "medium_relevance": 5,
+    "low_relevance": 5,
+    "recall_required": 5,
+    "stale_or_repeated_noise": 5
+  },
+  "max_calls": 25,
+  "claim_ceiling": "REAL_JEV_RANKING_SIGNAL_MEASURED",
+  "stop_conditions": [
+    "OUTCOME_UNKNOWN: transport error, timeout, or connection loss halts entire run",
+    "Call count reaches max_calls",
+    "Auth token expired or invalid",
+    "Owner abort"
+  ],
+  "packet_hash": "8ac132369dfb0f3d04ae6b0ef4e641acfab4ebe0ee5c8e47763976b91eb6567d"
+}
