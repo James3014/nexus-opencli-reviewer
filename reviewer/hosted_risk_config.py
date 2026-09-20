@@ -58,6 +58,11 @@ class HostedProviderConfigV1:
             raise ValueError("endpoint_origin must be a non-empty string")
 
         origin = self.endpoint_origin.strip()
+        if "?" in origin:
+            raise ValueError("endpoint_origin must not contain a query marker")
+        if "#" in origin:
+            raise ValueError("endpoint_origin must not contain a fragment marker")
+
         parsed = urlparse(origin)
 
         if parsed.scheme != "https":
@@ -166,8 +171,8 @@ def load_hosted_provider_config_from_dict(data: Any) -> HostedProviderConfigV1:
 
     Fails closed on unknown fields, missing fields, or invalid types.
     """
-    if not isinstance(data, dict):
-        raise ValueError("Configuration must be a JSON object")
+    if type(data) is not dict:
+        raise ValueError("Configuration must be an exact JSON object")
 
     keys = set(data.keys())
     if keys != _CANONICAL_CONFIG_KEYS:
@@ -180,11 +185,15 @@ def load_hosted_provider_config_from_dict(data: Any) -> HostedProviderConfigV1:
             errors.append(f"unknown fields forbidden: {sorted(list(extra))}")
         raise ValueError("; ".join(errors))
 
+    raw_hosts = data["allowed_hosts_whitelist"]
+    if type(raw_hosts) not in (list, tuple):
+        raise ValueError("allowed_hosts_whitelist must be a JSON array or tuple")
+
     return HostedProviderConfigV1(
         endpoint_origin=data["endpoint_origin"],
         api_key_env_var_name=data["api_key_env_var_name"],
         max_canary_quota=data["max_canary_quota"],
-        allowed_hosts_whitelist=tuple(data["allowed_hosts_whitelist"]),
+        allowed_hosts_whitelist=tuple(raw_hosts),
     )
 
 
@@ -241,6 +250,17 @@ def run_hosted_provider_zero_call_preflight(
 
     Zero network primitives are invoked.
     """
+    if config is not None and private_eval_root is not None:
+        return HostedProviderPreflightV1(
+            status=HostedPreflightStatus.CONFIG_INVALID,
+            config_hash=None,
+            endpoint_origin=None,
+            endpoint_host=None,
+            max_canary_quota=None,
+            credential_name_present=False,
+            error_message="provide exactly one config source: private_eval_root or config",
+        )
+
     if config is not None:
         if type(config) is not HostedProviderConfigV1:
             return HostedProviderPreflightV1(

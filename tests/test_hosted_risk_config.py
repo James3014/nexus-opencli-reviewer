@@ -52,6 +52,14 @@ def test_missing_required_fields_rejected(missing_key: str) -> None:
         load_hosted_provider_config_from_dict(data)
 
 
+def test_non_exact_dict_config_rejected() -> None:
+    class DictSubclass(dict[str, object]):
+        pass
+
+    with pytest.raises(ValueError, match="exact JSON object"):
+        load_hosted_provider_config_from_dict(DictSubclass(_valid_data()))
+
+
 def test_unknown_field_rejected() -> None:
     data = _valid_data()
     data["extra_unknown_field"] = "malicious_or_unexpected"
@@ -71,6 +79,8 @@ def test_unknown_field_rejected() -> None:
         "https://provider.example.invalid/api/v1",
         "https://provider.example.invalid?query=param",
         "https://provider.example.invalid#frag",
+        "https://provider.example.invalid?",
+        "https://provider.example.invalid#",
     ],
 )
 def test_invalid_endpoint_origin_rejected(bad_origin: str) -> None:
@@ -155,6 +165,15 @@ def test_whitelist_whitespace_rejected(bad_host: str) -> None:
     data["allowed_hosts_whitelist"] = ["provider.example.invalid", bad_host]
 
     with pytest.raises(ValueError, match="whitespace"):
+        load_hosted_provider_config_from_dict(data)
+
+
+@pytest.mark.parametrize("bad_hosts", ["provider.example.invalid", None, 123])
+def test_whitelist_must_be_array_or_tuple(bad_hosts: object) -> None:
+    data = _valid_data()
+    data["allowed_hosts_whitelist"] = bad_hosts
+
+    with pytest.raises(ValueError, match="JSON array or tuple"):
         load_hosted_provider_config_from_dict(data)
 
 
@@ -285,6 +304,20 @@ def test_duplicate_json_keys_rejected(tmp_path: Path) -> None:
 
     assert preflight.status is HostedPreflightStatus.CONFIG_INVALID
     assert "duplicate JSON keys" in (preflight.error_message or "")
+
+
+def test_preflight_rejects_ambiguous_dual_config_sources(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps(_valid_data()), encoding="utf-8")
+    cfg = load_hosted_provider_config_from_dict(_valid_data())
+
+    preflight = run_hosted_provider_zero_call_preflight(
+        tmp_path,
+        config=cfg,
+    )
+
+    assert preflight.status is HostedPreflightStatus.CONFIG_INVALID
+    assert "exactly one config source" in (preflight.error_message or "")
 
 
 def test_preflight_rejects_untyped_config_without_invoking_it() -> None:
