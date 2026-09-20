@@ -1,6 +1,7 @@
 """Execution script and reporting for Wave 1 Context Economics Matrix.
 
 Runs all 9 architectures under ~200K and ~1M windows and outputs markdown summary tables.
+Derives semantic value via evaluate_semantic_value against deterministic baseline.
 """
 
 from __future__ import annotations
@@ -9,12 +10,14 @@ from reviewer.context_economics.fixtures import SessionFixtureGenerator
 from reviewer.context_economics.models import SyntheticRankerMode
 from reviewer.context_economics.simulation import (
     ArchitectureRunResult,
+    evaluate_semantic_value,
+    generate_wave1_live_authorization_proposal,
     run_session_simulation,
 )
 
 
-def run_full_wave1_matrix() -> list[ArchitectureRunResult]:
-    generator = SessionFixtureGenerator(seed="EXP_C_WAVE1_V1")
+def run_full_wave1_matrix() -> tuple[list[ArchitectureRunResult], dict]:
+    generator = SessionFixtureGenerator(seed="EXP_C_WAVE1_V2")
     turns, anchors, fixture_hash = generator.generate_1000_turn_session()
 
     architectures = [
@@ -32,6 +35,7 @@ def run_full_wave1_matrix() -> list[ArchitectureRunResult]:
     results: list[ArchitectureRunResult] = []
 
     # Run for 200K window
+    det_200k_res: ArchitectureRunResult | None = None
     for display_name, arch_key, ranker_mode in architectures:
         res = run_session_simulation(
             turns,
@@ -42,9 +46,19 @@ def run_full_wave1_matrix() -> list[ArchitectureRunResult]:
             synthetic_ranker_mode=ranker_mode,
         )
         res.architecture_name = display_name
+        if arch_key == "deterministic_pruning":
+            det_200k_res = res
         results.append(res)
 
+    # Evaluate semantic value for 200K
+    assert det_200k_res is not None
+    for r in results:
+        if r.window_class == "~200K" and "Semantic" in r.architecture_name:
+            r.semantic_value_status = evaluate_semantic_value(r, det_200k_res)
+
     # Run for 1M window
+    det_1m_res: ArchitectureRunResult | None = None
+    results_1m_start = len(results)
     for display_name, arch_key, ranker_mode in architectures:
         res = run_session_simulation(
             turns,
@@ -55,31 +69,52 @@ def run_full_wave1_matrix() -> list[ArchitectureRunResult]:
             synthetic_ranker_mode=ranker_mode,
         )
         res.architecture_name = display_name
+        if arch_key == "deterministic_pruning":
+            det_1m_res = res
         results.append(res)
 
-    return results
+    # Evaluate semantic value for 1M
+    assert det_1m_res is not None
+    for r in results[results_1m_start:]:
+        if r.window_class == "~1M" and "Semantic" in r.architecture_name:
+            r.semantic_value_status = evaluate_semantic_value(r, det_1m_res)
+
+    # Generate proposal
+    proposal = generate_wave1_live_authorization_proposal(
+        candidate_sha="PENDING_COMMIT",
+        fixture_hash=fixture_hash,
+        simulation_results=results,
+    )
+
+    return results, proposal
 
 
 def format_markdown_table(results: list[ArchitectureRunResult], window_filter: str = "~200K") -> str:
     filtered = [r for r in results if r.window_class == window_filter]
     header = (
-        "| Architecture | Task success | Critical recall | Context tokens | Cache invalidations | Compactions | Total cost (est) | Hard stop |\n"
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n"
+        "| Architecture | Task success | Critical recall | Context peak / final | Cache inv / tokens | Compactions | Cost (est) | Hard stop | Semantic value |\n"
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n"
     )
     rows = []
     for r in filtered:
+        overflow_flag = f"OVERFLOW (turn {r.first_overflow_turn})" if r.window_overflow else ("YES" if r.structural_hard_stop else "NO")
+        tokens_str = f"{r.peak_context_tokens:,} / {r.final_context_tokens:,}"
+        cache_str = f"{r.prefix_invalidations} ({r.tokens_invalidated_by_rewrite:,})"
         row = (
             f"| {r.architecture_name} | {r.task_success_rate:.2f} | {r.critical_anchor_recall:.2f} | "
-            f"{r.final_context_tokens:,} | {r.prefix_invalidations} | {r.compaction_count} | "
-            f"{r.estimated_total_cost:,.0f} | {'YES' if r.structural_hard_stop else 'NO'} |"
+            f"{tokens_str} | {cache_str} | {r.compaction_count} | "
+            f"{r.estimated_total_cost:,.0f} | {overflow_flag} | {r.semantic_value_status} |"
         )
         rows.append(row)
     return header + "\n".join(rows)
 
 
 if __name__ == "__main__":
-    results = run_full_wave1_matrix()
+    results, proposal = run_full_wave1_matrix()
     print("### Window Class: ~200K\n")
     print(format_markdown_table(results, "~200K"))
     print("\n### Window Class: ~1M\n")
     print(format_markdown_table(results, "~1M"))
+    print("\n### Live Authorization Proposal:")
+    import json
+    print(json.dumps(proposal, indent=2))

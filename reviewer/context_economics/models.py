@@ -7,7 +7,7 @@ Strictly research and experiment only. No production context or runtime authorit
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 import hashlib
 import json
@@ -29,6 +29,11 @@ class VisibilityState(str, Enum):
     HIDDEN_BUT_RECALLABLE = "HIDDEN_BUT_RECALLABLE"
 
 
+class AnchorProtectionClass(str, Enum):
+    HARD_PROTECTED = "HARD_PROTECTED"
+    RECALL_REQUIRED = "RECALL_REQUIRED"
+
+
 class AnchorType(str, Enum):
     EXACT_FILE_PATH = "EXACT_FILE_PATH"
     ERROR_STRING = "ERROR_STRING"
@@ -42,6 +47,8 @@ class AnchorType(str, Enum):
     FAILED_APPROACH = "FAILED_APPROACH"
     TEST_RESULT = "TEST_RESULT"
     AUTHORITY_DECISION = "AUTHORITY_DECISION"
+    DIAGNOSTIC_FINDING = "DIAGNOSTIC_FINDING"
+    DEPENDENCY_FACT = "DEPENDENCY_FACT"
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,7 @@ class CriticalAnchorV1:
     exact_value_hash: str
     origin_turn: int
     needed_again_turn: int
+    protection_class: AnchorProtectionClass = AnchorProtectionClass.HARD_PROTECTED
     must_recall_exactly: bool = True
 
     def __post_init__(self) -> None:
@@ -60,6 +68,8 @@ class CriticalAnchorV1:
             raise ValueError("anchor_id must be a non-empty string")
         if not isinstance(self.anchor_type, AnchorType):
             raise ValueError("anchor_type must be an AnchorType")
+        if not isinstance(self.protection_class, AnchorProtectionClass):
+            raise ValueError("protection_class must be an AnchorProtectionClass")
         if len(self.exact_value_hash) != 64:
             raise ValueError("exact_value_hash must be a 64-char sha256 hash")
         if self.origin_turn < 0 or self.needed_again_turn < self.origin_turn:
@@ -79,6 +89,7 @@ class ContextSegmentV1:
     content: str
     relevance_ground_truth: float  # 0.0 to 1.0
     critical_anchor_ids: tuple[str, ...] = ()
+    has_hard_protected_anchor: bool = False
     visibility_state: VisibilityState = VisibilityState.VISIBLE
     recallable: bool = True
 
@@ -91,7 +102,7 @@ class ContextSegmentV1:
             raise ValueError("relevance_ground_truth must be in [0.0, 1.0]")
 
 
-# Deterministic Protection Patterns
+# Deterministic Protection Patterns for HARD_PROTECTED evidence
 _PROTECTION_REGEXES = [
     re.compile(r"\bERROR\b", re.IGNORECASE),
     re.compile(r"\bFAILED\b", re.IGNORECASE),
@@ -113,16 +124,14 @@ def deterministic_must_keep(segment: ContextSegmentV1) -> bool:
     """Check if segment is unconditionally protected by deterministic safety rules.
 
     Semantic models have ZERO authority to delete or hide protected segments.
+    Non-tool content (USER, SYSTEM, SUMMARY) and hard-protected anchors are untouchable.
     """
-    # 1. Non-tool content is untouchable by default tool pruning / sieve
     if segment.source_type in (SourceType.USER, SourceType.SYSTEM_EVIDENCE, SourceType.SUMMARY):
         return True
 
-    # 2. Critical anchors explicitly tagged
-    if segment.critical_anchor_ids:
+    if segment.has_hard_protected_anchor:
         return True
 
-    # 3. Content matching hard protection patterns
     text = segment.content
     for pattern in _PROTECTION_REGEXES:
         if pattern.search(text):
@@ -166,29 +175,46 @@ class SyntheticRankerMode(str, Enum):
 
 
 class SyntheticJevRanker:
-    """Deterministic synthetic ranker for simulation without live network calls."""
+    """Deterministic synthetic ranker with verifiable noise and stable input identity."""
 
     ranker_id = "synthetic-jev-ranker"
-    ranker_revision = "wave1-v1"
+    ranker_revision = "wave1-v2"
 
-    def __init__(self, mode: SyntheticRankerMode):
+    def __init__(self, mode: SyntheticRankerMode, seed: str = "SYNTH_JEV_V2"):
         self.mode = mode
+        self.seed = seed
+
+    def compute_semantic_input_hash(self, current_task: str, segment: ContextSegmentV1) -> str:
+        payload = {
+            "task": current_task,
+            "segment_id": segment.segment_id,
+            "content_hash": hashlib.sha256(segment.content.encode("utf-8")).hexdigest(),
+            "ranker_revision": self.ranker_revision,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
     def score(self, current_task: str, segment: ContextSegmentV1) -> RankerResult:
+        inp_hash = self.compute_semantic_input_hash(current_task, segment)
+        # Deterministic float in [0.0, 1.0] from hash
+        hash_float = int(inp_hash[:8], 16) / 0xFFFFFFFF
+
         if self.mode == SyntheticRankerMode.PERFECTISH:
-            # Highly correlated with ground truth, small noise
-            score = segment.relevance_ground_truth
+            # High correlation, small deterministic perturbation ±0.05
+            perturbation = (hash_float - 0.5) * 0.1
+            raw = segment.relevance_ground_truth + perturbation
         elif self.mode == SyntheticRankerMode.NOISY:
-            # Invert or corrupt partially
-            score = 0.5 * segment.relevance_ground_truth + 0.25
+            # Substantial perturbation causing true ranking inversions
+            # Invert 40% of signal with hash noise
+            raw = 0.5 * segment.relevance_ground_truth + 0.5 * hash_float
         elif self.mode == SyntheticRankerMode.NO_VALUE:
-            # Flat constant score = no discriminative value over recency/deterministic
-            score = 0.5
+            # Constant 0.5: zero discriminative signal compared to baseline
+            raw = 0.5
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
+        score = max(0.0, min(1.0, float(raw)))
         return RankerResult(
-            relevance_score=max(0.0, min(1.0, float(score))),
+            relevance_score=round(score, 4),
             ranker_id=self.ranker_id,
             ranker_revision=self.ranker_revision,
             status="OK",
@@ -233,7 +259,7 @@ class RecallStoreV1:
 class CacheEconomicsV1:
     """Deterministic cache economics tracker for session simulations."""
 
-    cache_model_revision: str = "wave1-prefix-cache-v1"
+    cache_model_revision: str = "wave1-prefix-cache-v2"
     cached_input_tokens: int = 0
     uncached_input_tokens: int = 0
     cache_write_tokens: int = 0
@@ -244,25 +270,66 @@ class CacheEconomicsV1:
     last_invalidation_turn: int = 0
 
     def record_invalidation(self, current_turn: int, invalidated_tokens: int) -> None:
+        if invalidated_tokens < 0:
+            raise ValueError("invalidated_tokens must be non-negative")
         self.prefix_invalidations += 1
         self.tokens_invalidated_by_rewrite += invalidated_tokens
         interval = current_turn - self.last_invalidation_turn
         self.turns_between_invalidations.append(interval)
         self.last_invalidation_turn = current_turn
 
-    def compute_estimated_cost(
-        self,
-        base_input_rate: float = 1.0,
-        cached_read_rate: float = 0.1,
-        cache_write_rate: float = 1.25,
-        invalidation_penalty_rate: float = 0.5,
-    ) -> float:
-        """Calculate normalized cost units based on explicit model assumptions."""
+    def verify_non_negative(self) -> bool:
+        return (
+            self.cached_input_tokens >= 0
+            and self.uncached_input_tokens >= 0
+            and self.cache_write_tokens >= 0
+            and self.cache_read_tokens >= 0
+            and self.tokens_invalidated_by_rewrite >= 0
+            and self.prefix_invalidations >= 0
+        )
+
+
+@dataclass(frozen=True)
+class TotalSessionCostV1:
+    """Versioned full total session cost accounting in NORMALIZED_COST_UNITS."""
+
+    cost_model_revision: str = "total-cost-v1"
+    generation_input_tokens: int = 0
+    generation_output_tokens: int = 0
+    semantic_decision_calls: int = 0
+    semantic_decision_input_tokens: int = 0
+    semantic_decision_output_tokens: int = 0
+    compaction_calls: int = 0
+    compaction_tokens: int = 0
+    recall_calls: int = 0
+    recall_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_miss_penalty_tokens: int = 0
+    fallback_calls: int = 0
+
+    # Rate assumptions in normalized units per 1K tokens / calls
+    rate_generation_input_per_k: float = 1.0
+    rate_generation_output_per_k: float = 3.0
+    rate_semantic_call_fixed: float = 0.5
+    rate_semantic_token_per_k: float = 0.8
+    rate_compaction_call_fixed: float = 2.0
+    rate_recall_call_fixed: float = 0.2
+    rate_cache_read_per_k: float = 0.1
+    rate_cache_write_per_k: float = 1.25
+    rate_cache_miss_penalty_per_k: float = 0.5
+
+    def compute_total_cost(self) -> float:
         cost = (
-            self.uncached_input_tokens * base_input_rate
-            + self.cache_read_tokens * cached_read_rate
-            + self.cache_write_tokens * cache_write_rate
-            + self.tokens_invalidated_by_rewrite * invalidation_penalty_rate
+            (self.generation_input_tokens / 1000.0) * self.rate_generation_input_per_k
+            + (self.generation_output_tokens / 1000.0) * self.rate_generation_output_per_k
+            + self.semantic_decision_calls * self.rate_semantic_call_fixed
+            + (self.semantic_decision_input_tokens / 1000.0) * self.rate_semantic_token_per_k
+            + self.compaction_calls * self.rate_compaction_call_fixed
+            + self.recall_calls * self.rate_recall_call_fixed
+            + (self.cache_read_tokens / 1000.0) * self.rate_cache_read_per_k
+            + (self.cache_write_tokens / 1000.0) * self.rate_cache_write_per_k
+            + (self.cache_miss_penalty_tokens / 1000.0) * self.rate_cache_miss_penalty_per_k
         )
         return round(cost, 2)
 

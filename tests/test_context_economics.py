@@ -21,6 +21,7 @@ from reviewer.context_economics.models import (
 from reviewer.context_economics.simulation import (
     ArchitectureRunResult,
     ThrashingDetector,
+    evaluate_semantic_value,
     run_session_simulation,
 )
 
@@ -42,19 +43,35 @@ def test_deterministic_must_keep_protections() -> None:
     # 1. User messages unconditionally protected
     assert deterministic_must_keep(_sample_segment("hello", is_tool=False)) is True
 
-    # 2. Critical anchors explicitly protected
-    seg_anchor = ContextSegmentV1(
-        segment_id="seg-a",
+    # 2. Hard protected critical anchors explicitly protected
+    seg_hard_anchor = ContextSegmentV1(
+        segment_id="seg-hard",
         turn_id=1,
         source_type=SourceType.TOOL_RESULT,
         token_count=50,
         created_at_turn=1,
         content_class="test",
-        content="normal looking content",
+        content="normal looking content with hard anchor",
         relevance_ground_truth=0.1,
-        critical_anchor_ids=("anchor-1",),
+        critical_anchor_ids=("anchor-hard-1",),
+        has_hard_protected_anchor=True,
     )
-    assert deterministic_must_keep(seg_anchor) is True
+    assert deterministic_must_keep(seg_hard_anchor) is True
+
+    # 2b. Recall-required critical anchors NOT protected by deterministic_must_keep alone
+    seg_recall_anchor = ContextSegmentV1(
+        segment_id="seg-recall",
+        turn_id=1,
+        source_type=SourceType.TOOL_RESULT,
+        token_count=50,
+        created_at_turn=1,
+        content_class="test",
+        content="normal looking content with recall anchor",
+        relevance_ground_truth=0.1,
+        critical_anchor_ids=("anchor-recall-1",),
+        has_hard_protected_anchor=False,
+    )
+    assert deterministic_must_keep(seg_recall_anchor) is False
 
     # 3. Regex matches
     assert deterministic_must_keep(_sample_segment("Build ERROR: failed")) is True
@@ -244,13 +261,59 @@ def test_m7_negative_control_decreasing_intervals_must_detect_thrashing() -> Non
 
 
 def test_m8_negative_control_semantic_no_value_detected() -> None:
-    """M8: SyntheticRankerMode.NO_VALUE produces semantic_value_detected = False."""
+    """M8: SyntheticRankerMode.NO_VALUE produces semantic_value_status = 'NONE'."""
     gen = SessionFixtureGenerator(seed="TEST_SEED_M8")
     turns, anchors, _ = gen.generate_1000_turn_session()
-    res = run_session_simulation(
+    res_det = run_session_simulation(
+        turns[:20],
+        anchors,
+        "deterministic_pruning",
+    )
+    res_sem = run_session_simulation(
         turns[:20],
         anchors,
         "semantic_retroactive",
         synthetic_ranker_mode=SyntheticRankerMode.NO_VALUE,
     )
-    assert res.semantic_value_detected is False
+    status = evaluate_semantic_value(res_sem, res_det)
+    assert status == "NONE"
+
+
+def test_false_positive_control_recall_drop_disqualified() -> None:
+    """False-positive control: Even if semantic looks cheaper, recall degradation must result in DISQUALIFIED."""
+    gen = SessionFixtureGenerator(seed="TEST_FP_SEED")
+    turns, anchors, _ = gen.generate_1000_turn_session()
+    res_det = run_session_simulation(turns[:30], anchors, "deterministic_pruning")
+
+    # Manually create a run result that is cheaper but with degraded recall
+    res_cheaper_bad_recall = copy.deepcopy(res_det)
+    # Simulate degraded recall and lower cost
+    object.__setattr__(res_cheaper_bad_recall, "critical_anchor_recall", res_det.critical_anchor_recall - 0.1)
+    object.__setattr__(res_cheaper_bad_recall, "estimated_total_cost", res_det.estimated_total_cost * 0.5)
+
+    status = evaluate_semantic_value(res_cheaper_bad_recall, res_det)
+    assert status == "DISQUALIFIED"
+
+
+def test_canonical_fixture_hash_sensitivity() -> None:
+    """Canonical fixture hash must be sensitive to seeds, turns, segments, and anchors."""
+    gen1 = SessionFixtureGenerator(seed="SEED_ALPHA")
+    turns1, anchors1, hash1 = gen1.generate_1000_turn_session()
+
+    gen2 = SessionFixtureGenerator(seed="SEED_BETA")
+    turns2, anchors2, hash2 = gen2.generate_1000_turn_session()
+
+    assert hash1 != hash2
+
+    # Modifying even a single turn's prompt in the session changes the canonical hash
+    from reviewer.context_economics.fixtures import compute_canonical_fixture_hash
+    mutated_turns = copy.deepcopy(turns1)
+    mutated_turns[42] = SessionTurnV1(
+        turn_id=mutated_turns[42].turn_id,
+        user_prompt="MUTATED PROMPT",
+        segments=mutated_turns[42].segments,
+        task_checkpoint=mutated_turns[42].task_checkpoint,
+        recall_queries=mutated_turns[42].recall_queries,
+    )
+    mutated_hash = compute_canonical_fixture_hash(mutated_turns, anchors1, "SEED_ALPHA")
+    assert mutated_hash != hash1
