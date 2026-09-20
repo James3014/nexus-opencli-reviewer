@@ -20,7 +20,6 @@ from reviewer.hosted_risk_config import HostedProviderConfigV1
 from reviewer.risk_model_adapter import (
     F4QuestionContractV1,
     ProviderVisibleRiskStateV1,
-    canonical_provider_payload_hash,
 )
 
 _VALID_HEADER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
@@ -121,8 +120,8 @@ class HostedProviderWireDescriptorV1:
 
 def load_wire_descriptor_from_dict(data: dict[str, Any]) -> HostedProviderWireDescriptorV1:
     """Parse and validate HostedProviderWireDescriptorV1 from a dictionary."""
-    if not isinstance(data, dict):
-        raise ValueError("Wire descriptor must be a JSON object")
+    if type(data) is not dict:
+        raise ValueError("Wire descriptor must be an exact JSON object")
 
     keys = set(data.keys())
     if keys != _CANONICAL_DESCRIPTOR_KEYS:
@@ -135,24 +134,41 @@ def load_wire_descriptor_from_dict(data: dict[str, Any]) -> HostedProviderWireDe
             errs.append(f"unknown keys forbidden: {sorted(list(extra))}")
         raise ValueError("; ".join(errs))
 
+    string_fields = (
+        "contract_schema_version",
+        "http_method",
+        "request_path",
+        "auth_mode",
+        "auth_header_name",
+        "content_type",
+        "expected_model_identifier",
+        "request_template_kind",
+        "response_probability_path",
+        "api_version_source",
+        "provider_schema_identity",
+    )
+    for field_name in string_fields:
+        if type(data[field_name]) is not str:
+            raise ValueError(f"{field_name} must be a JSON string")
+
     auth_mode_raw = data["auth_mode"]
     try:
         auth_mode = HostedAuthMode(auth_mode_raw)
-    except ValueError:
-        raise ValueError(f"Invalid auth_mode: {auth_mode_raw!r}")
+    except ValueError as exc:
+        raise ValueError(f"Invalid auth_mode: {auth_mode_raw!r}") from exc
 
     return HostedProviderWireDescriptorV1(
-        contract_schema_version=str(data["contract_schema_version"]),
-        http_method=str(data["http_method"]),
-        request_path=str(data["request_path"]),
+        contract_schema_version=data["contract_schema_version"],
+        http_method=data["http_method"],
+        request_path=data["request_path"],
         auth_mode=auth_mode,
-        auth_header_name=str(data["auth_header_name"]),
-        content_type=str(data["content_type"]),
-        expected_model_identifier=str(data["expected_model_identifier"]),
-        request_template_kind=str(data["request_template_kind"]),
-        response_probability_path=str(data["response_probability_path"]),
-        api_version_source=str(data["api_version_source"]),
-        provider_schema_identity=str(data["provider_schema_identity"]),
+        auth_header_name=data["auth_header_name"],
+        content_type=data["content_type"],
+        expected_model_identifier=data["expected_model_identifier"],
+        request_template_kind=data["request_template_kind"],
+        response_probability_path=data["response_probability_path"],
+        api_version_source=data["api_version_source"],
+        provider_schema_identity=data["provider_schema_identity"],
     )
 
 
@@ -184,13 +200,11 @@ class LiveCanaryAuthorizationV1:
 
 @dataclass(frozen=True)
 class HostedCanaryDryRun:
-    """Assembled dry-run canary request representation without network access."""
+    """Redacted dry-run receipt with no private endpoint, path, or credential value."""
 
     method: str
-    target_origin: str
-    target_path: str
-    headers: dict[str, str]
-    body_payload: dict[str, Any]
+    endpoint_host_hash: str
+    header_names: tuple[str, ...]
     body_payload_hash: str
     config_hash: str
     wire_contract_hash: str
@@ -205,8 +219,6 @@ def assemble_hosted_canary_dry_run(
     state: ProviderVisibleRiskStateV1,
     contract: F4QuestionContractV1,
     provider_request_id: str,
-    *,
-    synthetic_key: str | None = None,
 ) -> HostedCanaryDryRun:
     """Assemble a zero-network, zero-real-secret dry run request.
 
@@ -234,6 +246,16 @@ def assemble_hosted_canary_dry_run(
 
     if authorization.max_calls <= 0:
         raise ValueError("Authorization call quota exhausted")
+    if authorization.max_calls > config.max_canary_quota:
+        raise ValueError("Authorization max_calls exceeds configured canary quota")
+
+    if (
+        not isinstance(provider_request_id, str)
+        or not provider_request_id
+        or len(provider_request_id) > 128
+        or any(ord(char) < 33 or ord(char) == 127 for char in provider_request_id)
+    ):
+        raise ValueError("provider_request_id must be a bounded visible ASCII-like token")
 
     # 2. Build dry-run payload
     # Semantic mapping strictly preserves ProviderVisibleRiskStateV1 + F4QuestionContractV1
@@ -251,25 +273,22 @@ def assemble_hosted_canary_dry_run(
     encoded_bytes = json.dumps(body_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     body_payload_hash = hashlib.sha256(encoded_bytes).hexdigest()
 
-    # 3. Assemble headers without real secrets
-    headers: dict[str, str] = {
-        "Content-Type": wire.content_type,
-        "Accept": wire.content_type,
-        "X-Provider-Request-Id": provider_request_id,
-    }
-
-    if synthetic_key:
-        auth_val = f"Bearer {synthetic_key}" if wire.auth_mode == HostedAuthMode.BEARER else synthetic_key
-        headers[wire.auth_header_name] = auth_val
-    else:
-        headers[wire.auth_header_name] = f"REDACTED_{wire.auth_mode.value}_CREDENTIAL"
+    # 3. Return only redacted request metadata. Do not materialize any credential value
+    # or private endpoint/path in the dry-run receipt.
+    header_names = (
+        "Accept",
+        "Content-Type",
+        "X-Provider-Request-Id",
+        wire.auth_header_name,
+    )
+    endpoint_host_hash = hashlib.sha256(
+        parsed_origin.hostname.encode("utf-8")
+    ).hexdigest()
 
     return HostedCanaryDryRun(
         method=wire.http_method,
-        target_origin=config.endpoint_origin,
-        target_path=wire.request_path,
-        headers=headers,
-        body_payload=body_payload,
+        endpoint_host_hash=endpoint_host_hash,
+        header_names=tuple(sorted(header_names)),
         body_payload_hash=body_payload_hash,
         config_hash=cfg_hash,
         wire_contract_hash=wire_hash,

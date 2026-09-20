@@ -126,8 +126,17 @@ def test_authorization_requires_exact_hash_bindings() -> None:
     dry_run = assemble_hosted_canary_dry_run(
         cfg, wire, auth, _state(), contract, "req-dry-1"
     )
-    assert dry_run.target_origin == "https://provider.example.invalid"
-    assert dry_run.target_path == "/v1/decision"
+    assert len(dry_run.endpoint_host_hash) == 64
+    assert dry_run.header_names == (
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-Provider-Request-Id",
+    )
+    assert not hasattr(dry_run, "target_origin")
+    assert not hasattr(dry_run, "target_path")
+    assert not hasattr(dry_run, "headers")
+    assert not hasattr(dry_run, "body_payload")
     assert dry_run.config_hash == cfg.canonical_config_hash()
     assert dry_run.wire_contract_hash == wire.canonical_wire_hash()
 
@@ -195,3 +204,59 @@ def test_dry_run_does_not_call_network(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert dry_run.body_payload_hash is not None
     assert dry_run.method == "POST"
+
+
+
+def test_wire_descriptor_rejects_implicit_string_coercion() -> None:
+    data = _valid_wire_data()
+    data["expected_model_identifier"] = 123
+
+    with pytest.raises(ValueError, match="expected_model_identifier must be a JSON string"):
+        load_wire_descriptor_from_dict(data)
+
+
+def test_authorization_cannot_exceed_configured_quota() -> None:
+    cfg = _valid_config()
+    wire = load_wire_descriptor_from_dict(_valid_wire_data())
+    contract = F4QuestionContractV1()
+    auth = LiveCanaryAuthorizationV1(
+        config_hash=cfg.canonical_config_hash(),
+        wire_contract_hash=wire.canonical_wire_hash(),
+        endpoint_host="provider.example.invalid",
+        question_contract_hash=contract.contract_hash,
+        max_calls=2,
+    )
+
+    with pytest.raises(ValueError, match="exceeds configured canary quota"):
+        assemble_hosted_canary_dry_run(
+            cfg, wire, auth, _state(), contract, "req-over-quota"
+        )
+
+
+@pytest.mark.parametrize(
+    "request_id",
+    ["", "has space", "line\nbreak", "tab\tvalue", "x" * 129],
+)
+def test_provider_request_id_must_be_bounded_visible_token(request_id: str) -> None:
+    cfg = _valid_config()
+    wire = load_wire_descriptor_from_dict(_valid_wire_data())
+    contract = F4QuestionContractV1()
+    auth = LiveCanaryAuthorizationV1(
+        config_hash=cfg.canonical_config_hash(),
+        wire_contract_hash=wire.canonical_wire_hash(),
+        endpoint_host="provider.example.invalid",
+        question_contract_hash=contract.contract_hash,
+        max_calls=1,
+    )
+
+    with pytest.raises(ValueError, match="provider_request_id"):
+        assemble_hosted_canary_dry_run(
+            cfg, wire, auth, _state(), contract, request_id
+        )
+
+
+def test_dry_run_has_no_secret_materialization_parameter() -> None:
+    import inspect
+
+    signature = inspect.signature(assemble_hosted_canary_dry_run)
+    assert "synthetic_key" not in signature.parameters
