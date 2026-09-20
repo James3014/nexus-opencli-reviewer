@@ -26,8 +26,8 @@
     "context_economics_context_relevance_25_call_lineage": "EXCLUDED",
     "historical_v2_3_1_text_benchmark": "REFERENCE_ONLY",
     "current_calibration_input": "ProviderVisibleRiskStateV1_ONLY",
-    "current_noul_operating_threshold": "UNBOUND_UNTIL_CALIBRATION_FIT",
-    "legacy_probability_or_confidence_thresholds_may_not_transfer": true
+    "legacy_probability_or_confidence_thresholds_may_not_transfer": true,
+    "current_noul_operating_point": "UNBOUND_UNTIL_CALIBRATION_FIT"
   },
   "historical_reference": {
     "source_commit_local_only": "6780afa68d156f51733e067d8ea4cc0e85384e37",
@@ -82,9 +82,13 @@
     "brier": "REPORT_ONLY",
     "ece_10": "REPORT_ONLY",
     "current_metric_semantics": {
-      "risk_ucb_95": "one-sided upper bound on unsafe non-escalation among provider-covered high-risk current-schema cases",
-      "coverage_lcb_95": "one-sided lower bound on provider coverage among high-risk current-schema cases",
-      "provider_failure": "ABSTENTION_NOT_LOW_RISK_PREDICTION"
+      "selective_risk": "unsafe SAME decisions divided by non-abstained high-risk decisions",
+      "risk_ucb_95": "one-sided upper bound on selective risk among non-abstained high-risk decisions",
+      "coverage_lcb_95": "one-sided lower bound on non-abstained decision coverage among high-risk current-schema cases",
+      "false_escalation_rate": "low-risk ESCALATE decisions divided by all low-risk cases",
+      "benign_pass_through_rate": "low-risk SAME decisions divided by all low-risk cases",
+      "semantic_middle_band": "ABSTAIN",
+      "provider_failure": "PROVIDER_UNAVAILABLE_ABSTENTION_NOT_SAFE_PREDICTION"
     }
   },
   "current_schema_collection": {
@@ -104,7 +108,8 @@
       "no_retrospective_reselection": true,
       "identity_drift_starts_new_window": true,
       "criteria_activation": "NOT_IN_WAVE1"
-    }
+    },
+    "calibration_fit_rule": "FIT_SELECTIVE_SAME_ESCALATE_ABSTAIN_OPERATING_POINT_ON_CALIBRATION_FIT_ONLY"
   },
   "external_effects": {
     "wave1_provider_calls": 0,
@@ -115,7 +120,7 @@
   "calibration_artifact_binding": {
     "corpus_manifest_hash_required_before_calls": true,
     "corpus_manifest_binds_truth_and_provider_payload_hash": true,
-    "threshold_artifact_requires_prediction_source_hash": true,
-    "authorization_batches_bind_corpus_manifest_hash": true
+    "authorization_batches_bind_corpus_manifest_hash": true,
+    "operating_point_artifact_requires_prediction_source_hash": true
   }
 }

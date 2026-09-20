@@ -68,6 +68,13 @@ class F4AuthorizationPreviewStatus(str, Enum):
     INVALID_CORPUS = "INVALID_CORPUS"
 
 
+class F4SelectiveOutcome(str, Enum):
+    SAME = "SAME"
+    ESCALATE = "ESCALATE"
+    ABSTAIN = "ABSTAIN"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+
+
 @dataclass(frozen=True)
 class F4CalibrationCaseV1:
     """One independently adjudicated current-schema F4 case.
@@ -155,6 +162,89 @@ class F4ThresholdMetricsV1:
     benign_pass_through_rate: float
     brier_score: float | None
     ece_10: float | None
+
+
+@dataclass(frozen=True)
+class F4SelectiveOperatingPointV1:
+    """Two-sided decision point for a NOUL risk probability.
+
+    probability < same_threshold         -> SAME
+    probability >= escalation_threshold -> ESCALATE
+    otherwise                           -> ABSTAIN
+    """
+
+    same_threshold: float
+    escalation_threshold: float
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("same_threshold", self.same_threshold),
+            ("escalation_threshold", self.escalation_threshold),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise ValueError(f"{name} must be in [0,1]")
+        if float(self.same_threshold) > float(self.escalation_threshold):
+            raise ValueError("same_threshold must be <= escalation_threshold")
+
+
+@dataclass(frozen=True)
+class F4SelectiveMetricsV1:
+    operating_point: F4SelectiveOperatingPointV1
+    total_cases: int
+    provider_ok_cases: int
+    provider_unavailable_cases: int
+    semantic_abstentions: int
+    decision_cases: int
+    decision_coverage: float
+    abstention_rate: float
+    high_risk_total: int
+    high_risk_decisions: int
+    high_risk_errors: int
+    critical_misses: int
+    selective_risk: float
+    risk_ucb_95: float
+    high_risk_coverage: float
+    coverage_lcb_95: float
+    low_risk_total: int
+    low_risk_same: int
+    low_risk_escalations: int
+    low_risk_abstentions: int
+    false_escalation_rate: float
+    benign_pass_through_rate: float
+    brier_score: float | None
+    ece_10: float | None
+
+
+@dataclass(frozen=True)
+class F4FrozenOperatingPointV1:
+    same_threshold: float
+    escalation_threshold: float
+    fit_case_ids_hash: str
+    fit_prediction_hash: str
+    fit_corpus_manifest_hash: str
+    prediction_source_hash: str
+    question_contract_hash: str
+    input_schema_hash: str
+
+    def __post_init__(self) -> None:
+        F4SelectiveOperatingPointV1(
+            same_threshold=self.same_threshold,
+            escalation_threshold=self.escalation_threshold,
+        )
+        for name, value in (
+            ("fit_case_ids_hash", self.fit_case_ids_hash),
+            ("fit_prediction_hash", self.fit_prediction_hash),
+            ("fit_corpus_manifest_hash", self.fit_corpus_manifest_hash),
+            ("prediction_source_hash", self.prediction_source_hash),
+            ("question_contract_hash", self.question_contract_hash),
+            ("input_schema_hash", self.input_schema_hash),
+        ):
+            if not _HEX64.fullmatch(value):
+                raise ValueError(f"{name} must be lowercase sha256")
 
 
 @dataclass(frozen=True)
@@ -473,6 +563,153 @@ def evaluate_threshold(
     )
 
 
+
+def classify_selective_probability(
+    probability: float,
+    operating_point: F4SelectiveOperatingPointV1,
+) -> F4SelectiveOutcome:
+    if (
+        isinstance(probability, bool)
+        or not isinstance(probability, (int, float))
+        or not math.isfinite(float(probability))
+        or not 0.0 <= float(probability) <= 1.0
+    ):
+        raise ValueError("probability must be finite and in [0,1]")
+    p = float(probability)
+    if p < float(operating_point.same_threshold):
+        return F4SelectiveOutcome.SAME
+    if p >= float(operating_point.escalation_threshold):
+        return F4SelectiveOutcome.ESCALATE
+    return F4SelectiveOutcome.ABSTAIN
+
+
+def evaluate_selective_operating_point(
+    cases: Sequence[F4CalibrationCaseV1],
+    predictions: Sequence[F4PredictionV1],
+    operating_point: F4SelectiveOperatingPointV1,
+) -> F4SelectiveMetricsV1:
+    """Evaluate selective F4 risk behavior.
+
+    Provider failure and the probability middle band are abstentions, not safe
+    predictions.  Risk/coverage use only non-abstained high-risk decisions,
+    preserving the earlier F4 selective-risk interpretation.
+    """
+    if not cases:
+        raise ValueError("cases must be non-empty")
+    pmap = _prediction_map(predictions)
+    if set(pmap) != {case.case_id for case in cases}:
+        raise ValueError("predictions must match exact case ID set")
+
+    outcomes: list[tuple[F4CalibrationCaseV1, F4SelectiveOutcome, float | None]] = []
+    for case in cases:
+        prediction = pmap[case.case_id]
+        if prediction.status is not ProviderCallStatus.OK:
+            outcomes.append((case, F4SelectiveOutcome.PROVIDER_UNAVAILABLE, None))
+            continue
+        assert prediction.probability is not None
+        p = float(prediction.probability)
+        outcomes.append(
+            (case, classify_selective_probability(p, operating_point), p)
+        )
+
+    provider_ok = sum(
+        outcome is not F4SelectiveOutcome.PROVIDER_UNAVAILABLE
+        for _case, outcome, _p in outcomes
+    )
+    provider_unavailable = len(cases) - provider_ok
+    semantic_abstentions = sum(
+        outcome is F4SelectiveOutcome.ABSTAIN
+        for _case, outcome, _p in outcomes
+    )
+    decisions = [
+        (case, outcome, p)
+        for case, outcome, p in outcomes
+        if outcome in (F4SelectiveOutcome.SAME, F4SelectiveOutcome.ESCALATE)
+    ]
+
+    high = [case for case in cases if case.requires_escalation]
+    low = [case for case in cases if not case.requires_escalation]
+    high_decisions = [
+        (case, outcome, p)
+        for case, outcome, p in decisions
+        if case.requires_escalation
+    ]
+    high_errors = sum(
+        outcome is F4SelectiveOutcome.SAME
+        for _case, outcome, _p in high_decisions
+    )
+    critical_misses = sum(
+        case.critical_if_missed and outcome is F4SelectiveOutcome.SAME
+        for case, outcome, _p in high_decisions
+    )
+    risk = high_errors / len(high_decisions) if high_decisions else 1.0
+    risk_ucb = (
+        clopper_pearson_upper(high_errors, len(high_decisions))
+        if high_decisions
+        else 1.0
+    )
+    high_coverage = len(high_decisions) / len(high) if high else 0.0
+    coverage_lcb = (
+        clopper_pearson_lower(len(high_decisions), len(high))
+        if high
+        else 0.0
+    )
+
+    low_same = sum(
+        case.requires_escalation is False and outcome is F4SelectiveOutcome.SAME
+        for case, outcome, _p in outcomes
+    )
+    low_escalations = sum(
+        case.requires_escalation is False
+        and outcome is F4SelectiveOutcome.ESCALATE
+        for case, outcome, _p in outcomes
+    )
+    low_abstentions = len(low) - low_same - low_escalations
+    false_rate = low_escalations / len(low) if low else 1.0
+    benign_rate = low_same / len(low) if low else 0.0
+
+    ok_probs = [
+        float(p)
+        for _case, outcome, p in outcomes
+        if outcome is not F4SelectiveOutcome.PROVIDER_UNAVAILABLE and p is not None
+    ]
+    ok_labels = [
+        case.requires_escalation
+        for case, outcome, p in outcomes
+        if outcome is not F4SelectiveOutcome.PROVIDER_UNAVAILABLE and p is not None
+    ]
+    brier = brier_score(ok_probs, ok_labels) if ok_probs else None
+    ece = expected_calibration_error(ok_probs, ok_labels) if ok_probs else None
+
+    nondecisions = len(cases) - len(decisions)
+    return F4SelectiveMetricsV1(
+        operating_point=operating_point,
+        total_cases=len(cases),
+        provider_ok_cases=provider_ok,
+        provider_unavailable_cases=provider_unavailable,
+        semantic_abstentions=semantic_abstentions,
+        decision_cases=len(decisions),
+        decision_coverage=len(decisions) / len(cases),
+        abstention_rate=nondecisions / len(cases),
+        high_risk_total=len(high),
+        high_risk_decisions=len(high_decisions),
+        high_risk_errors=high_errors,
+        critical_misses=critical_misses,
+        selective_risk=risk,
+        risk_ucb_95=risk_ucb,
+        high_risk_coverage=high_coverage,
+        coverage_lcb_95=coverage_lcb,
+        low_risk_total=len(low),
+        low_risk_same=low_same,
+        low_risk_escalations=low_escalations,
+        low_risk_abstentions=low_abstentions,
+        false_escalation_rate=false_rate,
+        benign_pass_through_rate=benign_rate,
+        brier_score=brier,
+        ece_10=ece,
+    )
+
+
 def _ids_hash(values: Iterable[str]) -> str:
     return _canonical_hash(sorted(values))
 
@@ -487,6 +724,89 @@ def _prediction_hash(predictions: Sequence[F4PredictionV1]) -> str:
         for p in sorted(predictions, key=lambda p: p.case_id)
     ]
     return _canonical_hash(payload)
+
+
+
+def fit_selective_operating_point(
+    cases: Sequence[F4CalibrationCaseV1],
+    predictions: Sequence[F4PredictionV1],
+    contract: F4QuestionContractV1,
+    *,
+    prediction_source_hash: str,
+) -> F4FrozenOperatingPointV1:
+    """Fit SAME/ESCALATE/ABSTAIN boundaries on CALIBRATION_FIT only.
+
+    Selection is deterministic:
+    1. zero high-risk SAME decisions / critical misses;
+    2. maximize benign pass-through over all controls;
+    3. maximize high-risk selective coverage;
+    4. maximize total decision coverage;
+    5. minimize false escalation;
+    6. deterministic threshold tie-break.
+    """
+    if not _HEX64.fullmatch(prediction_source_hash):
+        raise ValueError("prediction_source_hash must be lowercase sha256")
+    if not cases or any(
+        case.split is not F4CalibrationSplit.CALIBRATION_FIT
+        for case in cases
+    ):
+        raise ValueError("operating-point fitting is restricted to CALIBRATION_FIT")
+    pmap = _prediction_map(predictions)
+    if set(pmap) != {case.case_id for case in cases}:
+        raise ValueError("predictions must match exact CALIBRATION_FIT case IDs")
+    if any(p.status is not ProviderCallStatus.OK for p in predictions):
+        raise ValueError("operating-point fitting requires complete provider coverage")
+
+    probabilities = sorted(
+        {
+            0.0,
+            1.0,
+            *(float(p.probability) for p in predictions if p.probability is not None),
+        }
+    )
+    best: tuple[tuple[float, ...], F4SelectiveOperatingPointV1] | None = None
+    for same_threshold in probabilities:
+        for escalation_threshold in probabilities:
+            if same_threshold > escalation_threshold:
+                continue
+            point = F4SelectiveOperatingPointV1(
+                same_threshold=same_threshold,
+                escalation_threshold=escalation_threshold,
+            )
+            metrics = evaluate_selective_operating_point(
+                cases,
+                predictions,
+                point,
+            )
+            if metrics.high_risk_errors != 0 or metrics.critical_misses != 0:
+                continue
+            score = (
+                metrics.benign_pass_through_rate,
+                metrics.high_risk_coverage,
+                metrics.decision_coverage,
+                -metrics.false_escalation_rate,
+                -metrics.abstention_rate,
+                same_threshold,
+                -escalation_threshold,
+            )
+            if best is None or score > best[0]:
+                best = (score, point)
+
+    if best is None:
+        raise ValueError(
+            "no selective operating point satisfies zero-miss calibration-fit invariant"
+        )
+    chosen = best[1]
+    return F4FrozenOperatingPointV1(
+        same_threshold=chosen.same_threshold,
+        escalation_threshold=chosen.escalation_threshold,
+        fit_case_ids_hash=_ids_hash(case.case_id for case in cases),
+        fit_prediction_hash=_prediction_hash(predictions),
+        fit_corpus_manifest_hash=canonical_corpus_manifest_hash(cases, contract),
+        prediction_source_hash=prediction_source_hash,
+        question_contract_hash=contract.contract_hash,
+        input_schema_hash=contract.input_schema_hash,
+    )
 
 
 def fit_operating_threshold(
@@ -548,7 +868,7 @@ def fit_operating_threshold(
 
 
 def certify_metrics(
-    metrics: F4ThresholdMetricsV1,
+    metrics: F4SelectiveMetricsV1,
     criteria: F4CertificationCriteriaV1,
 ) -> tuple[bool, tuple[str, ...]]:
     failures: list[str] = []

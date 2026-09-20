@@ -8,15 +8,18 @@ from reviewer.f4_calibration import (
     F4CalibrationSplit,
     F4CertificationCriteriaV1,
     F4PredictionV1,
+    F4SelectiveOperatingPointV1,
     brier_score,
     build_zero_call_authorization_preview,
     canonical_corpus_manifest_hash,
     certify_metrics,
     clopper_pearson_lower,
     clopper_pearson_upper,
+    evaluate_selective_operating_point,
     evaluate_threshold,
     expected_calibration_error,
     fit_operating_threshold,
+    fit_selective_operating_point,
 )
 from reviewer.hosted_risk_config import HostedProviderConfigV1
 from reviewer.risk_model_adapter import (
@@ -135,7 +138,7 @@ def test_brier_and_ece_are_diagnostic_metrics() -> None:
     ) <= 1.0
 
 
-def test_threshold_metrics_distinguish_failure_from_prediction() -> None:
+def test_selective_metrics_distinguish_unavailable_from_safe_prediction() -> None:
     high = _case(
         1,
         F4CalibrationSplit.CALIBRATION_CERT,
@@ -146,7 +149,7 @@ def test_threshold_metrics_distinguish_failure_from_prediction() -> None:
         F4CalibrationSplit.CALIBRATION_CERT,
         high=False,
     )
-    metrics = evaluate_threshold(
+    metrics = evaluate_selective_operating_point(
         [high, low],
         [
             F4PredictionV1(
@@ -156,16 +159,20 @@ def test_threshold_metrics_distinguish_failure_from_prediction() -> None:
             ),
             _prediction(low, 0.1),
         ],
-        0.5,
+        F4SelectiveOperatingPointV1(
+            same_threshold=0.3,
+            escalation_threshold=0.7,
+        ),
     )
-    assert metrics.high_risk_total == 1
-    assert metrics.high_risk_covered == 0
+    assert metrics.provider_unavailable_cases == 1
+    assert metrics.high_risk_decisions == 0
     assert metrics.critical_misses == 0
     assert metrics.risk_ucb_95 == 1.0
     assert metrics.abstention_rate == pytest.approx(0.5)
+    assert metrics.benign_pass_through_rate == pytest.approx(1.0)
 
 
-def test_threshold_fitting_is_fit_partition_only() -> None:
+def test_selective_operating_point_fitting_is_fit_partition_only() -> None:
     cert_case = _case(
         1,
         F4CalibrationSplit.CALIBRATION_CERT,
@@ -175,7 +182,7 @@ def test_threshold_fitting_is_fit_partition_only() -> None:
         ValueError,
         match="restricted to CALIBRATION_FIT",
     ):
-        fit_operating_threshold(
+        fit_selective_operating_point(
             [cert_case],
             [_prediction(cert_case, 0.9)],
             F4QuestionContractV1(),
@@ -183,7 +190,7 @@ def test_threshold_fitting_is_fit_partition_only() -> None:
         )
 
 
-def test_threshold_fit_chooses_highest_zero_miss_cutoff() -> None:
+def test_selective_fit_freezes_abstention_region_and_evidence_identity() -> None:
     high1 = _case(
         1,
         F4CalibrationSplit.CALIBRATION_FIT,
@@ -199,7 +206,7 @@ def test_threshold_fit_chooses_highest_zero_miss_cutoff() -> None:
         F4CalibrationSplit.CALIBRATION_FIT,
         high=False,
     )
-    frozen = fit_operating_threshold(
+    frozen = fit_selective_operating_point(
         [high1, high2, low],
         [
             _prediction(high1, 0.82),
@@ -209,12 +216,49 @@ def test_threshold_fit_chooses_highest_zero_miss_cutoff() -> None:
         F4QuestionContractV1(),
         prediction_source_hash="b" * 64,
     )
-    assert frozen.threshold == pytest.approx(0.74)
+    assert frozen.same_threshold == pytest.approx(0.74)
+    assert frozen.escalation_threshold == pytest.approx(0.74)
     assert frozen.fit_corpus_manifest_hash == canonical_corpus_manifest_hash(
         [high1, high2, low],
         F4QuestionContractV1(),
     )
     assert frozen.prediction_source_hash == "b" * 64
+
+
+def test_selective_middle_band_is_abstention_and_reduces_coverage() -> None:
+    high = _case(1, F4CalibrationSplit.CALIBRATION_CERT, high=True)
+    low = _case(2, F4CalibrationSplit.CALIBRATION_CERT, high=False)
+    metrics = evaluate_selective_operating_point(
+        [high, low],
+        [_prediction(high, 0.60), _prediction(low, 0.40)],
+        F4SelectiveOperatingPointV1(
+            same_threshold=0.30,
+            escalation_threshold=0.70,
+        ),
+    )
+    assert metrics.semantic_abstentions == 2
+    assert metrics.decision_cases == 0
+    assert metrics.decision_coverage == 0.0
+    assert metrics.high_risk_coverage == 0.0
+    assert metrics.coverage_lcb_95 == 0.0
+    assert metrics.benign_pass_through_rate == 0.0
+
+
+def test_selective_risk_uses_non_abstained_high_risk_decisions() -> None:
+    high1 = _case(1, F4CalibrationSplit.CALIBRATION_CERT, high=True)
+    high2 = _case(3, F4CalibrationSplit.CALIBRATION_CERT, high=True)
+    metrics = evaluate_selective_operating_point(
+        [high1, high2],
+        [_prediction(high1, 0.9), _prediction(high2, 0.2)],
+        F4SelectiveOperatingPointV1(
+            same_threshold=0.3,
+            escalation_threshold=0.7,
+        ),
+    )
+    assert metrics.high_risk_decisions == 2
+    assert metrics.high_risk_errors == 1
+    assert metrics.critical_misses == 1
+    assert metrics.selective_risk == pytest.approx(0.5)
 
 
 def test_certification_criteria_preserve_pre_registered_values() -> None:
@@ -313,7 +357,7 @@ def test_heldout_cases_never_enter_calibration_call_plan() -> None:
     assert held[0].case_id not in planned
 
 
-def test_certify_metrics_reports_failure_reasons() -> None:
+def test_certify_metrics_reports_selective_failure_reasons() -> None:
     cases = [
         _case(
             1,
@@ -326,13 +370,16 @@ def test_certify_metrics_reports_failure_reasons() -> None:
             high=False,
         ),
     ]
-    metrics = evaluate_threshold(
+    metrics = evaluate_selective_operating_point(
         cases,
         [
             _prediction(cases[0], 0.1),
             _prediction(cases[1], 0.9),
         ],
-        0.5,
+        F4SelectiveOperatingPointV1(
+            same_threshold=0.3,
+            escalation_threshold=0.7,
+        ),
     )
     passed, failures = certify_metrics(
         metrics,
@@ -441,6 +488,6 @@ def test_freeze_manifest_is_bound_to_current_contract() -> None:
     assert frozen["model_alias"] == F4_FROZEN_MODEL_ALIAS
     assert frozen["adapter_id"] == F4_FROZEN_ADAPTER_ID
     assert frozen["adapter_revision"] == F4_FROZEN_ADAPTER_REVISION
-    assert manifest["lineage_separation"]["current_noul_operating_threshold"] == (
+    assert manifest["lineage_separation"]["current_noul_operating_point"] == (
         "UNBOUND_UNTIL_CALIBRATION_FIT"
     )
