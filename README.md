@@ -97,6 +97,48 @@ The canonical `repository_intelligence` package exposes the four accepted V1 ope
 
 `build_repository_intelligence_report(...)` produces the canonical `reviewer.repository_intelligence.v1` report with `COMPLETE | PARTIAL | INCOMPLETE` evidence state and a tamper-detectable `content_sha256`.
 
+## Experiment-Integrity Handoff (Issue #40)
+
+`reviewer.experiment_handoff` emits a canonical, machine-readable
+`reviewer.experiment_evidence_handoff.v1` artifact for future decision-model
+research. It is a hash-bound experiment record, not a Nexus Learning
+reimplementation and not an authority grant.
+
+- **Claim ceiling**: `REVIEWER_EXPERIMENT_EVIDENCE_HANDOFF_VERIFIED`. This bounds
+  the artifact to *verified evidence handoff*; it grants no acceptance,
+  approval, integration, merge, release, production, or training authorization.
+- **Bound integrity**: calibration and held-out population identity/hash with
+  an explicit overlap proof; frozen policy hash plus freeze-before-evaluation
+  order proof; sealed input/truth digests; terminal result (including
+  `STOP`/`DEFER`/`NEGATIVE`, which can never be rewritten into `PASS`);
+  failure taxonomy; model-call and fallback counts.
+- **Quality gating**: economics comparison happens only after the required
+  quality/critical-failure floor passes; missing latency/token/cost telemetry
+  is explicit via `missingness` and is never zero-filled or silently treated as
+  comparable.
+- **Training admission**: mirrors Nexus Learning data-purpose resolution.
+  `EVALUATION_ONLY` and `LEARNING_POLICY_EVIDENCE` resolve to
+  `TRAINING_FORBIDDEN`; `TRAINING_CANDIDATE` resolves to `QUALITY_GATED`;
+  unknown purposes fail closed.
+- **Private/public boundary**: provider-private raw evidence is kept outside
+  public Git; `boundary.provider_private_required` and `boundary.public_safe`
+  must both be explicit.
+- **Nexus compatibility**: the `nexus_projection` block declares the
+  `nexus.learning_experiment_integrity.v1` and
+  `nexus.learning_quality_qualified_economics.v1` schema identifiers and binds
+  explicit canonical input projections. Use
+  `project_nexus_experiment_integrity_input(...)` and
+  `project_nexus_quality_workflow_row(...)`; the compatibility script
+  `scripts/verify_nexus_learning_handoff.py` imports an exact Nexus Learning
+  checkout and proves those projections are accepted by the canonical contracts.
+  This module does not import Nexus Learning at runtime and owns no Nexus Learning
+  authority.
+- **Verifier**: `verify_experiment_handoff(payload)` recomputes population
+  bindings, overlap, policy hash, freeze order, terminal disposition, training
+  admission, and derived completeness from the embedded neutral inputs and
+  raises `ValueError` on any mismatch (e.g. `HANDOFF_POLICY_HASH_MISMATCH`,
+  `HANDOFF_POPULATION_OVERLAP`, `HANDOFF_CLAIM_CEILING_INVALID`).
+
 ## Canonical CLI and Legacy Compatibility
 
 The canonical command is `python -m repository_intelligence.cli`. The historical
