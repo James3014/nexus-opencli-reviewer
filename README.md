@@ -125,10 +125,14 @@ reimplementation and not an authority grant.
   must both be explicit.
 - **Nexus compatibility**: the `nexus_projection` block declares the
   `nexus.learning_experiment_integrity.v1` and
-  `nexus.learning_quality_qualified_economics.v1` schema identifiers. The
-  artifact uses the same canonical-JSON SHA-256 binding convention so Nexus
-  Learning can deterministically validate or translate it. This module does not
-  import Nexus Learning and owns no Nexus Learning authority.
+  `nexus.learning_quality_qualified_economics.v1` schema identifiers and binds
+  explicit canonical input projections. Use
+  `project_nexus_experiment_integrity_input(...)` and
+  `project_nexus_quality_workflow_row(...)`; the compatibility script
+  `scripts/verify_nexus_learning_handoff.py` imports an exact Nexus Learning
+  checkout and proves those projections are accepted by the canonical contracts.
+  This module does not import Nexus Learning at runtime and owns no Nexus Learning
+  authority.
 - **Verifier**: `verify_experiment_handoff(payload)` recomputes population
   bindings, overlap, policy hash, freeze order, terminal disposition, training
   admission, and derived completeness from the embedded neutral inputs and

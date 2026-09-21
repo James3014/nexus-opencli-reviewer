@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from math import isfinite
 from typing import Any, Mapping
 
 HANDOFF_SCHEMA = "reviewer.experiment_evidence_handoff.v1"
@@ -232,6 +233,112 @@ def _usage_field(value: Any, name: str) -> int:
     return value
 
 
+NEXUS_TRANSLATOR_VERSION = "reviewer-to-nexus-learning-v1"
+
+
+def _quality_floor(value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not isfinite(value)
+        or not 0 <= value <= 1
+    ):
+        raise ValueError("HANDOFF_REQUIRED_QUALITY_FLOOR_INVALID")
+    return float(value)
+
+
+def _workflow_section(raw: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise ValueError("HANDOFF_WORKFLOW_SECTION_INVALID")
+    identity_fields = ("workflow_identity", "workflow_revision", "task_fingerprint")
+    identity = {}
+    for field in identity_fields:
+        value = str(raw.get(field) or "").strip()
+        if not value:
+            raise ValueError(f"HANDOFF_{field.upper()}_MISSING")
+        identity[field] = value
+    counts = {}
+    for field in (
+        "attempt_count",
+        "qualified_success_count",
+        "semantic_failure_count",
+        "provider_failure_count",
+        "false_allow_count",
+        "human_intervention_count",
+    ):
+        counts[field] = _usage_field(raw.get(field), field.upper())
+    if counts["qualified_success_count"] > counts["attempt_count"]:
+        raise ValueError("HANDOFF_QUALIFIED_SUCCESS_EXCEEDS_ATTEMPTS")
+    if any(
+        counts[field] > counts["attempt_count"]
+        for field in ("semantic_failure_count", "provider_failure_count")
+    ):
+        raise ValueError("HANDOFF_WORKFLOW_FAILURE_COUNT_EXCEEDS_ATTEMPTS")
+    ineligibility = _missingness_spec(raw.get("ineligibility_reasons"))
+    return {**identity, **counts, "ineligibility_reasons": list(ineligibility)}
+
+
+def project_nexus_experiment_integrity_input(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Project neutral handoff evidence into canonical Nexus Learning builder input."""
+    experiment = payload.get("experiment") or {}
+    populations = payload.get("populations") or {}
+    policy = payload.get("policy_freeze") or {}
+    frozen = policy.get("frozen_policy") or {}
+    order = policy.get("freeze_order_proof") or {}
+    terminal = payload.get("terminal") or {}
+    return {
+        "experiment_id": str(experiment.get("experiment_id") or "").strip(),
+        "calibration_members": list((populations.get("calibration") or {}).get("members") or []),
+        "heldout_members": list((populations.get("heldout") or {}).get("members") or []),
+        "independence_unit": populations.get("independence_unit"),
+        "policy_derivation_ref": str(policy.get("policy_derivation_ref") or "").strip(),
+        "frozen_policy": dict(frozen.get("policy") or {}),
+        "freeze_generation": frozen.get("freeze_generation"),
+        "heldout_evaluation_start_generation": order.get(
+            "heldout_evaluation_start_generation"
+        ),
+        "calibration_status": policy.get("calibration_status"),
+        "terminal_outcome": terminal.get("outcome"),
+        "insufficient_calibration_reasons": list(
+            policy.get("insufficient_calibration_reasons") or []
+        ),
+        "reject_all_policy": (
+            dict(policy.get("reject_all_policy"))
+            if isinstance(policy.get("reject_all_policy"), Mapping)
+            else None
+        ),
+        "negative_terminal": terminal.get("outcome") == TERMINAL_NEGATIVE,
+    }
+
+
+def project_nexus_quality_workflow_row(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Project neutral handoff evidence into a canonical QualityWorkflowRow input."""
+    workflow = _workflow_section(payload.get("workflow") or {})
+    usage = payload.get("usage") or {}
+    quality = payload.get("quality_gate") or {}
+    cost = payload.get("cost") or {}
+    return {
+        "workflow_identity": workflow["workflow_identity"],
+        "workflow_revision": workflow["workflow_revision"],
+        "task_fingerprint": workflow["task_fingerprint"],
+        "attempt_count": workflow["attempt_count"],
+        "qualified_success_count": workflow["qualified_success_count"],
+        "critical_failure_count": quality.get("critical_failure_count"),
+        "semantic_failure_count": workflow["semantic_failure_count"],
+        "provider_failure_count": workflow["provider_failure_count"],
+        "false_allow_count": workflow["false_allow_count"],
+        "model_invocation_count": usage.get("model_invocation_count"),
+        "provider_invocation_count": usage.get("provider_invocation_count"),
+        "fallback_count": usage.get("fallback_count"),
+        "token_usage": cost.get("token_usage"),
+        "wall_time_seconds": cost.get("wall_time_seconds"),
+        "monetary_cost_usd": cost.get("monetary_cost_usd"),
+        "human_intervention_count": workflow["human_intervention_count"],
+        "missingness_reasons": list(cost.get("missingness") or []),
+        "ineligibility_reasons": list(workflow["ineligibility_reasons"]),
+    }
+
+
 def build_experiment_handoff(
     *,
     experiment_id: str,
@@ -245,6 +352,17 @@ def build_experiment_handoff(
     freeze_generation: int,
     heldout_evaluation_start_generation: int,
     calibration_status: str,
+    workflow_identity: str,
+    workflow_revision: str,
+    task_fingerprint: str,
+    attempt_count: int,
+    qualified_success_count: int,
+    semantic_failure_count: int,
+    provider_failure_count: int,
+    false_allow_count: int,
+    human_intervention_count: int,
+    required_quality_floor: float,
+    workflow_ineligibility_reasons: list[str] | tuple[str, ...] = (),
     insufficient_calibration_reasons: list[str] | tuple[str, ...] = (),
     reject_all_policy: Mapping[str, Any] | None = None,
     sealed_input_digest: str = "",
@@ -297,11 +415,34 @@ def build_experiment_handoff(
     fallbacks = _usage_field(fallback_count, "FALLBACK_COUNT")
     critical_failures = _usage_field(critical_failure_count, "CRITICAL_FAILURE_COUNT")
     ceiling = _usage_field(critical_failure_ceiling, "CRITICAL_FAILURE_CEILING")
+    floor = _quality_floor(required_quality_floor)
+    workflow = _workflow_section(
+        {
+            "workflow_identity": workflow_identity,
+            "workflow_revision": workflow_revision,
+            "task_fingerprint": task_fingerprint,
+            "attempt_count": attempt_count,
+            "qualified_success_count": qualified_success_count,
+            "semantic_failure_count": semantic_failure_count,
+            "provider_failure_count": provider_failure_count,
+            "false_allow_count": false_allow_count,
+            "human_intervention_count": human_intervention_count,
+            "ineligibility_reasons": workflow_ineligibility_reasons,
+        }
+    )
+    if critical_failures > workflow["attempt_count"]:
+        raise ValueError("HANDOFF_CRITICAL_FAILURE_COUNT_EXCEEDS_ATTEMPTS")
 
     if quality_gate_result not in _QUALITY_GATE_RESULTS:
         raise ValueError("HANDOFF_QUALITY_GATE_RESULT_INVALID")
     if not isinstance(required_quality_floor_passed, bool):
         raise ValueError("HANDOFF_QUALITY_FLOOR_REQUIRES_BOOL")
+    observed_floor_passed = (
+        workflow["attempt_count"] > 0
+        and workflow["qualified_success_count"] / workflow["attempt_count"] >= floor
+    )
+    if required_quality_floor_passed != observed_floor_passed:
+        raise ValueError("HANDOFF_QUALITY_FLOOR_FLAG_MISMATCH")
     if not isinstance(economics_compared, bool):
         raise ValueError("HANDOFF_ECONOMICS_COMPARED_REQUIRES_BOOL")
 
@@ -343,8 +484,13 @@ def build_experiment_handoff(
     if reject_all_policy is not None:
         if calibration_status != FROZEN_REJECT_ALL:
             raise ValueError("HANDOFF_REJECT_ALL_STATUS_MISMATCH")
-        if not isinstance(reject_all_policy, Mapping):
+        if (
+            not isinstance(reject_all_policy, Mapping)
+            or not reject_all_policy.get("target_policy_delta")
+        ):
             raise ValueError("HANDOFF_REJECT_ALL_POLICY_INVALID")
+        if reject_all_policy.get("model_success_claim") is not False:
+            raise ValueError("HANDOFF_REJECT_ALL_CLAIMS_MODEL_SUCCESS")
 
     terminal_negative = outcome in _NEGATIVE_TERMINAL_OUTCOMES
     if outcome == TERMINAL_PASS and calibration_status != CALIBRATED:
@@ -452,12 +598,14 @@ def build_experiment_handoff(
             "truth_digest": str(sealed_truth_digest).strip(),
         },
         "terminal": terminal,
+        "workflow": workflow,
         "usage": {
             "model_invocation_count": model_inv,
             "provider_invocation_count": provider_inv,
             "fallback_count": fallbacks,
         },
         "quality_gate": {
+            "required_quality_floor": floor,
             "required_quality_floor_passed": required_quality_floor_passed,
             "critical_failure_count": critical_failures,
             "critical_failure_ceiling": ceiling,
@@ -486,11 +634,18 @@ def build_experiment_handoff(
             "experiment_integrity_schema": NEXUS_INTEGRITY_SCHEMA,
             "economics_schema": NEXUS_ECONOMICS_SCHEMA,
             "episode_schema": NEXUS_EPISODE_SCHEMA,
+            "translator_version": NEXUS_TRANSLATOR_VERSION,
             "deterministically_translatable": True,
             "negative_terminal_preserved": terminal_negative,
         },
         "claim_ceiling": HANDOFF_CLAIM_CEILING,
     }
+    handoff["nexus_projection"]["experiment_integrity_input"] = (
+        project_nexus_experiment_integrity_input(handoff)
+    )
+    handoff["nexus_projection"]["quality_workflow_input"] = (
+        project_nexus_quality_workflow_row(handoff)
+    )
     verify_experiment_handoff(handoff)
     return handoff
 
@@ -516,8 +671,16 @@ def _revalidate_calibration_status(payload: Mapping[str, Any]) -> None:
         raise ValueError("HANDOFF_CALIBRATED_WITH_INSUFFICIENT_REASONS")
     if calibrated in {INSUFFICIENT_CALIBRATION, EXPLORATORY_UNCALIBRATED} and not reasons:
         raise ValueError("HANDOFF_UNCALIBRATED_WITHOUT_REASONS")
-    if calibrated == FROZEN_REJECT_ALL and payload.get("reject_all_policy") is None:
+    reject_all = payload.get("reject_all_policy")
+    if calibrated == FROZEN_REJECT_ALL and reject_all is None:
         raise ValueError("HANDOFF_REJECT_ALL_POLICY_REQUIRED")
+    if reject_all is not None:
+        if calibrated != FROZEN_REJECT_ALL:
+            raise ValueError("HANDOFF_REJECT_ALL_STATUS_MISMATCH")
+        if not isinstance(reject_all, Mapping) or not reject_all.get("target_policy_delta"):
+            raise ValueError("HANDOFF_REJECT_ALL_POLICY_INVALID")
+        if reject_all.get("model_success_claim") is not False:
+            raise ValueError("HANDOFF_REJECT_ALL_CLAIMS_MODEL_SUCCESS")
     if payload.get("reject_all_policy") is not None:
         if calibrated != FROZEN_REJECT_ALL:
             raise ValueError("HANDOFF_REJECT_ALL_STATUS_MISMATCH")
@@ -671,7 +834,17 @@ def verify_experiment_handoff(payload: Any) -> dict[str, Any]:
     ):
         raise ValueError("HANDOFF_USAGE_COUNT_INVALID")
 
+    workflow = _workflow_section(payload.get("workflow") or {})
     quality = payload.get("quality_gate") or {}
+    floor = _quality_floor(quality.get("required_quality_floor"))
+    if quality.get("critical_failure_count") > workflow["attempt_count"]:
+        raise ValueError("HANDOFF_CRITICAL_FAILURE_COUNT_EXCEEDS_ATTEMPTS")
+    observed_floor_passed = (
+        workflow["attempt_count"] > 0
+        and workflow["qualified_success_count"] / workflow["attempt_count"] >= floor
+    )
+    if quality.get("required_quality_floor_passed") != observed_floor_passed:
+        raise ValueError("HANDOFF_QUALITY_FLOOR_FLAG_MISMATCH")
     gate_result = quality.get("quality_gate_result")
     if gate_result not in _QUALITY_GATE_RESULTS:
         raise ValueError("HANDOFF_QUALITY_GATE_RESULT_INVALID")
@@ -733,10 +906,16 @@ def verify_experiment_handoff(payload: Any) -> dict[str, Any]:
         raise ValueError("HANDOFF_NEXUS_INTEGRITY_SCHEMA_INVALID")
     if projection.get("economics_schema") != NEXUS_ECONOMICS_SCHEMA:
         raise ValueError("HANDOFF_NEXUS_ECONOMICS_SCHEMA_INVALID")
+    if projection.get("translator_version") != NEXUS_TRANSLATOR_VERSION:
+        raise ValueError("HANDOFF_NEXUS_TRANSLATOR_VERSION_INVALID")
     if projection.get("deterministically_translatable") is not True:
         raise ValueError("HANDOFF_NEXUS_TRANSLATION_FLAG_INVALID")
     if projection.get("negative_terminal_preserved") != expected_negative:
         raise ValueError("HANDOFF_NEXUS_NEGATIVE_TERMINAL_MISMATCH")
+    if projection.get("experiment_integrity_input") != project_nexus_experiment_integrity_input(payload):
+        raise ValueError("HANDOFF_NEXUS_INTEGRITY_PROJECTION_MISMATCH")
+    if projection.get("quality_workflow_input") != project_nexus_quality_workflow_row(payload):
+        raise ValueError("HANDOFF_NEXUS_ECONOMICS_PROJECTION_MISMATCH")
 
     boundary = payload.get("boundary") or {}
     if not isinstance(boundary.get("provider_private_required"), bool):

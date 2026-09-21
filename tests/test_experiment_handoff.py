@@ -7,6 +7,8 @@ import pytest
 from reviewer.experiment_handoff import (
     build_experiment_handoff,
     verify_experiment_handoff,
+    project_nexus_experiment_integrity_input,
+    project_nexus_quality_workflow_row,
     HANDOFF_SCHEMA,
     HANDOFF_CLAIM_CEILING,
     INDEPENDENCE_UNIT_ROW,
@@ -62,6 +64,16 @@ def valid_handoff(**overrides):
         freeze_generation=7,
         heldout_evaluation_start_generation=8,
         calibration_status=CALIBRATED,
+        workflow_identity="cascade",
+        workflow_revision="r7",
+        task_fingerprint="task-family-001",
+        attempt_count=100,
+        qualified_success_count=98,
+        semantic_failure_count=1,
+        provider_failure_count=1,
+        false_allow_count=0,
+        human_intervention_count=0,
+        required_quality_floor=0.95,
         sealed_input_digest="aa" * 32,
         sealed_truth_digest="bb" * 32,
         terminal_outcome=TERMINAL_PASS,
@@ -182,7 +194,10 @@ def test_reject_all_status_requires_reject_all_policy():
         valid_handoff(calibration_status=FROZEN_REJECT_ALL)
     artifact = valid_handoff(
         calibration_status=FROZEN_REJECT_ALL,
-        reject_all_policy={"mode": "reject_all_until_manual"},
+        reject_all_policy={
+            "target_policy_delta": "reject_all_until_manual",
+            "model_success_claim": False,
+        },
         terminal_outcome=TERMINAL_STOP,
     )
     verify_experiment_handoff(artifact)
@@ -329,7 +344,11 @@ def test_cost_telemetry_incomplete_requires_no_values():
 
 def test_economics_comparison_requires_quality_floor():
     with pytest.raises(ValueError, match="HANDOFF_ECONOMICS_COMPARED_BEFORE_QUALITY"):
-        valid_handoff(required_quality_floor_passed=False, quality_gate_result=QUALITY_QUALIFIED)
+        valid_handoff(
+            qualified_success_count=80,
+            required_quality_floor_passed=False,
+            quality_gate_result=QUALITY_QUALIFIED,
+        )
 
 
 def test_economics_comparison_requires_quality_eligible_gate():
@@ -466,3 +485,33 @@ def test_content_sha256_rejections_do_not_mutate(capsys):
     with pytest.raises(ValueError, match="HANDOFF_POLICY_HASH_MISMATCH"):
         verify_experiment_handoff(artifact)
     assert artifact["terminal"]["outcome"] == TERMINAL_PASS
+
+def test_nexus_projection_matches_explicit_translators():
+    artifact = valid_handoff()
+    assert artifact["nexus_projection"]["experiment_integrity_input"] == (
+        project_nexus_experiment_integrity_input(artifact)
+    )
+    assert artifact["nexus_projection"]["quality_workflow_input"] == (
+        project_nexus_quality_workflow_row(artifact)
+    )
+    row = artifact["nexus_projection"]["quality_workflow_input"]
+    assert row["workflow_identity"] == "cascade"
+    assert row["attempt_count"] == 100
+    assert row["qualified_success_count"] == 98
+
+
+def test_quality_floor_flag_is_derived_from_bound_workflow_counts():
+    with pytest.raises(ValueError, match="HANDOFF_QUALITY_FLOOR_FLAG_MISMATCH"):
+        valid_handoff(
+            attempt_count=100,
+            qualified_success_count=80,
+            required_quality_floor=0.95,
+            required_quality_floor_passed=True,
+        )
+
+
+def test_nexus_projection_tamper_rejected():
+    artifact = valid_handoff()
+    artifact["nexus_projection"]["quality_workflow_input"]["attempt_count"] = 99
+    with pytest.raises(ValueError, match="HANDOFF_NEXUS_ECONOMICS_PROJECTION_MISMATCH"):
+        verify_experiment_handoff(artifact)
