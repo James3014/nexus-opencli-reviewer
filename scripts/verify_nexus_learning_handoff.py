@@ -21,6 +21,9 @@ from reviewer.experiment_handoff import (
     INDEPENDENCE_UNIT_ROW,
     QUALITY_QUALIFIED,
     TERMINAL_PASS,
+    EFFECT_SUCCEEDED,
+    REMOTE_PROVIDER_OBSERVED,
+    build_evidence_origin_compat,
     build_experiment_handoff,
     project_nexus_experiment_integrity_input,
     project_nexus_quality_workflow_row,
@@ -28,6 +31,34 @@ from reviewer.experiment_handoff import (
 
 
 def sample_handoff() -> dict:
+    receipt = {
+        "receipt_id": "compat-receipt-1",
+        "effect_identity": "compat-effect-1",
+        "operation_id": "compat-operation-1",
+        "transport_class": "REMOTE_PROVIDER",
+        "external_effect_started": True,
+        "outcome": EFFECT_SUCCEEDED,
+        "observed_provider": "compat-provider",
+        "observed_model": "compat-model",
+        "observed_revision": "compat-revision",
+        "source_receipt_ref": "compat-provider-journal:1",
+        "source_receipt_sha256": "sha256:" + ("e" * 64),
+    }
+    evidence_origin = build_evidence_origin_compat(
+        origin_class=REMOTE_PROVIDER_OBSERVED,
+        requested_provider="compat-provider",
+        requested_model="compat-model",
+        configured_provider="compat-provider",
+        configured_model="compat-model",
+        observed_provider="compat-provider",
+        observed_model="compat-model",
+        observed_revision="compat-revision",
+        external_effect_started=True,
+        effect_outcome=EFFECT_SUCCEEDED,
+        effect_identity=receipt["effect_identity"],
+        operation_id=receipt["operation_id"],
+        observation_receipt=receipt,
+    )
     return build_experiment_handoff(
         experiment_id="issue-40-compat",
         experiment_version="v1",
@@ -80,6 +111,7 @@ def sample_handoff() -> dict:
         monetary_cost_usd=0.5,
         wall_time_seconds=10.0,
         data_purpose=DATA_PURPOSE_EVALUATION_ONLY,
+        evidence_origin=evidence_origin,
     )
 
 
@@ -95,6 +127,8 @@ def main() -> int:
     from nexus_learning.experiment_integrity import (
         EXPERIMENT_INTEGRITY_SCHEMA,
         build_experiment_integrity,
+        require_remote_provider_observation,
+        validate_evidence_origin_provenance,
         validate_experiment_integrity,
     )
     from nexus_learning.effectiveness_measurement import (
@@ -108,6 +142,8 @@ def main() -> int:
     integrity_input = project_nexus_experiment_integrity_input(artifact)
     integrity = build_experiment_integrity(**integrity_input)
     validate_experiment_integrity(integrity)
+    validate_evidence_origin_provenance(artifact["evidence_origin"])
+    canonical_live = require_remote_provider_observation(integrity)
 
     workflow_row = project_nexus_quality_workflow_row(artifact)
     canonical_row = QualityWorkflowRow.from_mapping(workflow_row).to_dict()
@@ -131,6 +167,8 @@ def main() -> int:
         "canonical_workflow_identity": canonical_row["workflow_identity"],
         "integrity_projection_accepted": True,
         "quality_workflow_projection_accepted": True,
+        "evidence_origin_projection_accepted": True,
+        "canonical_live_provider_observed_model": canonical_live["observed_identity"]["model"],
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

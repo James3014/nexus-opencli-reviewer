@@ -32,6 +32,17 @@ from reviewer.experiment_handoff import (
     INSUFFICIENT_COST_EVIDENCE,
     NEXUS_INTEGRITY_SCHEMA,
     NEXUS_ECONOMICS_SCHEMA,
+    EFFECT_OUTCOME_UNKNOWN,
+    EFFECT_SUCCEEDED,
+    LOCAL_FAKE_PROVIDER,
+    MOCK_TRANSPORT,
+    PHYSICAL_LOCAL_MODEL,
+    REMOTE_PROVIDER_OBSERVED,
+    SIMULATION_ONLY,
+    UNKNOWN_ORIGIN,
+    build_evidence_origin_compat,
+    require_live_provider_observation,
+    verify_evidence_origin_compat,
 )
 
 
@@ -515,3 +526,225 @@ def test_nexus_projection_tamper_rejected():
     artifact["nexus_projection"]["quality_workflow_input"]["attempt_count"] = 99
     with pytest.raises(ValueError, match="HANDOFF_NEXUS_ECONOMICS_PROJECTION_MISMATCH"):
         verify_experiment_handoff(artifact)
+
+
+
+def _provider_receipt(*, outcome=EFFECT_SUCCEEDED, transport_class="REMOTE_PROVIDER", provider="jev", model="jev-latest", revision="jev-r1"):
+    return {
+        "receipt_id": "receipt:42:1",
+        "effect_identity": "effect:42:1",
+        "operation_id": "operation:42:1",
+        "transport_class": transport_class,
+        "external_effect_started": True,
+        "outcome": outcome,
+        "observed_provider": provider,
+        "observed_model": model,
+        "observed_revision": revision,
+        "source_receipt_ref": "provider-journal:42:1",
+        "source_receipt_sha256": "sha256:" + ("c" * 64),
+    }
+
+
+def test_default_handoff_binds_unknown_origin_and_never_self_promotes_configured_provider():
+    artifact = valid_handoff(
+        providers=[{
+            "provider": "jev",
+            "model": "jev-latest",
+            "model_revision": "configured-r1",
+            "adapter_version": "v1",
+            "transport": "api",
+        }]
+    )
+    assert artifact["evidence_origin"]["origin_class"] == UNKNOWN_ORIGIN
+    assert artifact["evidence_origin"]["configured_identity"]["model"] == "jev-latest"
+    assert artifact["evidence_origin"]["observed_identity"]["model"] is None
+    assert artifact["live_provider_claim"]["verified"] is False
+    with pytest.raises(ValueError, match="HANDOFF_LIVE_PROVIDER_REMOTE_OBSERVATION_REQUIRED"):
+        require_live_provider_observation(artifact)
+
+
+def test_heuristic_probability_with_configured_jev_remains_simulation_only():
+    evidence = build_evidence_origin_compat(
+        origin_class=SIMULATION_ONLY,
+        requested_provider="jev",
+        requested_model="jev-latest",
+        configured_provider="jev",
+        configured_model="jev-latest",
+    )
+    artifact = valid_handoff(evidence_origin=evidence)
+    assert artifact["live_provider_claim"]["verified"] is False
+    with pytest.raises(ValueError, match="HANDOFF_LIVE_PROVIDER_REMOTE_OBSERVATION_REQUIRED"):
+        require_live_provider_observation(artifact)
+
+
+def test_localhost_mock_model_label_cannot_satisfy_live_provider_claim():
+    with pytest.raises(ValueError, match="HANDOFF_EVIDENCE_ORIGIN_PRIVATE_RECEIPT_FIELD_FORBIDDEN"):
+        build_evidence_origin_compat(
+            origin_class=MOCK_TRANSPORT,
+            configured_provider="jev",
+            configured_model="jev-latest",
+            observation_receipt={
+                "receipt_id": "mock",
+                "effect_identity": "mock-effect",
+                "operation_id": "mock-operation",
+                "transport_class": "MOCK",
+                "external_effect_started": False,
+                "outcome": "NOT_STARTED",
+                "observed_provider": "jev",
+                "observed_model": "jev-latest",
+                "observed_revision": None,
+                "source_receipt_ref": "localhost:8123",
+                "source_receipt_sha256": "sha256:" + ("d" * 64),
+                "raw_response": {"model": "jev-latest"},
+            },
+        )
+
+    evidence = build_evidence_origin_compat(
+        origin_class=MOCK_TRANSPORT,
+        configured_provider="jev",
+        configured_model="jev-latest",
+    )
+    assert verify_evidence_origin_compat(evidence)["live_provider_observed"] is False
+
+
+def test_provider_invoked_false_cannot_be_remote_observed():
+    receipt = _provider_receipt()
+    receipt["external_effect_started"] = False
+    with pytest.raises(ValueError, match="HANDOFF_EVIDENCE_ORIGIN_RECEIPT_EFFECT_NOT_STARTED"):
+        build_evidence_origin_compat(
+            origin_class=REMOTE_PROVIDER_OBSERVED,
+            observed_provider="jev",
+            observed_model="jev-latest",
+            observed_revision="jev-r1",
+            external_effect_started=True,
+            effect_outcome=EFFECT_SUCCEEDED,
+            effect_identity=receipt["effect_identity"],
+            operation_id=receipt["operation_id"],
+            observation_receipt=receipt,
+        )
+
+
+def test_missing_observed_model_is_never_filled_from_configured_model():
+    receipt = _provider_receipt()
+    with pytest.raises(ValueError, match="HANDOFF_EVIDENCE_ORIGIN_REMOTE_OBSERVED_IDENTITY_MISSING"):
+        build_evidence_origin_compat(
+            origin_class=REMOTE_PROVIDER_OBSERVED,
+            configured_provider="jev",
+            configured_model="jev-latest",
+            observed_provider="jev",
+            observed_model=None,
+            observed_revision="jev-r1",
+            external_effect_started=True,
+            effect_outcome=EFFECT_SUCCEEDED,
+            effect_identity=receipt["effect_identity"],
+            operation_id=receipt["operation_id"],
+            observation_receipt=receipt,
+        )
+
+
+def test_valid_remote_receipt_supports_bounded_live_observation_projection():
+    receipt = _provider_receipt()
+    evidence = build_evidence_origin_compat(
+        origin_class=REMOTE_PROVIDER_OBSERVED,
+        requested_provider="jev",
+        requested_model="jev-latest",
+        configured_provider="jev",
+        configured_model="jev-latest",
+        observed_provider="jev",
+        observed_model="jev-latest",
+        observed_revision="jev-r1",
+        external_effect_started=True,
+        effect_outcome=EFFECT_SUCCEEDED,
+        effect_identity=receipt["effect_identity"],
+        operation_id=receipt["operation_id"],
+        observation_receipt=receipt,
+    )
+    artifact = valid_handoff(evidence_origin=evidence)
+    assert artifact["live_provider_claim"]["verified"] is True
+    assert require_live_provider_observation(artifact)["observed_identity"]["model"] == "jev-latest"
+    assert artifact["nexus_projection"]["experiment_integrity_input"]["evidence_origin"] == evidence
+
+
+def test_outcome_unknown_never_becomes_live_provider_success():
+    receipt = _provider_receipt(outcome=EFFECT_OUTCOME_UNKNOWN)
+    evidence = build_evidence_origin_compat(
+        origin_class=REMOTE_PROVIDER_OBSERVED,
+        observed_provider="jev",
+        observed_model="jev-latest",
+        observed_revision="jev-r1",
+        external_effect_started=True,
+        effect_outcome=EFFECT_OUTCOME_UNKNOWN,
+        effect_identity=receipt["effect_identity"],
+        operation_id=receipt["operation_id"],
+        observation_receipt=receipt,
+    )
+    artifact = valid_handoff(evidence_origin=evidence)
+    assert artifact["live_provider_claim"]["verified"] is False
+    with pytest.raises(ValueError, match="HANDOFF_LIVE_PROVIDER_SUCCESSFUL_OUTCOME_REQUIRED"):
+        require_live_provider_observation(artifact)
+
+
+def test_receipt_substitution_and_tampering_fail_closed():
+    receipt = _provider_receipt()
+    evidence = build_evidence_origin_compat(
+        origin_class=REMOTE_PROVIDER_OBSERVED,
+        observed_provider="jev",
+        observed_model="jev-latest",
+        observed_revision="jev-r1",
+        external_effect_started=True,
+        effect_outcome=EFFECT_SUCCEEDED,
+        effect_identity=receipt["effect_identity"],
+        operation_id=receipt["operation_id"],
+        observation_receipt=receipt,
+    )
+    evidence["observation_receipt"]["payload"]["operation_id"] = "operation:substituted"
+    with pytest.raises(ValueError, match="HANDOFF_EVIDENCE_ORIGIN_RECEIPT_HASH_MISMATCH"):
+        verify_evidence_origin_compat(evidence)
+
+
+def test_physical_local_model_remains_distinct_from_remote_live_provider():
+    receipt = _provider_receipt(
+        transport_class="LOCAL_MODEL", provider=None, model="mlx-local", revision=None
+    )
+    evidence = build_evidence_origin_compat(
+        origin_class=PHYSICAL_LOCAL_MODEL,
+        observed_model="mlx-local",
+        external_effect_started=True,
+        effect_outcome=EFFECT_SUCCEEDED,
+        effect_identity=receipt["effect_identity"],
+        operation_id=receipt["operation_id"],
+        observation_receipt=receipt,
+    )
+    artifact = valid_handoff(evidence_origin=evidence)
+    assert artifact["live_provider_claim"]["verified"] is False
+    with pytest.raises(ValueError, match="HANDOFF_LIVE_PROVIDER_REMOTE_OBSERVATION_REQUIRED"):
+        require_live_provider_observation(artifact)
+
+
+def test_local_fake_provider_remains_nonphysical():
+    evidence = build_evidence_origin_compat(
+        origin_class=LOCAL_FAKE_PROVIDER,
+        configured_provider="jev",
+        configured_model="jev-latest",
+    )
+    assert verify_evidence_origin_compat(evidence)["live_provider_observed"] is False
+
+
+def test_negative_terminal_remains_negative_with_valid_remote_provenance():
+    receipt = _provider_receipt()
+    evidence = build_evidence_origin_compat(
+        origin_class=REMOTE_PROVIDER_OBSERVED,
+        observed_provider="jev",
+        observed_model="jev-latest",
+        observed_revision="jev-r1",
+        external_effect_started=True,
+        effect_outcome=EFFECT_SUCCEEDED,
+        effect_identity=receipt["effect_identity"],
+        operation_id=receipt["operation_id"],
+        observation_receipt=receipt,
+    )
+    artifact = valid_handoff(terminal_outcome=TERMINAL_NEGATIVE, evidence_origin=evidence)
+    assert artifact["terminal"]["negative_terminal"] is True
+    assert artifact["nexus_projection"]["negative_terminal_preserved"] is True
+    assert artifact["live_provider_claim"]["verified"] is True
+
