@@ -31,6 +31,34 @@ HANDOFF_CLAIM_CEILING = "REVIEWER_EXPERIMENT_EVIDENCE_HANDOFF_VERIFIED"
 NEXUS_INTEGRITY_SCHEMA = "nexus.learning_experiment_integrity.v1"
 NEXUS_ECONOMICS_SCHEMA = "nexus.learning_quality_qualified_economics.v1"
 NEXUS_EPISODE_SCHEMA = "nexus.learning_episode.v1"
+NEXUS_EVIDENCE_ORIGIN_SCHEMA = "nexus.learning_evidence_origin_provenance.v1"
+LIVE_PROVIDER_CLAIM_CEILING = "REVIEWER_LIVE_PROVIDER_PROVENANCE_GATE_VERIFIED"
+
+SIMULATION_ONLY = "SIMULATION_ONLY"
+MOCK_TRANSPORT = "MOCK_TRANSPORT"
+LOCAL_FAKE_PROVIDER = "LOCAL_FAKE_PROVIDER"
+PHYSICAL_LOCAL_MODEL = "PHYSICAL_LOCAL_MODEL"
+REMOTE_PROVIDER_OBSERVED = "REMOTE_PROVIDER_OBSERVED"
+UNKNOWN_ORIGIN = "UNKNOWN"
+_EVIDENCE_ORIGINS = frozenset(
+    {SIMULATION_ONLY, MOCK_TRANSPORT, LOCAL_FAKE_PROVIDER, PHYSICAL_LOCAL_MODEL,
+     REMOTE_PROVIDER_OBSERVED, UNKNOWN_ORIGIN}
+)
+
+EFFECT_NOT_STARTED = "NOT_STARTED"
+EFFECT_SUCCEEDED = "SUCCEEDED"
+EFFECT_FAILED = "FAILED"
+EFFECT_OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+_EFFECT_OUTCOMES = frozenset(
+    {EFFECT_NOT_STARTED, EFFECT_SUCCEEDED, EFFECT_FAILED, EFFECT_OUTCOME_UNKNOWN}
+)
+_PUBLIC_SAFE_RECEIPT_FIELDS = frozenset(
+    {
+        "receipt_id", "effect_identity", "operation_id", "transport_class",
+        "external_effect_started", "outcome", "observed_provider", "observed_model",
+        "observed_revision", "source_receipt_ref", "source_receipt_sha256",
+    }
+)
 
 INDEPENDENCE_UNIT_ROW = "row_identity"
 INDEPENDENCE_UNIT_BASE = "base_identity"
@@ -92,6 +120,198 @@ _STABLE_OPTIONAL_COST = (
 def _hash(payload: Any) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _optional_text(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"HANDOFF_EVIDENCE_ORIGIN_{field.upper()}_INVALID")
+    return value.strip()
+
+
+def _origin_identity(*, provider: str | None, model: str | None, revision: str | None = None) -> dict[str, str | None]:
+    return {
+        "provider": _optional_text(provider, "identity_provider"),
+        "model": _optional_text(model, "identity_model"),
+        "revision": _optional_text(revision, "identity_revision"),
+    }
+
+
+def _sha256_ref(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value) == 71
+        and all(char in "0123456789abcdef" for char in value[7:])
+    )
+
+
+def build_evidence_origin_compat(
+    *,
+    origin_class: str,
+    requested_provider: str | None = None,
+    requested_model: str | None = None,
+    configured_provider: str | None = None,
+    configured_model: str | None = None,
+    observed_provider: str | None = None,
+    observed_model: str | None = None,
+    observed_revision: str | None = None,
+    external_effect_started: bool = False,
+    effect_outcome: str = EFFECT_NOT_STARTED,
+    effect_identity: str | None = None,
+    operation_id: str | None = None,
+    observation_receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project reviewer evidence into the exact Nexus Learning #27 vocabulary.
+
+    This compatibility builder is producer-side only.  Canonical semantics remain
+    owned by Nexus Learning and are checked by the cross-repository compatibility
+    verifier.  Receipt payloads are intentionally restricted to public-safe fields.
+    """
+    receipt = None
+    if observation_receipt is not None:
+        if not isinstance(observation_receipt, Mapping):
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_INVALID")
+        payload = dict(observation_receipt)
+        if set(payload) - _PUBLIC_SAFE_RECEIPT_FIELDS:
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_PRIVATE_RECEIPT_FIELD_FORBIDDEN")
+        receipt = {"payload": payload, "payload_hash": _hash(payload)}
+    unsigned = {
+        "schema": NEXUS_EVIDENCE_ORIGIN_SCHEMA,
+        "origin_class": str(origin_class).strip().upper(),
+        "requested_identity": _origin_identity(provider=requested_provider, model=requested_model),
+        "configured_identity": _origin_identity(provider=configured_provider, model=configured_model),
+        "observed_identity": _origin_identity(
+            provider=observed_provider, model=observed_model, revision=observed_revision
+        ),
+        "external_effect": {
+            "started": external_effect_started,
+            "outcome": str(effect_outcome).strip().upper(),
+            "effect_identity": _optional_text(effect_identity, "effect_identity"),
+            "operation_id": _optional_text(operation_id, "operation_id"),
+        },
+        "observation_receipt": receipt,
+        "claim_ceiling": (
+            "evidence-origin provenance only; external receipt authenticity and "
+            "provider/model success claims require the owning producer gate"
+        ),
+    }
+    value = {**unsigned, "binding_hash": _hash(unsigned)}
+    verify_evidence_origin_compat(value)
+    return value
+
+
+def _verify_origin_identity(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"provider", "model", "revision"}:
+        raise ValueError(f"HANDOFF_EVIDENCE_ORIGIN_{field.upper()}_IDENTITY_INVALID")
+    return {
+        key: _optional_text(value.get(key), f"{field}_{key}")
+        for key in ("provider", "model", "revision")
+    }
+
+
+def verify_evidence_origin_compat(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_NOT_A_MAPPING")
+    if value.get("schema") != NEXUS_EVIDENCE_ORIGIN_SCHEMA:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_SCHEMA_INVALID")
+    origin = str(value.get("origin_class") or "").upper()
+    if origin not in _EVIDENCE_ORIGINS:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_CLASS_INVALID")
+    _verify_origin_identity(value.get("requested_identity"), "requested")
+    _verify_origin_identity(value.get("configured_identity"), "configured")
+    observed = _verify_origin_identity(value.get("observed_identity"), "observed")
+
+    effect = value.get("external_effect")
+    if not isinstance(effect, Mapping) or set(effect) != {"started", "outcome", "effect_identity", "operation_id"}:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_EFFECT_INVALID")
+    if not isinstance(effect.get("started"), bool):
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_EFFECT_STARTED_INVALID")
+    outcome = str(effect.get("outcome") or "").upper()
+    if outcome not in _EFFECT_OUTCOMES:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_EFFECT_OUTCOME_INVALID")
+    effect_identity = _optional_text(effect.get("effect_identity"), "effect_identity")
+    operation_id = _optional_text(effect.get("operation_id"), "operation_id")
+
+    receipt_wrapper = value.get("observation_receipt")
+    receipt_payload = None
+    if receipt_wrapper is not None:
+        if not isinstance(receipt_wrapper, Mapping) or set(receipt_wrapper) != {"payload", "payload_hash"}:
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_INVALID")
+        payload = receipt_wrapper.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_INVALID")
+        if set(payload) - _PUBLIC_SAFE_RECEIPT_FIELDS:
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_PRIVATE_RECEIPT_FIELD_FORBIDDEN")
+        if receipt_wrapper.get("payload_hash") != _hash(dict(payload)):
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_HASH_MISMATCH")
+        receipt_payload = payload
+
+    unsigned = dict(value)
+    binding_hash = unsigned.pop("binding_hash", None)
+    if binding_hash != _hash(unsigned):
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_BINDING_HASH_MISMATCH")
+    if value.get("claim_ceiling") != (
+        "evidence-origin provenance only; external receipt authenticity and "
+        "provider/model success claims require the owning producer gate"
+    ):
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_CLAIM_CEILING_INVALID")
+
+    if origin in {SIMULATION_ONLY, MOCK_TRANSPORT, LOCAL_FAKE_PROVIDER}:
+        if effect.get("started") is not False:
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_NONPHYSICAL_EFFECT_FORBIDDEN")
+        return {"origin_class": origin, "live_provider_observed": False}
+    if origin == UNKNOWN_ORIGIN:
+        return {"origin_class": origin, "live_provider_observed": False}
+
+    if effect.get("started") is not True or not effect_identity or not operation_id:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_PHYSICAL_EFFECT_IDENTITY_MISSING")
+    if receipt_payload is None:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_PHYSICAL_RECEIPT_MISSING")
+    if receipt_payload.get("effect_identity") != effect_identity or receipt_payload.get("operation_id") != operation_id:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_EFFECT_IDENTITY_MISMATCH")
+    if receipt_payload.get("external_effect_started") is not True:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_EFFECT_NOT_STARTED")
+    if str(receipt_payload.get("outcome") or "").upper() != outcome:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_OUTCOME_MISMATCH")
+    if not _optional_text(receipt_payload.get("source_receipt_ref"), "source_receipt_ref"):
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_SOURCE_RECEIPT_REF_MISSING")
+    if not _sha256_ref(receipt_payload.get("source_receipt_sha256")):
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_SOURCE_RECEIPT_HASH_INVALID")
+
+    transport_class = str(receipt_payload.get("transport_class") or "").upper()
+    if origin == PHYSICAL_LOCAL_MODEL:
+        if transport_class != "LOCAL_MODEL" or not observed["model"]:
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_LOCAL_IDENTITY_INVALID")
+        if receipt_payload.get("observed_model") != observed["model"]:
+            raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_MODEL_MISMATCH")
+        return {"origin_class": origin, "live_provider_observed": False}
+
+    if transport_class != "REMOTE_PROVIDER":
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_REMOTE_TRANSPORT_MISMATCH")
+    if not observed["provider"] or not observed["model"]:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_REMOTE_OBSERVED_IDENTITY_MISSING")
+    if receipt_payload.get("observed_provider") != observed["provider"]:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_PROVIDER_MISMATCH")
+    if receipt_payload.get("observed_model") != observed["model"]:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_MODEL_MISMATCH")
+    if receipt_payload.get("observed_revision") != observed["revision"]:
+        raise ValueError("HANDOFF_EVIDENCE_ORIGIN_RECEIPT_REVISION_MISMATCH")
+    return {
+        "origin_class": origin,
+        "live_provider_observed": outcome == EFFECT_SUCCEEDED,
+    }
+
+
+def require_live_provider_observation(value: Any) -> dict[str, Any]:
+    evidence = value.get("evidence_origin") if isinstance(value, Mapping) and value.get("schema") == HANDOFF_SCHEMA else value
+    result = verify_evidence_origin_compat(evidence)
+    if result["origin_class"] != REMOTE_PROVIDER_OBSERVED:
+        raise ValueError("HANDOFF_LIVE_PROVIDER_REMOTE_OBSERVATION_REQUIRED")
+    if not result["live_provider_observed"]:
+        raise ValueError("HANDOFF_LIVE_PROVIDER_SUCCESSFUL_OUTCOME_REQUIRED")
+    return dict(evidence)
 
 
 def _member_identity(member: Mapping[str, Any], independence_unit: str) -> str:
@@ -308,6 +528,7 @@ def project_nexus_experiment_integrity_input(payload: Mapping[str, Any]) -> dict
             else None
         ),
         "negative_terminal": terminal.get("outcome") == TERMINAL_NEGATIVE,
+        "evidence_origin": dict(payload.get("evidence_origin") or {}),
     }
 
 
@@ -387,6 +608,7 @@ def build_experiment_handoff(
     data_purpose: str = DATA_PURPOSE_TRAINING_CANDIDATE,
     provider_private_required: bool = True,
     public_safe: bool = True,
+    evidence_origin: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a canonical, hash-bound experiment-integrity handoff artifact."""
     if independence_unit not in _INDEPENDENCE_UNITS:
@@ -561,6 +783,20 @@ def build_experiment_handoff(
         for provider in providers
     )
 
+    if evidence_origin is None:
+        configured = providers_normalized[0] if len(providers_normalized) == 1 else {}
+        evidence_origin_value = build_evidence_origin_compat(
+            origin_class=UNKNOWN_ORIGIN,
+            configured_provider=configured.get("provider"),
+            configured_model=configured.get("model"),
+        )
+    else:
+        evidence_origin_value = dict(evidence_origin)
+        verify_evidence_origin_compat(evidence_origin_value)
+    live_provider_verified = verify_evidence_origin_compat(evidence_origin_value)[
+        "live_provider_observed"
+    ]
+
     terminal = {
         "outcome": outcome,
         "negative_terminal": terminal_negative,
@@ -629,6 +865,11 @@ def build_experiment_handoff(
         "boundary": {
             "provider_private_required": provider_private_required,
             "public_safe": public_safe,
+        },
+        "evidence_origin": evidence_origin_value,
+        "live_provider_claim": {
+            "verified": live_provider_verified,
+            "claim_ceiling": LIVE_PROVIDER_CLAIM_CEILING,
         },
         "nexus_projection": {
             "experiment_integrity_schema": NEXUS_INTEGRITY_SCHEMA,
@@ -900,6 +1141,14 @@ def verify_experiment_handoff(payload: Any) -> dict[str, Any]:
         raise ValueError("HANDOFF_TRAINING_ADMISSION_MISMATCH")
     if training.get("training_forbidden") != (admission == TRAINING_ADMISSION_FORBIDDEN):
         raise ValueError("HANDOFF_TRAINING_FORBIDDEN_FLAG_MISMATCH")
+
+    evidence_origin = payload.get("evidence_origin")
+    origin_result = verify_evidence_origin_compat(evidence_origin)
+    live_claim = payload.get("live_provider_claim") or {}
+    if live_claim.get("claim_ceiling") != LIVE_PROVIDER_CLAIM_CEILING:
+        raise ValueError("HANDOFF_LIVE_PROVIDER_CLAIM_CEILING_INVALID")
+    if live_claim.get("verified") is not origin_result["live_provider_observed"]:
+        raise ValueError("HANDOFF_LIVE_PROVIDER_CLAIM_MISMATCH")
 
     projection = payload.get("nexus_projection") or {}
     if projection.get("experiment_integrity_schema") != NEXUS_INTEGRITY_SCHEMA:
