@@ -1,0 +1,257 @@
+{
+  "schema": "nexus.research_archive.v1",
+  "archive_id": "dsg-e2-e3-2026-09-25",
+  "source_candidate": "2a9e5e1ed357a7e8e45d047f0f200ed725e4026f",
+  "source_candidate_tree": "80a824d4d1e191f370fa8f0a58ee1077a91afff5",
+  "remote_main_at_archive_start": "a0f1f3615fe2ccd2fbaa5a766f7f289f5716292a",
+  "final_outcome": "EVIDENCE_INSUFFICIENT",
+  "stop_reason": "REPEATED_HARNESS_SEMANTIC_LEAKAGE",
+  "successor_policy": "NO_AUTOMATIC_SUCCESSOR",
+  "files": [
+    {
+      "source_path": "docs/research/SOURCE_BOUND_GUARD_EVALUATION_REPORT.md",
+      "sha256": "ba78a62ba2b99fdb5cbc00b695687dad596c7878ae2ac679a60dd90ebc01110d",
+      "bytes": 15999
+    },
+    {
+      "source_path": "docs/research/dsg_e2/DSG_E2_HOLDOUT_SELECTION_PROTOCOL_V1.md",
+      "sha256": "109f4e028b4b1e3255e4c67c4c39272d85be9c810ac81c797f84b95a495dacba",
+      "bytes": 4429
+    },
+    {
+      "source_path": "docs/research/dsg_e2/DSG_E2_REUSABLE_QUERY_PROTOCOL_V1.md",
+      "sha256": "4d055cd52705a551081492ae5da6a7d20c12d45b66a5992ca3e56eb2e59f21db",
+      "bytes": 3141
+    },
+    {
+      "source_path": "docs/research/dsg_e2/INVARIANT_EXPRESSIBILITY_ASSESSMENT_V1.md",
+      "sha256": "11e3613497d83dec1a7ad2be16724e4c1a8e86a331a3c71a77a73824da3e5556",
+      "bytes": 3120
+    },
+    {
+      "source_path": "docs/research/dsg_e2/NORMALIZED_REUSABLE_QUERY_RESULTS_V1.json",
+      "sha256": "e8da9940cf3e6afcf0d310e0ab0ca87645a65eb422b3f4c8b3e5171c7cbac6c5",
+      "bytes": 2996
+    },
+    {
+      "source_path": "docs/research/dsg_e3/ACTUAL_CHANGED_REGION_EXECUTION_WITNESS_V1.json",
+      "sha256": "fb2aba34dff844b3b9d9a1710d1a93e9d4bc855d073e613b6a1a95f833aecd45",
+      "bytes": 5492
+    },
+    {
+      "source_path": "docs/research/dsg_e3/ACTUAL_CHANGED_REGION_EXECUTION_WITNESS_V2.json",
+      "sha256": "5eff62d8c048bc69a9a10f44757e6251b792b68bf1dcc21c35fa8c15febec58a",
+      "bytes": 7187
+    },
+    {
+      "source_path": "docs/research/dsg_e3/ACTUAL_EXECUTION_PROVENANCE_V1.json",
+      "sha256": "fe481c63e37f0f41eddcb7b13d151c2a597e85078daf86ecdbcc84081958caa9",
+      "bytes": 6074
+    },
+    {
+      "source_path": "docs/research/dsg_e3/ACTUAL_EXECUTION_PROVENANCE_V2.json",
+      "sha256": "cf02427bd185f8d38d5297bf3dd1401051a151bd7491e6716b0cdba8fc74a79f",
+      "bytes": 7550
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_ACTUAL_HISTORICAL_EXECUTION_FINAL_REPORT.md",
+      "sha256": "9297c04af5170781db2590de872350b8a57c94160293d7966ed0072ffaee0825",
+      "bytes": 9497
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_ADAPTER_BUDGET_V1.md",
+      "sha256": "4271af683fa59ecdbd73831e0ee5508a63cba8e787419c58bb031ab1484fc610",
+      "bytes": 1488
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_PHYSICAL_BENIGN_BINDINGS_V1.json",
+      "sha256": "ccce7e65d3ed7485beea47b0c1ba38e37f3dd843ffb3cfbaea77d5d7358ad757",
+      "bytes": 2838
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_PHYSICAL_REPLAY_RECOVERY_PROTOCOL_V1.md",
+      "sha256": "4f27ccba05325cbffb49b9571465758772a2d0b3f9327a27b805774a9f58703b",
+      "bytes": 1726
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_PHYSICAL_SUBJECT_REPLAY_FINAL_REPORT.md",
+      "sha256": "76d6c54e370ec0ce8d21dd38f57245c46c2ed41ed78995a6a1b1f47c4b5eedd9",
+      "bytes": 11100
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_RESEARCH_CLOSEOUT.md",
+      "sha256": "2e4b02a56ceb0ab4758022ae37c88c6a0d96705afb5b006914012be630fa43ac",
+      "bytes": 7888
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_RUNTIME_HOLDOUT_SELECTION_PROTOCOL_V1.md",
+      "sha256": "db02798cfcb6b5b51af11ae1323436a3f01f2078ef1310f73666ed94379b82a4",
+      "bytes": 2613
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_RUNTIME_INVARIANT_PROTOCOL_V1.md",
+      "sha256": "be85848ece22dd18380b611367ded2ef7ac352e4b9c428db7546f76cec132c47",
+      "bytes": 2279
+    },
+    {
+      "source_path": "docs/research/dsg_e3/DSG_E3_TRUE_EXECUTION_CLOSURE_FINAL_REPORT.md",
+      "sha256": "322274081b65ddc53ae5959a6abef883bfcc14473c13f366fda8deb312764d6b",
+      "bytes": 10739
+    },
+    {
+      "source_path": "docs/research/dsg_e3/NORMALIZED_ACTUAL_EXECUTION_RESULTS_V1.json",
+      "sha256": "f1f013cb03f5748a02ae6ebd5266f37e25b9f1dc228712043f7505f6e925c44a",
+      "bytes": 7512
+    },
+    {
+      "source_path": "docs/research/dsg_e3/NORMALIZED_PHYSICAL_REPLAY_RESULTS_V1.json",
+      "sha256": "3e7ad890457f730c87ad288ce26b1769998cb9b7411fc88d6ccdc7ea47134790",
+      "bytes": 5734
+    },
+    {
+      "source_path": "docs/research/dsg_e3/NORMALIZED_RUNTIME_VERIFIER_RESULTS_V1.json",
+      "sha256": "ad82d5149699b28e8bc28b6e99c88542d166cc7ba8a9c7e815d9bc2ef850dd8c",
+      "bytes": 2914
+    },
+    {
+      "source_path": "docs/research/dsg_e3/NORMALIZED_TRUE_EXECUTION_RESULTS_V2.json",
+      "sha256": "d64996b44adff857e154f9ccb9d30ba92078f167f9a401103277e947ca6cb0d1",
+      "bytes": 9216
+    },
+    {
+      "source_path": "docs/research/dsg_e3/PHYSICAL_SOURCE_BOUND_PROVENANCE_V1.json",
+      "sha256": "356c04325a74a9b4dbb00910576ed9ab2bc0106517026361f65add69059c5cfb",
+      "bytes": 6371
+    },
+    {
+      "source_path": "docs/research/dsg_e3/SEMANTIC_REIMPLEMENTATION_AUDIT_V2.json",
+      "sha256": "8ce7b7327ee12b123ac2727a7fd8e4917283b227fc902a5e9bc8ccf631a91f11",
+      "bytes": 1155
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e2_reusable_queries/FROZEN_QUERY_MANIFEST_V1.json",
+      "sha256": "56d780495b25e55848874b9543647b69b00a005189fbee6015e8f320dfc07698",
+      "bytes": 1368
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e2_reusable_queries/rq1_path_containment.yml",
+      "sha256": "04aecfe2b57f6d363134f5cc8116404bc950a0dd62ca1f8d15811c8ba32b97ec",
+      "bytes": 828
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/FROZEN_RUNTIME_VERIFIER_MANIFEST_V1.json",
+      "sha256": "7b649af1beed25519371d59c8813edb9a584a8ea478aae858632b9a8675cbd79",
+      "bytes": 1578
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/actual_execution/actual_adapters.py",
+      "sha256": "ac21e31e375af46642b07d7dc268481dd27d342507dbda717631f29b60225a7c",
+      "bytes": 5765
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/actual_execution/actual_replay_runner.py",
+      "sha256": "300d79813c5519511b8d01ffcfe8971e85a10d4ab18508bd232fbecf5133af62",
+      "bytes": 36766
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/actual_execution/execution_witness.py",
+      "sha256": "065c9c878b61f4ad33ba0d6f02890f2ea4317f767ac7b7bc742036b2ef73b800",
+      "bytes": 2134
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/actual_execution/tree_materializer.py",
+      "sha256": "f1e9fe40e656f839b9c47a84d41f43b77b32bf86969840b4dcfd1a1bf74e907f",
+      "bytes": 2928
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/adapter_interface.py",
+      "sha256": "3d2ceeeecfd5fcd9c7381059d5a3758bb615d863dff02f0cfb5536b879a8333a",
+      "bytes": 1093
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/dev_adapters.py",
+      "sha256": "ab21a42bfb43f0223c9e7425e380459307100b434232118c3509729290f7d1c7",
+      "bytes": 2828
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/holdout_adapters.py",
+      "sha256": "f496558fc9c7816670618b35c7d1882b4532935b0ba169b5e92b96768e8badd9",
+      "bytes": 3316
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/kernel.py",
+      "sha256": "cc80eab967961131d7715783e625d4ddff470564c6049a96f82495ecb6d7cf30",
+      "bytes": 5692
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/physical_replay/physical_adapters.py",
+      "sha256": "e4aecab031960d09bd238a63edad7b72af95f0a606999cffde28cca37a954621",
+      "bytes": 4567
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/physical_replay/replay_runner.py",
+      "sha256": "7623fcd4843a0bfef3fccc53588b39f3ade0960452bb2e098e24afa19e2e24a5",
+      "bytes": 20711
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/physical_replay/subject_loader.py",
+      "sha256": "2911c45c38589b50ac9120dbbd216359ee3efa0e5c6ad807c361b55ee5dba7d6",
+      "bytes": 2362
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/runner.py",
+      "sha256": "26c746e0644924887e1a33f548a2bcfecd3d0d4c172e074a4495d69be0799eb2",
+      "bytes": 16963
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/true_execution/audit_scanner.py",
+      "sha256": "fca0c76dc7505584a91fded7c11c5d095c15866230e9f2974fdf463afa61b14c",
+      "bytes": 2168
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/true_execution/true_adapters.py",
+      "sha256": "ba9022770b5a0fb0599ede4545e26723eb8307e08c979b2eadc6ef4359aa2a8f",
+      "bytes": 6198
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/dsg_e3_runtime_verifier/true_execution/true_replay_runner.py",
+      "sha256": "a7fbe8f7fb9ea3ddbf0d36140b302529130a85c7ea1abf58f8d7d8f08a0c2a67",
+      "bytes": 41413
+    },
+    {
+      "source_path": "reviewer/deterministic_guard/source_bound_corpus.py",
+      "sha256": "9ccb6fd561c5a4e2e46b068210c169d324dd9e8658902cae806249c8b792ce37",
+      "bytes": 17382
+    },
+    {
+      "source_path": "tests/dsg_e3/test_actual_historical_execution.py",
+      "sha256": "97b0278c2e03b522033fc8c6c422032bb7d568c2908274343fdfb280a98d77e3",
+      "bytes": 7369
+    },
+    {
+      "source_path": "tests/dsg_e3/test_evaluation_e2e.py",
+      "sha256": "94149eb23bc30b3e37220d06487b720ef6cb721c1bad5d52ec6523da3d5d758d",
+      "bytes": 1240
+    },
+    {
+      "source_path": "tests/dsg_e3/test_kernel.py",
+      "sha256": "ebe3e40cf0a686a0ad205e48e39818b2cd2d2aceda9677e6f93841df4b1ee660",
+      "bytes": 3885
+    },
+    {
+      "source_path": "tests/dsg_e3/test_physical_replay_e2e.py",
+      "sha256": "d202532f39e9680cd904e3e36b324f9ddb8439794c47f4c07dd24483073b72f8",
+      "bytes": 3903
+    },
+    {
+      "source_path": "tests/dsg_e3/test_true_historical_execution.py",
+      "sha256": "c22f74e0aa4e463dc76932309b0066b9210406234d53aa16d526aae0909096b4",
+      "bytes": 10183
+    },
+    {
+      "source_path": "tests/test_deterministic_guard_source_bound.py",
+      "sha256": "2986ea61633518c9928cf0c7f3bb6d05e801042e4c3299a9a51fa7ba141416c7",
+      "bytes": 5556
+    }
+  ]
+}
