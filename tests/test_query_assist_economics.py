@@ -1,6 +1,6 @@
 """Issue #45: canonical query evidence assist + paired economics."""
 from __future__ import annotations
-import pytest
+
 from reviewer.query_assist import (
     QUERY_ASSIST_CLAIM_CEILING,
     assemble_assisted_context,
