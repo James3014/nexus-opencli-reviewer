@@ -86,6 +86,7 @@ def prepare_attempt(
     session_mode: str = "ephemeral",
     prompt_normalized_sha256: str | None = None,
     prompt_text: str | None = None,
+    query_evidence_identity: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Create a PREPARED record, refusing accidental attempt-id reuse."""
     ident = list(review_identity)
@@ -117,6 +118,8 @@ def prepare_attempt(
         "finished_at": None,
         "retry_safe": True,
     }
+    if query_evidence_identity:
+        record["query_evidence_identity"] = dict(query_evidence_identity)
     if prompt_text is not None:
         # Persist the exact dispatched prompt bytes for forensic verification
         # of renderer-transformed recovery candidates.  Local state only.

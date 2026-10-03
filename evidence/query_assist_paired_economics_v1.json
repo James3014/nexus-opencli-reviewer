@@ -1,0 +1,157 @@
+{
+  "call_savings": 0,
+  "claim_ceiling": "REVIEWER_QUERY_ASSIST_ECONOMICS_EXPERIMENT_ONLY",
+  "experiment_hash": "eb223faba69783334f217058f33ad882228b69dbb6c80b59491fd4ca1218787f",
+  "oracle_id": "nexus-reviewer-quality-oracle-v1",
+  "pairs": [
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1063,
+        "output_tokens": 255,
+        "wall_seconds": 1.334
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1384,
+        "output_tokens": 265,
+        "wall_seconds": 1.73
+      },
+      "pr_id": "pr-1058-gateway-recovery",
+      "recovery_events": 0
+    },
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 974,
+        "output_tokens": 255,
+        "wall_seconds": 1.223
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1133,
+        "output_tokens": 265,
+        "wall_seconds": 1.416
+      },
+      "pr_id": "pr-358-impact-gate-regression",
+      "recovery_events": 0
+    },
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 975,
+        "output_tokens": 255,
+        "wall_seconds": 1.224
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1073,
+        "output_tokens": 265,
+        "wall_seconds": 1.341
+      },
+      "pr_id": "pr-42-live-provider-provenance",
+      "recovery_events": 0
+    },
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 955,
+        "output_tokens": 255,
+        "wall_seconds": 1.199
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1055,
+        "output_tokens": 265,
+        "wall_seconds": 1.319
+      },
+      "pr_id": "pr-46-durable-workflow-state",
+      "recovery_events": 0
+    },
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 900,
+        "output_tokens": 255,
+        "wall_seconds": 1.13
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1045,
+        "output_tokens": 265,
+        "wall_seconds": 1.306
+      },
+      "pr_id": "pr-30-terminal-sidecar",
+      "recovery_events": 0
+    },
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 934,
+        "output_tokens": 255,
+        "wall_seconds": 1.173
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1043,
+        "output_tokens": 265,
+        "wall_seconds": 1.304
+      },
+      "pr_id": "pr-27-structured-facts",
+      "recovery_events": 0
+    },
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 852,
+        "output_tokens": 255,
+        "wall_seconds": 1.07
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 938,
+        "output_tokens": 265,
+        "wall_seconds": 1.173
+      },
+      "pr_id": "pr-1278-hybrid-capture",
+      "recovery_events": 0
+    },
+    {
+      "assisted": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1020,
+        "output_tokens": 255,
+        "wall_seconds": 1.28
+      },
+      "baseline": {
+        "call_count": 1,
+        "finding_recall": 1.0,
+        "input_tokens": 1170,
+        "output_tokens": 265,
+        "wall_seconds": 1.463
+      },
+      "pr_id": "pr-1350-transport-neutral-continuity",
+      "recovery_events": 1
+    }
+  ],
+  "population_id": "nexus-reviewer-paired-population-v1",
+  "quality_non_inferior": true,
+  "savings_claim_allowed": true,
+  "schema": "reviewer.query_assist_paired_experiment.v1",
+  "token_savings": 1248
+}
