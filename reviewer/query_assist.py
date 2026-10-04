@@ -3,9 +3,41 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 from collections.abc import Mapping
+from typing import Any
+
+# The vendored repository_intelligence wheel (v0.1.0) does not expose a public
+# generic hashing helper in its public API (__all__); hashing is implemented via
+# internal _content_hash in repository_intelligence.core. We bridge to it
+# when present and maintain the canonical RIE specification fallback
+# (json.dumps with sorted keys, compact separators, UTF-8 encoding, SHA-256).
+try:
+    from repository_intelligence.core import _content_hash as _rie_content_hash
+except (ImportError, AttributeError):
+    _rie_content_hash = None
+
+
+def compute_canonical_content_hash(payload: Mapping[str, Any]) -> str:
+    """Recompute canonical content_sha256 over report content excluding content_sha256.
+
+    Uses RIE's canonical content hashing algorithm (JSON serialization with
+    sorted keys, compact separators, UTF-8 encoding, and SHA-256 digest).
+    Delegates to the vendored Repository Intelligence Engine implementation when
+    available.
+    """
+    unsigned = dict(payload)
+    unsigned.pop("content_sha256", None)
+    if _rie_content_hash is not None:
+        try:
+            return _rie_content_hash(unsigned)
+        except Exception:
+            pass
+    canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 QUERY_ASSIST_SCHEMA = "reviewer.query_assist_context.v1"
 QUERY_ASSIST_EXPERIMENT_SCHEMA = "reviewer.query_assist_paired_experiment.v1"
@@ -172,6 +204,13 @@ def consume_canonical_query_evidence(
     supplied_hash = report_data.get("content_sha256")
     if not isinstance(supplied_hash, str) or not supplied_hash.strip():
         blockers.append("query_evidence_missing_content_sha256")
+    else:
+        try:
+            expected_hash = compute_canonical_content_hash(report_data)
+            if not hmac.compare_digest(supplied_hash.strip(), expected_hash):
+                blockers.append("query_evidence_content_hash_mismatch")
+        except Exception:
+            blockers.append("query_evidence_content_hash_mismatch")
 
     if (
         report_data.get("is_complete") is False

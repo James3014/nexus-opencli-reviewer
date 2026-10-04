@@ -24,6 +24,7 @@ from typing import Any
 from .models import CheckObservation, Classification, Disposition, PRSnapshot
 from .query_assist import (
     build_paired_experiment,
+    compute_canonical_content_hash,
     validate_paired_experiment,
 )
 from .review_context import ReviewContext, envelope
@@ -745,8 +746,7 @@ def build_canonical_query_report(fixture: PRFixture) -> dict[str, Any]:
         "semantic_review_needed": True,
         "claim_ceiling": "REPOSITORY_QUERY_EVIDENCE_ONLY",
     }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    payload["content_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    payload["content_sha256"] = compute_canonical_content_hash(payload)
     return payload
 
 

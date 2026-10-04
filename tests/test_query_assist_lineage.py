@@ -18,6 +18,7 @@ from reviewer.query_assist import (
     QUERY_ASSIST_CLAIM_CEILING,
     QUERY_ASSIST_EXPERIMENT_SCHEMA,
     QUERY_ASSIST_SCHEMA,
+    compute_canonical_content_hash,
     consume_canonical_query_evidence,
     validate_paired_experiment,
 )
@@ -98,6 +99,7 @@ def test_stale_or_invalid_canonical_report_falls_back_to_baseline():
     bad_head_report["identity"] = dict(
         bad_head_report["identity"], head_sha="wrong_head_sha"
     )
+    bad_head_report["content_sha256"] = compute_canonical_content_hash(bad_head_report)
     out = consume_canonical_query_evidence(
         bad_head_report,
         pr_identity={
@@ -115,6 +117,7 @@ def test_stale_or_invalid_canonical_report_falls_back_to_baseline():
     foreign_report["identity"] = dict(
         foreign_report["identity"], repository="Other/foreign-repo"
     )
+    foreign_report["content_sha256"] = compute_canonical_content_hash(foreign_report)
     out2 = consume_canonical_query_evidence(
         foreign_report,
         pr_identity={
@@ -129,6 +132,7 @@ def test_stale_or_invalid_canonical_report_falls_back_to_baseline():
 
     # 3. Incomplete evidence
     incomplete_report = dict(canonical_report, is_complete=False)
+    incomplete_report["content_sha256"] = compute_canonical_content_hash(incomplete_report)
     out3 = consume_canonical_query_evidence(
         incomplete_report,
         pr_identity={
@@ -149,6 +153,7 @@ def test_empty_retrieval_never_proof_of_absence():
     empty_report = dict(
         canonical_report, fused_candidates=(), resolution="EMPTY_RETRIEVAL_NOT_ABSENCE"
     )
+    empty_report["content_sha256"] = compute_canonical_content_hash(empty_report)
     out = consume_canonical_query_evidence(
         empty_report,
         critical_evidence=["ci:check:pass"],
@@ -378,3 +383,163 @@ def test_diff_narrowing_keeps_a_b_prefixed_paths():
     )
     assert "app.py" in ctx.payload["diff"]
     assert "other.py" not in ctx.payload["diff"]
+
+
+def test_tampered_canonical_query_evidence_content_hash_mismatch():
+    """Issue #54: Tampered report content with stale hash triggers content_hash_mismatch and falls back to O_BASELINE."""
+    fixture = FROZEN_POPULATION_V1[0]
+    canonical_report = build_canonical_query_report(fixture)
+    original_hash = canonical_report["content_sha256"]
+
+    # 1. Tampered fused_candidates with original hash
+    tampered_candidates = dict(canonical_report)
+    tampered_candidates["fused_candidates"] = list(
+        canonical_report["fused_candidates"]
+    ) + [{"candidate_ref": "malicious/injected.py", "fused_rank": 99}]
+    tampered_candidates["content_sha256"] = original_hash
+
+    out = consume_canonical_query_evidence(
+        tampered_candidates,
+        pr_identity={
+            "repository": fixture.repository,
+            "head_sha": fixture.head_sha,
+            "base_sha": fixture.base_sha,
+            "main_sha": fixture.current_main_sha,
+        },
+    )
+    assert out["mode"] == "O_BASELINE"
+    assert "query_evidence_content_hash_mismatch" in out["blockers"]
+
+    # 2. Tampered identity field with original hash
+    tampered_ident = dict(canonical_report)
+    tampered_ident["identity"] = dict(
+        canonical_report["identity"], head_sha="tampered_head_sha"
+    )
+    tampered_ident["content_sha256"] = original_hash
+    out2 = consume_canonical_query_evidence(
+        tampered_ident,
+        pr_identity={
+            "repository": fixture.repository,
+            "head_sha": fixture.head_sha,
+            "base_sha": fixture.base_sha,
+            "main_sha": fixture.current_main_sha,
+        },
+    )
+    assert out2["mode"] == "O_BASELINE"
+    assert "query_evidence_content_hash_mismatch" in out2["blockers"]
+
+    # 3. Tampered resolution / body with original hash
+    tampered_resolution = dict(canonical_report, resolution="UNVERIFIED_INJECTION")
+    tampered_resolution["content_sha256"] = original_hash
+    out3 = consume_canonical_query_evidence(
+        tampered_resolution,
+        pr_identity={
+            "repository": fixture.repository,
+            "head_sha": fixture.head_sha,
+            "base_sha": fixture.base_sha,
+            "main_sha": fixture.current_main_sha,
+        },
+    )
+    assert out3["mode"] == "O_BASELINE"
+    assert "query_evidence_content_hash_mismatch" in out3["blockers"]
+
+    # 4. Missing content_sha256
+    missing_hash_report = dict(canonical_report)
+    del missing_hash_report["content_sha256"]
+    out4 = consume_canonical_query_evidence(missing_hash_report)
+    assert out4["mode"] == "O_BASELINE"
+    assert "query_evidence_missing_content_sha256" in out4["blockers"]
+
+    # 5. Empty or whitespace content_sha256
+    empty_hash_report = dict(canonical_report, content_sha256="   ")
+    out5 = consume_canonical_query_evidence(empty_hash_report)
+    assert out5["mode"] == "O_BASELINE"
+    assert "query_evidence_missing_content_sha256" in out5["blockers"]
+
+    # 6. Non-string content_sha256
+    invalid_type_report = dict(canonical_report, content_sha256=12345)
+    out6 = consume_canonical_query_evidence(invalid_type_report)
+    assert out6["mode"] == "O_BASELINE"
+    assert "query_evidence_missing_content_sha256" in out6["blockers"]
+
+
+def test_genuine_canonical_query_evidence_accepted_as_d_assisted():
+    """Issue #54: Genuine canonical query report produced by canonical engine yields D_ASSISTED."""
+    fixture = FROZEN_POPULATION_V1[0]
+    genuine_report = build_canonical_query_report(fixture)
+    expected_digest = (
+        "93c1f256d575dd356cbdeb895ab8f4e9db7a8cb25528c1c81a2b55c0f6d3e9ac"
+    )
+    assert genuine_report["content_sha256"] == expected_digest
+    assert (
+        compute_canonical_content_hash(genuine_report) == expected_digest
+    )
+
+    out = consume_canonical_query_evidence(
+        genuine_report,
+        critical_evidence=["ci:check:pass"],
+        pr_identity={
+            "repository": fixture.repository,
+            "head_sha": fixture.head_sha,
+            "base_sha": fixture.base_sha,
+            "main_sha": fixture.current_main_sha,
+        },
+    )
+    assert out["mode"] == "D_ASSISTED"
+    assert out["blockers"] == []
+    assert (
+        out["query_identity"]["query_evidence_hash"] == genuine_report["content_sha256"]
+    )
+    assert out["claim_ceiling"] == QUERY_ASSIST_CLAIM_CEILING
+
+
+def test_canonical_content_hash_consistency():
+    """Issue #54: compute_canonical_content_hash matches RIE canonical algorithm and handles payload mutation."""
+    fixture = FROZEN_POPULATION_V1[0]
+    report = build_canonical_query_report(fixture)
+    supplied_hash = report["content_sha256"]
+
+    # Hash computed with content_sha256 present in dict
+    h1 = compute_canonical_content_hash(report)
+    assert h1 == supplied_hash
+
+    # Hash computed without content_sha256 in dict
+    unsigned = {k: v for k, v in report.items() if k != "content_sha256"}
+    h2 = compute_canonical_content_hash(unsigned)
+    assert h2 == supplied_hash
+
+    # Matches vendored RIE internal content_hash if available
+    try:
+        from repository_intelligence.core import _content_hash as rie_content_hash
+    except (ImportError, AttributeError):
+        rie_content_hash = None
+
+    if rie_content_hash is not None:
+        assert h1 == rie_content_hash(report)
+        assert h2 == rie_content_hash(unsigned)
+
+    # Mutating any field changes the digest
+    mutated = dict(report, query_id="query:tampered")
+    assert compute_canonical_content_hash(mutated) != supplied_hash
+
+
+def test_canonical_content_hash_fallback_without_rie(monkeypatch):
+    """Issue #54: compute_canonical_content_hash works identically when RIE is unavailable or raises."""
+    import reviewer.query_assist as qa
+
+    fixture = FROZEN_POPULATION_V1[0]
+    report = build_canonical_query_report(fixture)
+    expected = "93c1f256d575dd356cbdeb895ab8f4e9db7a8cb25528c1c81a2b55c0f6d3e9ac"
+
+    # Simulate RIE wheel absent (_rie_content_hash is None)
+    monkeypatch.setattr(qa, "_rie_content_hash", None)
+    assert qa.compute_canonical_content_hash(report) == expected
+
+    # Simulate RIE wheel internal error / exception
+    def _exploding_hash(_payload):
+        raise RuntimeError("simulated RIE failure")
+
+    monkeypatch.setattr(qa, "_rie_content_hash", _exploding_hash)
+    assert qa.compute_canonical_content_hash(report) == expected
+
+
