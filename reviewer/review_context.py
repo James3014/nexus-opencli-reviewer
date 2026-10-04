@@ -130,7 +130,7 @@ class ReviewContext:
                             continue
                         first_line = chunk.splitlines()[0]
                         for part in first_line.split():
-                            clean = part.lstrip("ab/")
+                            clean = part[2:] if part[:2] in ("a/", "b/") else part
                             if clean in candidate_files:
                                 keep.append("diff --git " + chunk)
                                 break

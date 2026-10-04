@@ -191,15 +191,13 @@ def consume_canonical_query_evidence(
             if path_part and path_part not in candidates:
                 candidates.append(path_part)
 
+    # Bind strictly to the identity the report itself claims; never backfill
+    # missing fields from the target PR, or an unbound report would pass.
     query_evidence = {
-        "repository": str(
-            ident_dict.get("repository") or target_pr.get("repository") or ""
-        ),
-        "head_sha": str(ident_dict.get("head_sha") or target_pr.get("head_sha") or ""),
-        "base_sha": str(ident_dict.get("base_sha") or target_pr.get("base_sha") or ""),
-        "main_sha": str(
-            ident_dict.get("current_main_sha") or target_pr.get("main_sha") or ""
-        ),
+        "repository": str(ident_dict.get("repository") or ""),
+        "head_sha": str(ident_dict.get("head_sha") or ""),
+        "base_sha": str(ident_dict.get("base_sha") or ""),
+        "main_sha": str(ident_dict.get("current_main_sha") or ""),
         "query_evidence_hash": str(supplied_hash or ""),
         "retriever_policy": str(
             report_data.get("retriever_policy") or "rrf_k60_deterministic_fusion"

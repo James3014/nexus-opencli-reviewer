@@ -338,3 +338,43 @@ def test_saved_artifact_persistence(tmp_path):
     data = json.loads(saved_path.read_text(encoding="utf-8"))
     assert validate_paired_experiment(data) == []
     assert data["claim_ceiling"] == QUERY_ASSIST_CLAIM_CEILING
+
+
+def test_unbound_report_identity_is_not_backfilled_from_pr():
+    report = {
+        "schema": CANONICAL_RETRIEVAL_SCHEMA,
+        "claim_ceiling": CANONICAL_RETRIEVAL_CLAIM_CEILING,
+        "content_sha256": "abc",
+        "identity": {},
+        "fused_candidates": [{"candidate_ref": "a.py::f"}],
+    }
+    pr = {"repository": "r/x", "head_sha": "h", "base_sha": "b", "main_sha": "m"}
+    res = consume_canonical_query_evidence(report, pr_identity=pr)
+    assert res["mode"] == "O_BASELINE"
+
+
+def test_diff_narrowing_keeps_a_b_prefixed_paths():
+    snap = _sample_snapshot()
+    snap = PRSnapshot(**{**snap.__dict__, "changed_files": ("app.py", "other.py")})
+    cls = Classification(
+        snapshot=snap,
+        disposition=Disposition.REVIEW_READY,
+        findings=[],
+        risk="LOW",
+    )
+    patch = (
+        "diff --git a/app.py b/app.py\n+x\n"
+        "diff --git a/other.py b/other.py\n+y\n"
+    )
+    ctx = ReviewContext.build(
+        cls,
+        patch,
+        query_assist={
+            "mode": "D_ASSISTED",
+            "candidates": ["app.py"],
+            "widened": [],
+            "query_identity": {"query_evidence_hash": "h"},
+        },
+    )
+    assert "app.py" in ctx.payload["diff"]
+    assert "other.py" not in ctx.payload["diff"]
