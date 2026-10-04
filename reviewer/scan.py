@@ -207,7 +207,7 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
     detect(out); q=ReviewQueue();q.ingest(out)
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)
     return main_sha,observed,out,q
-def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider=None,budget=200000,state_root='.reviewer-state',dispatch_gate=None,resume_attempt=None,profile_resolver=None,allow_semantic_dispatch=True):
+def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider=None,budget=200000,state_root='.reviewer-state',dispatch_gate=None,resume_attempt=None,profile_resolver=None,allow_semantic_dispatch=True,query_evidence=None):
     from .review_context import ReviewContext, envelope, ContextError, SemanticReviewError
     from .receipt import make_receipt,persist_receipt,persist_failure,reusable_receipt
     from .semantic import parse_response,SemanticParseError
@@ -223,7 +223,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
         if hasattr(transport,'get_issue'): extra['issues']=[transport.get_issue(repo,n) for n in current.snapshot.issue_numbers]
         if hasattr(transport,'get_file'):
             extra['task_cards']={path:transport.get_file(repo,path,current.snapshot.head_sha) for path in current.snapshot.changed_files if path.startswith('tasks/') and path.endswith('.md')}
-        context=ReviewContext.build(current,patch,budget,extra)
+        context=ReviewContext.build(current,patch,budget,extra,query_evidence=query_evidence)
     except ContextError: raise
     except Exception as e: raise ContextError('CONTEXT_INCOMPLETE') from e
     rebound=transport.get_pr(repo,pr_number) if hasattr(transport,'get_pr') else None
@@ -277,7 +277,8 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
                                           browser_profile=getattr(semantic_transport, 'profile', None),
                                           session_mode='ephemeral',
                                           prompt_normalized_sha256=prompt_normalized_sha,
-                                          prompt_text=prompt)
+                                          prompt_text=prompt,
+                                          query_evidence_identity=getattr(context, 'query_evidence_identity', None))
     if dispatch_gate:
         gate=Path(dispatch_gate);deadline=time.monotonic()+120
         while not gate.exists():
@@ -317,6 +318,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
             'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
         raise SemanticReviewError(f'{result.status} evidence={path}')
     receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result,
-                         ci_failure_evidence=_ci_evidence_for(current))
+                         ci_failure_evidence=_ci_evidence_for(current),
+                         query_evidence_identity=getattr(context, 'query_evidence_identity', None))
     path=persist_receipt(state_root,receipt)
     return receipt,path
