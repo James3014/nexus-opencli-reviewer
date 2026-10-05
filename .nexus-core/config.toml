@@ -1,0 +1,6 @@
+version = 1
+base_ref = "origin/main"
+allowed_patterns = ["**"]
+deletion_policy = "FORBID"
+verifier_command = ["python3", "-m", "pytest", "-q"]
+timeout_seconds = 1800

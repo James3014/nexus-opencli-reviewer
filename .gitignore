@@ -2,3 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Nexus Core local evidence/bindings
+.nexus-core/receipts/
+.nexus-core/issues/
