@@ -1,6 +1,35 @@
-version = 1
+version = 2
 base_ref = "origin/main"
 allowed_patterns = ["**"]
 deletion_policy = "FORBID"
-verifier_command = ["python3", "-m", "pytest", "-q"]
+universe_generation = 1
+
+[[materials]]
+id = "repository-intelligence-revision"
+observe_command = ["python3", "-c", "import pathlib,tomllib; d=tomllib.loads(pathlib.Path('pyproject.toml').read_text()); print('git-commit:'+d['tool']['repository-intelligence']['canonical-commit'])"]
+timeout_seconds = 300
+logical_subject_id = "dependency/repository-intelligence-engine"
+evidence_kind = "resolved-dependency"
+requirement_mode = "REQUIRED"
+applicability = "APPLICABLE"
+expected_identity = "git-commit:a8b9a00a6f3ea3e9ade0c6ef494d0fa88a2d73b2"
+
+[[verifiers]]
+id = "pytest"
+command = ["python3", "-m", "pytest", "-q"]
 timeout_seconds = 1800
+logical_subject_id = "opencli-reviewer/full-tests"
+evidence_kind = "test-result"
+requirement_mode = "REQUIRED"
+applicability = "APPLICABLE"
+required_material_ids = ["repository-intelligence-revision"]
+
+[[verifiers]]
+id = "diff-check"
+command = ["git", "diff", "--cached", "--check", "HEAD"]
+timeout_seconds = 300
+logical_subject_id = "opencli-reviewer/diff-hygiene"
+evidence_kind = "static-check"
+requirement_mode = "REQUIRED"
+applicability = "APPLICABLE"
+required_material_ids = ["repository-intelligence-revision"]
