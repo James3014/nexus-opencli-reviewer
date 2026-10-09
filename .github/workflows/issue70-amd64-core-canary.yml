@@ -1,0 +1,57 @@
+name: Issue 70 linux-amd64 Core isolation PREACTIVATION CANARY
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  sandbox:
+    name: Issue70 linux-amd64 Core sandbox canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact unmerged Issue 70 candidate
+        uses: actions/checkout@v4
+        with:
+          ref: d4bc1291f0b73f1a4698b32cc285dc83b80fa066
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install immutable pinned Nexus Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet --no-deps 'git+https://github.com/James3014/nexus-core.git@076845b3c69dfb90256a422449fb6318522104ba'
+      - name: Execute both exact candidate verifiers under Core sandbox on linux-amd64
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import platform
+          import subprocess
+          import tomllib
+          from product.clients.local_golden_path import _validate_config, _snapshot, _run_verifier_isolated
+          repo=Path.cwd()
+          assert platform.machine()=="x86_64", platform.machine()
+          head=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
+          base=subprocess.check_output(["git","rev-parse","origin/main"],text=True).strip()
+          assert head=="d4bc1291f0b73f1a4698b32cc285dc83b80fa066", head
+          assert base=="4c8f4271d8d80f62b0f7524782c7437308a6236c", base
+          config=_validate_config(tomllib.loads((repo/".nexus-core/config.toml").read_text()))
+          snap=_snapshot(repo,config["base_ref"])
+          assert snap.target_tree=="1007210df36a6eea101d6c9eff4851c845a74d77", snap.target_tree
+          assert config["verifiers"][1]["command"] == ["git","-c","safe.directory=/sandbox/repo","diff","--cached","--check","HEAD"]
+          for verifier in config["verifiers"]:
+              print("BEGIN",verifier["id"],flush=True)
+              result,execution,mutation=_run_verifier_isolated(repo,snap,verifier["command"],config,verifier["timeout_seconds"])
+              print("RESULT",verifier["id"],result.returncode,"MUTATION",mutation,flush=True)
+              print(result.stdout.decode(errors="replace")[-1200:],flush=True)
+              print(result.stderr.decode(errors="replace")[-1200:],flush=True)
+              assert result.returncode==0,verifier["id"]
+              assert mutation is None,(verifier["id"],mutation)
+          print("ISSUE70_LINUX_AMD64_CORE_ISOLATION_PASS",flush=True)
+          PY
