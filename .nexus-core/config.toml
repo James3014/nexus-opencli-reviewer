@@ -33,3 +33,5 @@ evidence_kind = "static-check"
 requirement_mode = "REQUIRED"
 applicability = "APPLICABLE"
 required_material_ids = ["repository-intelligence-revision"]
+
+# ISSUE70_NEGATIVE_CANARY: intentionally changes protected config, NEVER MERGE

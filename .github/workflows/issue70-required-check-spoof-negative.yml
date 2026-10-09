@@ -1,0 +1,13 @@
+name: Issue 70 required-check spoof NEGATIVE CONTROL
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  spoof:
+    name: Nexus Core issue completion
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: SECURITY NEGATIVE CONTROL, not a signed receipt
+        run: echo "NEGATIVE CONTROL fake required job PASS, while canonical trusted-input guard must FAIL"
