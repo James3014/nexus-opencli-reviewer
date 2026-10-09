@@ -1,6 +1,7 @@
 # Issue #70 Nexus Core signed-receipt migration candidate
 
-Status: local `CANDIDATE_READY` with integration deferred. Activation is
+Status: remote draft PR #71 `CANDIDATE_READY` with verified pre-activation
+negative controls and isolation tests. Activation remains
 `BLOCKED_MIGRATION_AUTHORITY`.
 
 Parent: James3014/Nexus-new#1452.
@@ -189,20 +190,37 @@ PRs after Owner-authorized activation:
 
 ## Gaps not proven by this repository
 
-- Signature, identity, binding, and base-ref config-source checks (N1–N9) are
-  implemented in Core at `076845b…` and were reported to this implementer, not
-  read by it.
-- The guard's fetch-by-exact-SHA from github.com, including for a PR head SHA, is
-  tested only against a local `file://` origin. It still needs a live canary.
-- It is unverified whether `receipt-verify` rejects an empty `artifact-name` or
-  `issue-number` on its own. The precondition step covers the cases where `run`
-  did not succeed.
-- Container compatibility is unverified: `uv` and `git` in the pinned image, the
-  `sh -ec` verifier, PyPI access over `bridge`, `git diff --cached --check HEAD`
-  inside the mounted subject, and the run time of the full suite under 1800 s.
-- Whether `version = 2` and `universe_generation = 1` accept `[isolation]` and the
-  changed verifier command, or whether Core requires a generation bump, is
-  unverified.
+- Static inspection of the pinned Core `issue-gate` and `receipt-verify`
+  action sources at `076845b…` confirms their advertised receipt/identity
+  input contracts, including rejecting empty artifact/Issue inputs. Their
+  **live** N1–N9 signature, substitution and identity behavior is unverified.
+- The protected-input guard's exact base/head SHA fetch succeeded against
+  **github.com**, and committed tree entries detected both protected path
+  changes. A real `pull_request_target` live canary remains unrun.
+- Digest-pinned `ghcr.io/astral-sh/uv:python3.11-bookworm` worked locally
+  under Docker Desktop linux/arm64 with `uv`, Python 3.11, Git and PyPI.
+  The full verifier pytest command passed 518 tests (one skipped); the
+  pinned Core's own detached-clone Docker executor also passed pytest.
+- A real RED found Docker Desktop mount ownership making Git reject
+  `/sandbox/repo` as dubious. The `diff-check` verifier's original
+  `git diff --cached --check HEAD` returned 129. Binding
+  `git -c safe.directory=/sandbox/repo diff --cached --check HEAD`
+  to the exact isolated subject passed via the pinned Core executor,
+  without a global safe.directory exception. A config regression test
+  now asserts this bounded command. Re-check it on the exact new commit.
+- Pinned Core `_validate_config` accepted v2, `universe_generation = 1`,
+  digest-pinned container isolation and both verifier command definitions.
+  The Github-hosted linux/amd64 image/container and signed OIDC jobs
+  remain unverified. Core `issue-check --require-trusted-config` against
+  the old base correctly used the **old** config and failed its pytest
+  verifier; it is not positive evidence for the new config.
+- Actual [security-negative PR #72](https://github.com/James3014/nexus-opencli-reviewer/pull/72)
+  made an unrelated GitHub Actions job report an identical
+  `Nexus Core issue completion` success while the real protected check failed.
+  The PR stayed `BLOCKED`; it was closed without merge and its remote
+  test branch deleted. This is an exact negative witness, not a proof
+  against every possible spoof. Main ruleset requires strict up-to-date
+  checks, helping prevent reuse of old-generation green checks.
 - That the expected identity matches the OIDC `job_workflow_ref` for this
   repository's `pull_request_target` runs is inferred from nexus-runtime. It is
   unverified here.
@@ -213,5 +231,5 @@ PRs after Owner-authorized activation:
 An Owner-controlled trusted-generation transition that lands this candidate past
 the self-protecting base workflow. The current base guard forbids this migration
 PR, so the transition is `BLOCKED_MIGRATION_AUTHORITY`. After that come live
-P1/N10/N11/N13 canaries on this repository. This implementer cannot perform
-either.
+P1/N10/N11/N13 canaries on this repository. These gates require distinct Owner exception and independent verification
+authorities; preactivation local tests cannot substitute for signed live CI.

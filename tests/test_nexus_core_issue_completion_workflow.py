@@ -386,7 +386,7 @@ def test_config_verifiers_remain_required_and_unweakened() -> None:
         assert verifier["requirement_mode"] == "REQUIRED"
         assert verifier["applicability"] == "APPLICABLE"
         assert verifier["required_material_ids"] == ["repository-intelligence-revision"]
-    assert verifiers["diff-check"]["command"] == ["git", "diff", "--cached", "--check", "HEAD"]
+    assert verifiers["diff-check"]["command"] == ["git", "-c", "safe.directory=/sandbox/repo", "diff", "--cached", "--check", "HEAD"]
 
     command = verifiers["pytest"]["command"]
     assert command[:2] == ["sh", "-ec"]

@@ -31,7 +31,7 @@ required_material_ids = ["repository-intelligence-revision"]
 
 [[verifiers]]
 id = "diff-check"
-command = ["git", "diff", "--cached", "--check", "HEAD"]
+command = ["git", "-c", "safe.directory=/sandbox/repo", "diff", "--cached", "--check", "HEAD"]
 timeout_seconds = 300
 logical_subject_id = "opencli-reviewer/diff-hygiene"
 evidence_kind = "static-check"
