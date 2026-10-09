@@ -4,6 +4,11 @@ allowed_patterns = ["**"]
 deletion_policy = "FORBID"
 universe_generation = 1
 
+[isolation]
+mode = "container"
+image = "ghcr.io/astral-sh/uv:python3.11-bookworm@sha256:58683a39536f1f4ed2e1dd79cf155edccfb47731aba8964bd0312aac942126cf"
+network = "bridge"
+
 [[materials]]
 id = "repository-intelligence-revision"
 observe_command = ["python3", "-c", "import pathlib,tomllib; d=tomllib.loads(pathlib.Path('pyproject.toml').read_text()); print('git-commit:'+d['tool']['repository-intelligence']['canonical-commit'])"]
@@ -16,7 +21,7 @@ expected_identity = "git-commit:a8b9a00a6f3ea3e9ade0c6ef494d0fa88a2d73b2"
 
 [[verifiers]]
 id = "pytest"
-command = ["python3", "-m", "pytest", "-q"]
+command = ["sh", "-ec", "env_dir=$(mktemp -d)/venv; uv venv --quiet --python python3 \"$env_dir\"; uv pip install --quiet --python \"$env_dir/bin/python\" pytest==8.3.3 pyyaml==6.0.2; uv pip install --quiet --python \"$env_dir/bin/python\" --no-deps --no-index ./vendor/repository_intelligence_engine-0.1.0-py3-none-any.whl; exec \"$env_dir/bin/python\" -m pytest -q"]
 timeout_seconds = 1800
 logical_subject_id = "opencli-reviewer/full-tests"
 evidence_kind = "test-result"
@@ -26,7 +31,7 @@ required_material_ids = ["repository-intelligence-revision"]
 
 [[verifiers]]
 id = "diff-check"
-command = ["git", "diff", "--cached", "--check", "HEAD"]
+command = ["git", "-c", "safe.directory=/sandbox/repo", "diff", "--cached", "--check", "HEAD"]
 timeout_seconds = 300
 logical_subject_id = "opencli-reviewer/diff-hygiene"
 evidence_kind = "static-check"
