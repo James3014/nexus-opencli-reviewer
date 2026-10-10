@@ -194,10 +194,7 @@ def discover_unfinished(root: str | os.PathLike[str]) -> list[dict[str, Any]]:
         return []
     records: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.json")):
-        try:
-            record = _load(path)
-        except ValueError:
-            continue
+        record = _load(path)
         if record.get("state") in (PREPARED, DISPATCHING):
             records.append(record)
     return records
@@ -213,10 +210,7 @@ def discover_for_identity(root: str | os.PathLike[str], review_identity: Iterabl
     identity = list(review_identity)
     records = []
     for path in sorted(directory.glob("*.json")):
-        try:
-            record = _load(path)
-        except ValueError:
-            continue
+        record = _load(path)
         if (record.get("review_identity") == identity
                 and (context_pack_sha256 is None or record.get("context_pack_sha256") == context_pack_sha256)
                 and (prompt_sha256 is None or record.get("prompt_sha256") == prompt_sha256)):
