@@ -1,0 +1,115 @@
+name: Nexus Core issue completion
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: nexus-core-issue-completion-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Nexus Core issue run
+    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      id-token: write
+    outputs:
+      artifact-name: ${{ steps.gate.outputs.artifact-name }}
+      issue-number: ${{ steps.gate.outputs.issue-number }}
+    steps:
+      # Core --require-trusted-config only binds the config source to the base
+      # ref; it does not prove these bytes are unchanged in the candidate. Compare
+      # committed tree entries in a scratch bare repository without checking out
+      # or executing candidate code.
+      - name: Protect trusted Core governance inputs
+        shell: bash
+        timeout-minutes: 10
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          for sha in "$BASE_SHA" "$HEAD_SHA"; do
+            if ! [[ "$sha" =~ ^[0123456789abcdef]{40}$ ]]; then
+              echo "NEXUS_CORE_TRUSTED_INPUT_SHA_INVALID: $sha" >&2
+              exit 1
+            fi
+          done
+          scratch="$RUNNER_TEMP/nexus-core-governance-inputs.git"
+          rm -rf "$scratch"
+          git init --quiet --bare "$scratch"
+          git -C "$scratch" fetch --quiet --no-tags --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$BASE_SHA" "$HEAD_SHA"
+          changed=""
+          for path in ".github/workflows/nexus-core-issue-completion.yml" ".nexus-core/config.toml"; do
+            base_entry="$(git -C "$scratch" ls-tree --full-tree "$BASE_SHA^{commit}" -- "$path")"
+            if [ -z "$base_entry" ]; then
+              echo "NEXUS_CORE_TRUSTED_INPUT_BASE_MISSING: $path" >&2
+              exit 1
+            fi
+            head_entry="$(git -C "$scratch" ls-tree --full-tree "$HEAD_SHA^{commit}" -- "$path")"
+            if [ "$head_entry" != "$base_entry" ]; then
+              changed="${changed:+$changed, }$path"
+            fi
+          done
+          if [ -n "$changed" ]; then
+            echo "NEXUS_CORE_GOVERNANCE_INPUT_CHANGED: $changed" >&2
+            exit 1
+          fi
+
+      - name: Issue signed Nexus Core receipt
+        id: gate
+        uses: James3014/nexus-core/.github/actions/issue-gate@076845b3c69dfb90256a422449fb6318522104ba
+        with:
+          nexus-certify-ref: 076845b3c69dfb90256a422449fb6318522104ba
+
+  verify:
+    name: Nexus Core issue completion
+    needs: run
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # A skipped job satisfies a required check, so fork, cross-repository and
+      # failed-issuer cases must run here and fail rather than skip.
+      - name: Require same-repository pull request and successful issuer
+        shell: bash
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          RUN_RESULT: ${{ needs.run.result }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_IS_FORK" != "false" ]; then
+            echo "NEXUS_CORE_UNTRUSTED_PR_SOURCE: $HEAD_REPOSITORY" >&2
+            exit 1
+          fi
+          if [ "$RUN_RESULT" != "success" ]; then
+            echo "NEXUS_CORE_ISSUER_NOT_SUCCESSFUL: $RUN_RESULT" >&2
+            exit 1
+          fi
+
+      - name: Verify signed Nexus Core receipt
+        uses: James3014/nexus-core/.github/actions/receipt-verify@076845b3c69dfb90256a422449fb6318522104ba
+        with:
+          artifact-name: ${{ needs.run.outputs.artifact-name }}
+          expected-identity: https://github.com/James3014/nexus-opencli-reviewer/.github/workflows/nexus-core-issue-completion.yml@refs/heads/main
+          github-repository: ${{ github.repository }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          issue-number: ${{ needs.run.outputs.issue-number }}
+          nexus-certify-ref: 076845b3c69dfb90256a422449fb6318522104ba
