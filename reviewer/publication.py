@@ -25,6 +25,7 @@ class PublicationError(RuntimeError):
 
 
 class PublicationTransport(Protocol):
+    def get_authenticated_login(self) -> str: ...
     def create_comment(self, repo: str, pr_number: int, body: str) -> dict[str, Any]: ...
     def list_comments(self, repo: str, pr_number: int) -> list[dict[str, Any]]: ...
 
@@ -148,7 +149,28 @@ def _stable_attempt_id(receipt: dict[str, Any]) -> str:
     return hashlib.sha256(material).hexdigest()[:32]
 
 
-def _matches(comment: dict[str, Any], marker: str) -> bool:
+def _sidecar_login(transport: Any) -> str:
+    """Return the GitHub login this sidecar publishes as.
+
+    Only comments authored by this login can prove a prior publication; a
+    marker string alone is quoted/forgeable by any other commenter.
+    """
+    getter = getattr(transport, "get_authenticated_login", None)
+    if not callable(getter):
+        raise PublicationError("PUBLICATION_IDENTITY_UNAVAILABLE")
+    try:
+        login = getter()
+    except Exception as exc:
+        raise PublicationError("PUBLICATION_IDENTITY_UNAVAILABLE") from exc
+    if type(login) is not str or not login:
+        raise PublicationError("PUBLICATION_IDENTITY_UNAVAILABLE")
+    return login
+
+
+def _matches(comment: dict[str, Any], marker: str, login: str) -> bool:
+    author = comment.get("user")
+    if not isinstance(author, dict) or author.get("login") != login:
+        return False
     return marker in str(comment.get("body", ""))
 
 
@@ -205,7 +227,7 @@ def _finalize(root: str | Path, attempt: dict[str, Any], comment: dict[str, Any]
     return path
 
 
-def _reconcile_attempt(root: str | Path, transport: PublicationTransport, attempt: dict[str, Any]) -> Path:
+def _reconcile_attempt(root: str | Path, transport: PublicationTransport, attempt: dict[str, Any], login: str) -> Path:
     if (attempt.get("schema") != "reviewer.publication_attempt.v1"
             or attempt.get("state") not in {"DISPATCHING", "OUTCOME_UNKNOWN"}
             or attempt.get("retry_safe") is not False
@@ -218,7 +240,7 @@ def _reconcile_attempt(root: str | Path, transport: PublicationTransport, attemp
         raise PublicationError("PUBLICATION_REBIND_REQUIRED")
     marker = f"reviewer-publication-v1:{attempt['publication_attempt_id']}:{attempt['content_hash']}"
     comments = transport.list_comments(attempt["repository"], attempt["pr_number"])
-    matches = [comment for comment in comments if _matches(comment, marker)]
+    matches = [comment for comment in comments if _matches(comment, marker, login)]
     if len(matches) > 1:
         raise PublicationError("PUBLICATION_DUPLICATE_DETECTED")
     if not matches:
@@ -229,6 +251,7 @@ def _reconcile_attempt(root: str | Path, transport: PublicationTransport, attemp
 def publish_review(root: str | Path, transport: PublicationTransport, receipt: dict[str, Any], *, attempt_id: str | None = None) -> Path:
     """Publish one eligible receipt, or reconcile an unfinished publication."""
     identity = _validate_receipt(receipt)
+    login = _sidecar_login(transport)
     # Normal re-runs must address the same operation.  An explicit id is only
     # for recovery/tests; the product path uses this deterministic id.
     attempt_id = attempt_id or _stable_attempt_id(receipt)
@@ -240,7 +263,7 @@ def publish_review(root: str | Path, transport: PublicationTransport, receipt: d
             raise PublicationError("PUBLICATION_REBIND_REQUIRED")
         marker = f"reviewer-publication-v1:{attempt_id}:{content_hash}"
         matches = [comment for comment in transport.list_comments(identity[0], identity[1])
-                   if _matches(comment, marker)]
+                   if _matches(comment, marker, login)]
         if len(matches) > 1:
             raise PublicationError("PUBLICATION_DUPLICATE_DETECTED")
         if not matches:
@@ -262,7 +285,7 @@ def publish_review(root: str | Path, transport: PublicationTransport, receipt: d
                 or attempt.get("claim_ceiling") != "PRE_REVIEW_ONLY"):
             raise PublicationError("PUBLICATION_ATTEMPT_ID_COLLISION")
         if attempt.get("state") == "DISPATCHING":
-            return _reconcile_attempt(root, transport, attempt)
+            return _reconcile_attempt(root, transport, attempt, login)
         if attempt.get("state") in {"OUTCOME_UNKNOWN", "COMPLETED", "FAILED"}:
             raise PublicationError("PUBLICATION_RECONCILIATION_REQUIRED")
         if attempt.get("state") != "PREPARED" or attempt.get("retry_safe") is not True:
@@ -283,7 +306,7 @@ def publish_review(root: str | Path, transport: PublicationTransport, receipt: d
     _atomic_json(path, attempt)
     marker = f"reviewer-publication-v1:{attempt_id}:{content_hash}"
     comments = transport.list_comments(identity[0], identity[1])
-    matches = [comment for comment in comments if _matches(comment, marker)]
+    matches = [comment for comment in comments if _matches(comment, marker, login)]
     if len(matches) > 1:
         raise PublicationError("PUBLICATION_DUPLICATE_DETECTED")
     if matches:
@@ -300,11 +323,11 @@ def publish_review(root: str | Path, transport: PublicationTransport, receipt: d
         _atomic_json(path, attempt)
         raise PublicationError("PUBLICATION_RECONCILIATION_REQUIRED") from exc
     if not comment:
-        return _reconcile_attempt(root, transport, attempt)
+        return _reconcile_attempt(root, transport, attempt, login)
     # Always read back the exact marker after a successful response.  This
     # keeps a transport response from being mistaken for durable GitHub state.
     try:
-        readback = [c for c in transport.list_comments(identity[0], identity[1]) if _matches(c, marker)]
+        readback = [c for c in transport.list_comments(identity[0], identity[1]) if _matches(c, marker, login)]
     except Exception as exc:
         attempt["state"] = "OUTCOME_UNKNOWN"
         attempt["error"] = type(exc).__name__
@@ -323,4 +346,4 @@ def reconcile_publication(root: str | Path, transport: PublicationTransport, att
         attempt = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         raise PublicationError("PUBLICATION_ATTEMPT_NOT_FOUND") from exc
-    return _reconcile_attempt(root, transport, attempt)
+    return _reconcile_attempt(root, transport, attempt, _sidecar_login(transport))

@@ -210,6 +210,12 @@ class GhCliTransport:
     def list_comments(self, repo, pr_number):
         self._validate(repo)
         return self._paginate(f'repos/{repo}/issues/{int(pr_number)}/comments')
+    def get_authenticated_login(self):
+        # The same credential that authors publication comments.
+        value=self._get('user')
+        login=value.get('login') if isinstance(value,dict) else None
+        if type(login) is not str or not login: raise GitHubError('authenticated login unavailable')
+        return login
     def get_issue(self,repo,number): self._validate(repo); return self._get(f'repos/{repo}/issues/{int(number)}')
     def get_file(self,repo,path,ref):
         self._validate(repo); value=self._get(f'repos/{repo}/contents/{path}',ref=ref)
