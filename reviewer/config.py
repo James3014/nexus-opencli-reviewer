@@ -63,6 +63,9 @@ class ReviewerConfig:
     state_root: Path = DEFAULT_STATE_ROOT
     log_path: Path = DEFAULT_LOG_PATH
     opencli_executable: str = "opencli"
+    # Protected-path (authority) patterns for the reviewer scan.  Empty by
+    # default, matching README; an operator opts in explicitly.
+    authority_patterns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         repos = tuple(str(r).strip() for r in self.repositories)
@@ -87,6 +90,12 @@ class ReviewerConfig:
         object.__setattr__(self, "log_path", _safe_path(self.log_path, "log_path"))
         if not str(self.opencli_executable).strip():
             raise ConfigError("opencli_executable must not be empty")
+        raw_patterns = self.authority_patterns
+        if isinstance(raw_patterns, (str, bytes)) or not isinstance(raw_patterns, (list, tuple)):
+            raise ConfigError("authority_patterns must be a list of strings")
+        if any(type(p) is not str or not p.strip() for p in raw_patterns):
+            raise ConfigError("authority_patterns entries must be non-empty strings")
+        object.__setattr__(self, "authority_patterns", tuple(p.strip() for p in raw_patterns))
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ReviewerConfig":
@@ -115,6 +124,7 @@ class ReviewerConfig:
             state_root=raw.get("state_root", DEFAULT_STATE_ROOT),
             log_path=raw.get("log_path", DEFAULT_LOG_PATH),
             opencli_executable=raw.get("opencli_executable", "opencli"),
+            authority_patterns=raw.get("authority_patterns", ()),
         )
 
     @classmethod
@@ -136,6 +146,7 @@ class ReviewerConfig:
             "state_root": str(self.state_root),
             "log_path": str(self.log_path),
             "opencli_executable": self.opencli_executable,
+            "authority_patterns": list(self.authority_patterns),
         }
 
 
