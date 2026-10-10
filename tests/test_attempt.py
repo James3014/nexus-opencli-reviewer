@@ -61,6 +61,25 @@ def test_restart_reconciliation_marks_prepared_and_dispatching_unknown(tmp_path)
     assert discover_unfinished(tmp_path) == []
 
 
+def test_corrupt_attempt_journal_fails_closed_in_discovery(tmp_path):
+    directory = tmp_path / "reviews" / "attempts"
+    directory.mkdir(parents=True)
+    (directory / "corrupt.json").write_text(
+        '{"schema":"reviewer.semantic_attempt.v1","state":"DISPATCHING"',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="INVALID_ATTEMPT_JOURNAL"):
+        discover_unfinished(tmp_path)
+    with pytest.raises(ValueError, match="INVALID_ATTEMPT_JOURNAL"):
+        discover_for_identity(
+            tmp_path,
+            ["o/r", 7, "head", "base", "main"],
+            context_pack_sha256="ctx",
+            prompt_sha256="prompt",
+        )
+
+
 def test_same_physical_identity_new_prompt_is_fresh(tmp_path):
     identity=["o/r",1,"h","b","m"]
     prepare_attempt(tmp_path,identity,"context","old",{},attempt_id="old")
