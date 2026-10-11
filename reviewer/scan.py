@@ -167,7 +167,10 @@ def persist(repo, main_sha, observed, items, queue, root='.reviewer-state'):
     _atomic_json(d/'latest-scan.json',{'repository':repo,'observed_at':observed,'current_main_sha':main_sha,'items':[x.to_dict() for x in items],'queue_identities':identities})
     queue.save(d/'queue-state.json')
     return d
-def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='.reviewer-state'):
+def scan(repo,transport,authority_patterns=(),persist_state=False,state_root='.reviewer-state'):
+    # Protected-path patterns are always explicit here; the wheel's classify()
+    # default is governance-specific and must not leak into the reviewer scan.
+    patterns=tuple(authority_patterns or ())
     transport.auth_preflight() if hasattr(transport,'auth_preflight') else None
     ref=transport.get_ref(repo,'main'); main_sha=ref['object']['sha']; observed=utc_now(); out=[]
     for raw in transport.list_open_prs(repo):
@@ -182,7 +185,7 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
             # affect its STALE disposition.  A later rebase to current main
             # automatically takes the full evidence path below.
             p=snapshot_from_github(repo,raw,main_sha,files,[],observed,errors)
-            out.append(classify(p,authority_patterns) if authority_patterns else classify(p))
+            out.append(classify(p,patterns))
             continue
         try:
             checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
@@ -203,7 +206,7 @@ def scan(repo,transport,authority_patterns=None,persist_state=False,state_root='
                         values[field]=row[field]
                 merged.append(CheckObservation(**values))
             p=replace(p, checks=tuple(merged))
-        out.append(classify(p,authority_patterns) if authority_patterns else classify(p))
+        out.append(classify(p,patterns))
     detect(out); q=ReviewQueue();q.ingest(out)
     if persist_state:persist(repo,main_sha,observed,out,q,state_root)
     return main_sha,observed,out,q

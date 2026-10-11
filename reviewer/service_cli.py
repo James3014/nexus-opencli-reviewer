@@ -592,7 +592,8 @@ def build_service(config: ReviewerConfig, repository: str, *, bootstrap_canary: 
     service_root = config.state_root / "unattended" / _safe_repo(repository)
 
     def discover():
-        _, _, items, _ = scan(repository, gh, persist_state=True, state_root=config.state_root)
+        _, _, items, _ = scan(repository, gh, persist_state=True, state_root=config.state_root,
+                              authority_patterns=config.authority_patterns)
         return items
 
     def review(identity):
