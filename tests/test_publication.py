@@ -30,6 +30,14 @@ def ci_evidence(head="h"):
     )
 
 
+SIDECAR = "sidecar-bot"
+
+
+def foreign(body, comment_id=90, login="someone-else"):
+    return {"id": comment_id, "body": body, "html_url": f"https://example/{comment_id}",
+            "user": {"login": login}}
+
+
 class Fake:
     def __init__(self, moved=False, fail=False):
         self.comments = []
@@ -38,6 +46,9 @@ class Fake:
         self.writes = 0
         self.main = "m"
         self.base = "b"
+
+    def get_authenticated_login(self):
+        return SIDECAR
 
     def get_pr(self, repo, number):
         return {"head": {"sha": "new" if self.moved else "h"}, "base": {"sha": self.base}}
@@ -51,9 +62,11 @@ class Fake:
     def create_comment(self, repo, number, body):
         self.writes += 1
         if self.fail:
-            self.comments.append({"id": 10, "body": body, "html_url": "https://example/10"})
+            self.comments.append({"id": 10, "body": body, "html_url": "https://example/10",
+                                  "user": {"login": SIDECAR}})
             raise TimeoutError("after write")
-        comment = {"id": 10 + self.writes, "body": body, "html_url": "https://example/10"}
+        comment = {"id": 10 + self.writes, "body": body, "html_url": "https://example/10",
+                   "user": {"login": SIDECAR}}
         self.comments.append(comment)
         return comment
 
@@ -115,7 +128,8 @@ def test_restart_dispatching_reconciles_existing_without_post(tmp_path):
         "publication_type": "COMMENT", "claim_ceiling": "PRE_REVIEW_ONLY",
         "state": "DISPATCHING", "retry_safe": False,
     }))
-    t.comments.append({"id": 19, "body": f"reviewer-publication-v1:{rid}:{content_hash}"})
+    t.comments.append({"id": 19, "body": f"reviewer-publication-v1:{rid}:{content_hash}",
+                       "user": {"login": SIDECAR}})
     p = publish_review(tmp_path, t, receipt(), attempt_id=rid)
     assert p.exists() and t.writes == 0
 
@@ -125,7 +139,8 @@ def test_multiple_matching_comments_fail_closed(tmp_path):
     rid = "dupe"
     content_hash, _ = _content_hash(receipt(), rid)
     marker = f"reviewer-publication-v1:{rid}:{content_hash}"
-    t.comments[:] = [{"id": 1, "body": marker}, {"id": 2, "body": marker}]
+    t.comments[:] = [{"id": 1, "body": marker, "user": {"login": SIDECAR}},
+                     {"id": 2, "body": marker, "user": {"login": SIDECAR}}]
     with pytest.raises(PublicationError, match="DUPLICATE"):
         publish_review(tmp_path, t, receipt(), attempt_id=rid)
     assert t.writes == 0
@@ -149,8 +164,72 @@ def test_attempt_id_collision_never_overwrites(tmp_path):
     assert t.writes == 1
 
 
+def _marker(rid, body_receipt=None):
+    content_hash, _ = _content_hash(body_receipt or receipt(), rid)
+    return f"reviewer-publication-v1:{rid}:{content_hash}"
+
+
+def test_foreign_comment_with_marker_is_not_treated_as_published(tmp_path):
+    t = Fake()
+    t.comments.append(foreign(_marker("forged")))
+    p = publish_review(tmp_path, t, receipt(), attempt_id="forged")
+    value = json.loads(p.read_text())
+    assert t.writes == 1
+    assert value["comment_id"] == 11
+    assert value["reconciliation_evidence"] == "write_then_readback"
+
+
+def test_multiple_foreign_marker_comments_do_not_trigger_duplicate(tmp_path):
+    t = Fake()
+    marker = _marker("forged-dupes")
+    t.comments[:] = [foreign(marker, 90), foreign(marker, 91, login="attacker")]
+    publish_review(tmp_path, t, receipt(), attempt_id="forged-dupes")
+    assert t.writes == 1
+
+
+def test_foreign_marker_alone_never_reconciles_dispatching_attempt(tmp_path):
+    t = Fake()
+    rid = "forged-dispatch"
+    content_hash, _ = _content_hash(receipt(), rid)
+    attempt_dir = tmp_path / "publication-attempts"
+    attempt_dir.mkdir()
+    (attempt_dir / f"{rid}.json").write_text(json.dumps({
+        "schema": "reviewer.publication_attempt.v1", "publication_attempt_id": rid,
+        "semantic_receipt_id": "x", "repository": "o/r", "pr_number": 7,
+        "review_identity": ["o/r", 7, "h", "b", "m"], "content_hash": content_hash,
+        "publication_type": "COMMENT", "claim_ceiling": "PRE_REVIEW_ONLY",
+        "state": "DISPATCHING", "retry_safe": False,
+    }))
+    t.comments.append(foreign(f"reviewer-publication-v1:{rid}:{content_hash}"))
+    with pytest.raises(PublicationError, match="RECONCILIATION"):
+        publish_review(tmp_path, t, receipt(), attempt_id=rid)
+    assert t.writes == 0
+    assert not (tmp_path / "publication-receipts" / f"{rid}.json").exists()
+
+
+def test_foreign_marker_does_not_satisfy_existing_receipt_readback(tmp_path):
+    t = Fake()
+    publish_review(tmp_path, t, receipt(), attempt_id="existing")
+    marker = _marker("existing")
+    t.comments[:] = [foreign(marker)]
+    with pytest.raises(PublicationError, match="RECONCILIATION"):
+        publish_review(tmp_path, t, receipt(), attempt_id="existing")
+    assert t.writes == 1
+
+
+def test_publication_fails_closed_without_sidecar_identity(tmp_path):
+    class NoIdentity(Fake):
+        get_authenticated_login = None
+
+    t = NoIdentity()
+    with pytest.raises(PublicationError, match="IDENTITY_UNAVAILABLE"):
+        publish_review(tmp_path, t, receipt(), attempt_id="no-identity")
+    assert t.writes == 0
+
+
 def test_missing_rebind_capabilities_fails_closed(tmp_path):
     class NoRebind:
+        def get_authenticated_login(self): return SIDECAR
         def list_comments(self, repo, number): return []
         def create_comment(self, repo, number, body): raise AssertionError("must not write")
     with pytest.raises(PublicationError, match="REBIND"):

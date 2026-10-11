@@ -61,6 +61,22 @@ def test_list_comments_collects_all_pages(monkeypatch):
     assert all(p["per_page"] == 100 for _, p in seen)
 
 
+def test_authenticated_login_reads_user_endpoint(monkeypatch):
+    transport = GhCliTransport()
+    seen = []
+    monkeypatch.setattr(transport, "_get", lambda endpoint, **params: seen.append(endpoint) or {"login": "james3014"})
+    assert transport.get_authenticated_login() == "james3014"
+    assert seen == ["user"]
+
+
+@pytest.mark.parametrize("value", [{}, {"login": ""}, {"login": 7}, []])
+def test_authenticated_login_fails_closed_on_missing_identity(monkeypatch, value):
+    transport = GhCliTransport()
+    monkeypatch.setattr(transport, "_get", lambda endpoint, **params: value)
+    with pytest.raises(GitHubError):
+        transport.get_authenticated_login()
+
+
 def test_comment_list_failure_fails_closed(monkeypatch):
     transport = GhCliTransport()
 
