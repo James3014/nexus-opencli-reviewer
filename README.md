@@ -230,6 +230,13 @@ Configuration is validated before a service starts. Repository values must be
 absolute local paths, and semantic concurrency is fixed at one. The config
 contains no GitHub credentials, cookies, prompts, or browser profile data.
 
+`authority_patterns` (default `[]`) lists protected-path patterns for the
+reviewer scan; a changed file matching one raises `AUTHORITY_OVERLAP` and risk
+`HIGH`. The default is empty and is never inherited from the vendored
+`repository_intelligence` package. To flag governance files such as
+`AGENTS.md` or `policy/`, set them explicitly, for example
+`"authority_patterns": ["AGENTS.md", "policy/"]`.
+
 Normal operation is unattended: keep the Mac user session and the logged-in
 Chrome/OpenCLI Browser Bridge available; the service discovers eligible PRs,
 reviews each exact identity once, publishes one advisory comment, and resumes
