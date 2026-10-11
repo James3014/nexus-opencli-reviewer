@@ -250,6 +250,36 @@ def run_cloud_bundle(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return bundle
 
 
+_READINESS_STALE_KEYS = (
+    "stale_base",
+    "stale_declared_base",
+    "stale_declared_head",
+    "stale_declared_main",
+    "stale_evidence",
+)
+
+
+def _readiness_is_coherent(result: Mapping[str, Any]) -> bool:
+    """Fail closed on REVIEW_READY claims that are not derivable from identity/completeness.
+
+    Verification only (mirrors the canonical engine's is_review_ready derivation);
+    it makes no readiness decision.
+    """
+    identity = result.get("identity")
+    if not isinstance(identity, Mapping):
+        return False
+    is_valid = identity.get("is_valid")
+    completeness = result.get("evidence_completeness")
+    if not isinstance(is_valid, bool) or not isinstance(completeness, str):
+        return False
+    ready = result.get("disposition") == "REVIEW_READY"
+    if result.get("is_review_ready") is not bool(is_valid and ready and completeness != "INCOMPLETE"):
+        return False
+    if ready and (not is_valid or any(identity.get(k) is not False for k in _READINESS_STALE_KEYS)):
+        return False
+    return True
+
+
 def verify_cloud_bundle(payload: Mapping[str, Any]) -> bool:
     if not isinstance(payload, Mapping):
         return False
@@ -307,6 +337,8 @@ def verify_cloud_bundle(payload: Mapping[str, Any]) -> bool:
         result = reports[name]["result"]
         if not isinstance(result, Mapping) or not identity_consistent(result.get("identity")):
             return False
+    if not _readiness_is_coherent(reports["readiness"]["result"]):
+        return False
 
     if not verify_ci_failure_intelligence_report(reports["cfi"]["result"]):
         return False

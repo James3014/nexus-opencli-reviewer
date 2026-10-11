@@ -1072,7 +1072,7 @@ def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monk
             disposition=Disposition.REVIEW_READY,
         )
 
-    from reviewer.receipt import build_ci_failure_evidence
+    from reviewer.receipt import build_ci_failure_evidence, compute_receipt_id
     ci = build_ci_failure_evidence(
         repository="repo", pr_number=1, base_sha="base", head_sha="head",
         current_main_sha="main", canonical_disposition="NOT_AVAILABLE",
@@ -1084,7 +1084,7 @@ def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monk
                  "job_identity": "44", "head_sha": "head"}])
     blocked_receipt = {
         "schema": "reviewer.pre_review.v1",
-        "receipt_id": "r1",
+        "receipt_id": compute_receipt_id(["repo", 1, "head", "base", "main"], "ctx", "prompt", None),
         "review_identity": ["repo", 1, "head", "base", "main"],
         "claim_ceiling": "PRE_REVIEW_ONLY",
         "context_pack_sha256": "ctx", "prompt_sha256": "prompt",

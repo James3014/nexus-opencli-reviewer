@@ -97,6 +97,35 @@ def test_cloud_bundle_rejects_rehashed_cross_report_identity_substitution():
     assert gha.verify_cloud_bundle(tampered) is False
 
 
+class _StaleBaseAPI(FakeGitHubAPI):
+    def get_json(self, path, params=None):
+        if path == "/repos/owner/repo/git/ref/heads/main":
+            return {"object": {"sha": "c" * 40}}
+        return super().get_json(path, params)
+
+
+def _rehash(bundle):
+    bundle["content_sha256"] = gha._hash_payload(bundle)
+    return bundle
+
+
+def test_cloud_bundle_rejects_rehashed_review_ready_on_stale_base():
+    """Issue #86: re-hashed REVIEW_READY with stale_base must not verify."""
+    bundle = gha.run_cloud_bundle(gha.collect_pr_snapshot(_StaleBaseAPI(), "owner/repo", 7))
+    readiness = bundle["reports"]["readiness"]["result"]
+    assert readiness["disposition"] == "STALE" and gha.verify_cloud_bundle(bundle) is True
+    forged = copy.deepcopy(bundle)
+    forged["reports"]["readiness"]["result"].update(
+        disposition="REVIEW_READY", is_review_ready=True, findings=[], reasons=[], evidence_gaps=[], risk="LOW")
+    assert gha.verify_cloud_bundle(_rehash(forged)) is False
+    flag_only = copy.deepcopy(bundle)
+    flag_only["reports"]["readiness"]["result"]["is_review_ready"] = True
+    assert gha.verify_cloud_bundle(_rehash(flag_only)) is False
+    invalid = gha.run_cloud_bundle(gha.collect_pr_snapshot(FakeGitHubAPI(), "owner/repo", 7))
+    invalid["reports"]["readiness"]["result"]["identity"]["is_valid"] = False
+    assert gha.verify_cloud_bundle(_rehash(invalid)) is False
+
+
 def test_action_metadata_never_checks_out_or_executes_pull_request_code():
     text = (Path(__file__).resolve().parent.parent / "action.yml").read_text(encoding="utf-8")
     assert "actions/checkout" not in text

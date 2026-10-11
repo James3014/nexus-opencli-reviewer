@@ -753,3 +753,60 @@ class TestIdentityAndClaimCeiling:
             result = tool_list_review_ready_prs("owner/repo", transport)
         for pr in result["review_ready_prs"]:
             assert pr["claim_ceiling"] == "PR_INTELLIGENCE_ONLY"
+
+
+class TestIssue86OriginHostContentTypeGuards:
+    """Issue #86: do_POST must reject non-loopback Host, foreign Origin, non-JSON Content-Type."""
+
+    def _post(self, headers):
+        class Boom:
+            calls: list = []
+
+            def __getattr__(self, name):
+                def f(*a, **k):
+                    Boom.calls.append(name)
+                    raise RuntimeError("transport reached: " + name)
+                return f
+
+        Boom.calls = []
+        with WebMCPServer(transport=Boom(), port=0) as server:
+            server.serve_in_thread()
+            conn = HTTPConnection("127.0.0.1", server.port)
+            conn.putrequest("POST", "/tool/inspect_pr", skip_host=True, skip_accept_encoding=True)
+            body = json.dumps({"repository": "victim/private", "pr_number": 1}).encode()
+            hdrs = {"Host": f"127.0.0.1:{server.port}", "Content-Type": "application/json",
+                    "Content-Length": str(len(body))}
+            hdrs.update(headers)
+            for k, v in hdrs.items():
+                if v is not None:
+                    conn.putheader(k, v)
+            conn.endheaders(body)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read()), list(Boom.calls)
+
+    def test_rebinding_host_foreign_origin_text_plain_never_reaches_transport(self):
+        status, data, calls = self._post({"Host": "attacker.example:80",
+                                          "Origin": "http://attacker.example",
+                                          "Content-Type": "text/plain"})
+        assert status == 403 and calls == []
+
+    def test_non_loopback_host_rejected(self):
+        status, data, calls = self._post({"Host": "attacker.example:80"})
+        assert (status, data["error"], calls) == (403, "HOST_NOT_LOOPBACK", [])
+
+    def test_foreign_origin_rejected(self):
+        status, data, calls = self._post({"Origin": "http://attacker.example"})
+        assert (status, data["error"], calls) == (403, "ORIGIN_NOT_ALLOWED", [])
+
+    def test_non_json_content_type_rejected(self):
+        status, data, calls = self._post({"Content-Type": "text/plain"})
+        assert (status, data["error"], calls) == (415, "CONTENT_TYPE_NOT_JSON", [])
+
+    def test_missing_content_type_rejected(self):
+        status, data, calls = self._post({"Content-Type": None})
+        assert (status, data["error"], calls) == (415, "CONTENT_TYPE_NOT_JSON", [])
+
+    def test_loopback_host_origin_and_json_charset_still_reach_transport(self):
+        status, data, calls = self._post({"Origin": "http://localhost:1234",
+                                          "Content-Type": "application/json; charset=utf-8"})
+        assert status == 500 and calls  # reached transport (stub raises)

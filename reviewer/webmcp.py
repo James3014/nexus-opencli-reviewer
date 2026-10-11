@@ -18,6 +18,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+from urllib.parse import urlsplit
 
 from .github import REPO_RE, GhCliTransport
 from repository_intelligence import (
@@ -30,6 +31,7 @@ from .scan import scan
 
 CLAIM_CEILING = PR_CLAIM_CEILING
 _BIND_HOST = "127.0.0.1"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 # ---------------------------------------------------------------------------
@@ -423,8 +425,38 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"error": "NOT_FOUND"})
 
+    @staticmethod
+    def _loopback_authority(value: str) -> bool:
+        """True when ``value`` (a Host header) names a loopback host."""
+        try:
+            parsed = urlsplit("//" + value)
+            hostname = parsed.hostname
+            parsed.port  # noqa: B018 - validates the port
+        except ValueError:
+            return False
+        return hostname in _LOOPBACK_HOSTS
+
+    def _request_origin_error(self) -> tuple[int, str] | None:
+        host = self.headers.get("Host")
+        if not host or not self._loopback_authority(host):
+            return 403, "HOST_NOT_LOOPBACK"
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            parsed = urlsplit(origin)
+            if (parsed.scheme != "http" or not parsed.netloc
+                    or not self._loopback_authority(parsed.netloc)):
+                return 403, "ORIGIN_NOT_ALLOWED"
+        media_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            return 415, "CONTENT_TYPE_NOT_JSON"
+        return None
+
     # noinspection PyPep8Naming
     def do_POST(self) -> None:  # noqa: N802
+        rejected = self._request_origin_error()
+        if rejected is not None:
+            self._send_json(rejected[0], {"error": rejected[1]})
+            return
         body = self._read_json_body()
         if body is None:
             self._send_json(400, {"error": "INVALID_JSON"})

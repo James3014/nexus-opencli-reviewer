@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from .render import render_advisory
 from .semantic import parse_response, SemanticParseError
-from .receipt import ci_failure_evidence_manifest
+from .receipt import ci_failure_evidence_manifest, receipt_id_matches
 
 
 class PublicationError(RuntimeError):
@@ -89,6 +89,8 @@ def _validate_receipt(receipt: dict[str, Any]) -> tuple[str, int, str, str, str]
         raise PublicationError("PUBLICATION_SEMANTIC_OUTCOME_INVALID")
     if not receipt.get("receipt_id") or not receipt.get("context_pack_sha256") or not receipt.get("prompt_sha256"):
         raise PublicationError("PUBLICATION_RECEIPT_IDENTITY_INCOMPLETE")
+    if not receipt_id_matches(receipt):
+        raise PublicationError("PUBLICATION_RECEIPT_ID_MISMATCH")
     if receipt.get("transport_result") != "REVIEW_COMPLETED" or receipt.get("parse_result") != "PARSED":
         raise PublicationError("PUBLICATION_REQUIRES_SEMANTIC_RESULT")
     result = receipt.get("semantic_result")
