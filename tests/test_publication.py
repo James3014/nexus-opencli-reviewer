@@ -3,13 +3,13 @@ import json
 import pytest
 
 from reviewer.publication import PublicationError, publish_review, reconcile_publication, _content_hash
-from reviewer.receipt import build_ci_failure_evidence
+from reviewer.receipt import build_ci_failure_evidence, compute_receipt_id
 
 
 def receipt(status="PASS"):
     return {
         "schema": "reviewer.pre_review.v1",
-        "receipt_id": "receipt-1",
+        "receipt_id": compute_receipt_id(["o/r", 7, "h", "b", "m"], "context", "prompt", None),
         "review_identity": ["o/r", 7, "h", "b", "m"],
         "claim_ceiling": "PRE_REVIEW_ONLY",
         "context_pack_sha256": "context", "prompt_sha256": "prompt",
@@ -319,3 +319,19 @@ def test_cfi_blocked_rejects_tampered_or_foreign_ci_evidence(tmp_path):
     missing_ci = receipt("BLOCKED")
     with pytest.raises(PublicationError):
         publish_review(tmp_path, Fake(), missing_ci, attempt_id="cfi-missing")
+
+
+def test_receipt_id_substitution_never_publishes(tmp_path):
+    """Issue #84: retargeted identity / edited semantic receipt with stale receipt_id is rejected."""
+    forged = receipt("FINDINGS")
+    forged["review_identity"] = ["o/r", 8, "h8", "b", "m"]
+    t = Fake()
+    with pytest.raises(PublicationError, match="PUBLICATION_RECEIPT_ID_MISMATCH"):
+        publish_review(tmp_path, t, forged, attempt_id="forged-id")
+    assert t.writes == 0
+
+    for field in ("context_pack_sha256", "prompt_sha256", "raw_response_sha256"):
+        tampered = receipt()
+        tampered[field] = "substituted"
+        with pytest.raises(PublicationError, match="PUBLICATION_RECEIPT_ID_MISMATCH"):
+            publish_review(tmp_path, Fake(), tampered, attempt_id="tamper-" + field)

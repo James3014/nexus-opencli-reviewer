@@ -7,7 +7,7 @@ from reviewer.classifier import classify
 from reviewer.scan import _ci_evidence_for
 
 from reviewer.receipt import (
-    persist_receipt, reusable_receipt, receipt_path,
+    persist_receipt, reusable_receipt, receipt_path, compute_receipt_id,
     build_ci_failure_evidence, ci_failure_evidence_manifest,
 )
 
@@ -18,6 +18,7 @@ IDENTITY = ["o/r", 7, "head", "base", "main"]
 def valid_receipt():
     return {
         "schema": "reviewer.pre_review.v1",
+        "receipt_id": compute_receipt_id(IDENTITY, "ctx-a", "prompt-a", None),
         "review_identity": list(IDENTITY),
         "context_pack_sha256": "ctx-a",
         "prompt_sha256": "prompt-a",
@@ -469,3 +470,14 @@ def test_incomplete_enrichment_drops_evidence_instead_of_raising():
     )
     assert _ci_evidence_for(Classification(snapshot=snapshot,
                                            disposition=Disposition.REVIEW_READY)) is None
+
+
+def test_reuse_rejects_receipt_id_that_does_not_bind_content(tmp_path):
+    """Issue #84: reusable_receipt recomputes receipt_id."""
+    for mutate in (lambda r: r.update(receipt_id="forged"),
+                   lambda r: r.pop("receipt_id"),
+                   lambda r: r.update(raw_response_sha256="substituted")):
+        record = valid_receipt()
+        mutate(record)
+        persist_receipt(tmp_path, record)
+        assert reusable_receipt(tmp_path, IDENTITY, context_sha256="ctx-a", prompt_sha256="prompt-a") is None
