@@ -611,10 +611,12 @@ def test_build_service_end_to_end_persists_receipts_and_deduplicates(monkeypatch
         def list_files(self, repo, number): return [{"filename": "src/example.py"}]
         def list_checks(self, repo, sha): return []
         def get_patch(self, repo, number): return "diff --git a/src/example.py b/src/example.py\n+1"
+        def get_authenticated_login(self): return "sidecar-bot"
         def list_comments(self, repo, number): return list(self.comments)
         def create_comment(self, repo, number, body):
             self.comment_writes += 1
             comment = {"id": self.comment_writes, "body": body,
+                       "user": {"login": "sidecar-bot"},
                        "html_url": f"https://example.test/comments/{self.comment_writes}"}
             self.comments.append(comment)
             return comment
@@ -1103,11 +1105,14 @@ def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monk
         def get_ref(self, repo, branch):
             return {"object": {"sha": "main"}}
 
+        def get_authenticated_login(self):
+            return "sidecar-bot"
+
         def list_comments(self, repo, number):
             return list(comments)
 
         def create_comment(self, repo, number, body):
-            comment = {"id": len(comments) + 1, "body": body}
+            comment = {"id": len(comments) + 1, "body": body, "user": {"login": "sidecar-bot"}}
             comments.append(comment)
             writes.append(body)
             return comment
