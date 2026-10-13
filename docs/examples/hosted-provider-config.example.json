@@ -1,0 +1,8 @@
+{
+  "endpoint_origin": "https://provider.example.invalid",
+  "api_key_env_var_name": "SYNTHETIC_PROVIDER_API_KEY",
+  "max_canary_quota": 1,
+  "allowed_hosts_whitelist": [
+    "provider.example.invalid"
+  ]
+}
