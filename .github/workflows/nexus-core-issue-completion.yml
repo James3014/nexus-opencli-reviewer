@@ -28,6 +28,8 @@ jobs:
     outputs:
       artifact-name: ${{ steps.gate.outputs.artifact-name }}
       issue-number: ${{ steps.gate.outputs.issue-number }}
+      artifact-id: ${{ steps.gate.outputs.artifact-id }}
+      outcome: ${{ steps.gate.outputs.outcome }}
     steps:
       # Core --require-trusted-config only binds the config source to the base
       # ref; it does not prove these bytes are unchanged in the candidate. Compare
@@ -70,9 +72,10 @@ jobs:
 
       - name: Issue signed Nexus Core receipt
         id: gate
-        uses: James3014/nexus-core/.github/actions/issue-gate@076845b3c69dfb90256a422449fb6318522104ba
+        uses: James3014/nexus-core/.github/actions/issue-gate@3f3dc38de7120b66f25eb246d22ef29d5d5971d9
         with:
-          nexus-certify-ref: 076845b3c69dfb90256a422449fb6318522104ba
+          nexus-certify-ref: 3f3dc38de7120b66f25eb246d22ef29d5d5971d9
+          evidence-universe: trusted-config
 
   verify:
     name: Nexus Core issue completion
@@ -83,6 +86,8 @@ jobs:
     permissions:
       contents: read
       actions: read
+      # PR_ALREADY_CLOSED_SKIPPED: receipt-verify re-reads the live PR.
+      pull-requests: read
     steps:
       # A skipped job satisfies a required check, so fork, cross-repository and
       # failed-issuer cases must run here and fail rather than skip.
@@ -104,12 +109,14 @@ jobs:
           fi
 
       - name: Verify signed Nexus Core receipt
-        uses: James3014/nexus-core/.github/actions/receipt-verify@076845b3c69dfb90256a422449fb6318522104ba
+        uses: James3014/nexus-core/.github/actions/receipt-verify@3f3dc38de7120b66f25eb246d22ef29d5d5971d9
         with:
           artifact-name: ${{ needs.run.outputs.artifact-name }}
+          artifact-id: ${{ needs.run.outputs.artifact-id }}
           expected-identity: https://github.com/James3014/nexus-opencli-reviewer/.github/workflows/nexus-core-issue-completion.yml@refs/heads/main
           github-repository: ${{ github.repository }}
           head-sha: ${{ github.event.pull_request.head.sha }}
           base-sha: ${{ github.event.pull_request.base.sha }}
           issue-number: ${{ needs.run.outputs.issue-number }}
-          nexus-certify-ref: 076845b3c69dfb90256a422449fb6318522104ba
+          gate-outcome: ${{ needs.run.outputs.outcome }}
+          nexus-certify-ref: 3f3dc38de7120b66f25eb246d22ef29d5d5971d9

@@ -26,7 +26,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "nexus-core-issue-completion.yml"
 CONFIG = ROOT / ".nexus-core" / "config.toml"
 REQUIRED_STATUS = "Nexus Core issue completion"
-CORE_SHA = "076845b3c69dfb90256a422449fb6318522104ba"
+CORE_SHA = "3f3dc38de7120b66f25eb246d22ef29d5d5971d9"
 ISSUE_GATE = f"James3014/nexus-core/.github/actions/issue-gate@{CORE_SHA}"
 RECEIPT_VERIFY = f"James3014/nexus-core/.github/actions/receipt-verify@{CORE_SHA}"
 SAME_REPOSITORY = (
@@ -113,11 +113,13 @@ def test_issuer_signs_only_through_trusted_issue_gate_for_same_repository_pull_r
         "name": "Issue signed Nexus Core receipt",
         "id": "gate",
         "uses": ISSUE_GATE,
-        "with": {"nexus-certify-ref": CORE_SHA},
+        "with": {"nexus-certify-ref": CORE_SHA, "evidence-universe": "trusted-config"},
     }
     assert job["outputs"] == {
         "artifact-name": "${{ steps.gate.outputs.artifact-name }}",
         "issue-number": "${{ steps.gate.outputs.issue-number }}",
+        "artifact-id": "${{ steps.gate.outputs.artifact-id }}",
+        "outcome": "${{ steps.gate.outputs.outcome }}",
     }
 
 
@@ -318,7 +320,8 @@ def test_consumer_always_runs_and_is_read_only_without_code_checkout() -> None:
     job = _workflow()["jobs"]["verify"]
     assert job["needs"] == "run"
     assert job["if"] == "always()"
-    assert job["permissions"] == {"contents": "read", "actions": "read"}
+    # pull-requests: read lets receipt-verify re-read the live PR for PR_ALREADY_CLOSED_SKIPPED.
+    assert job["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "read"}
     for step in job["steps"]:
         assert not str(step.get("uses", "")).startswith("actions/checkout@")
 
@@ -348,11 +351,13 @@ def test_consumer_verifies_with_trusted_receipt_verify_and_exact_bindings() -> N
     assert step["uses"] == RECEIPT_VERIFY
     assert step["with"] == {
         "artifact-name": "${{ needs.run.outputs.artifact-name }}",
+        "artifact-id": "${{ needs.run.outputs.artifact-id }}",
         "expected-identity": EXPECTED_IDENTITY,
         "github-repository": "${{ github.repository }}",
         "head-sha": "${{ github.event.pull_request.head.sha }}",
         "base-sha": "${{ github.event.pull_request.base.sha }}",
         "issue-number": "${{ needs.run.outputs.issue-number }}",
+        "gate-outcome": "${{ needs.run.outputs.outcome }}",
         "nexus-certify-ref": CORE_SHA,
     }
 
