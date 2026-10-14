@@ -26,7 +26,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "nexus-core-issue-completion.yml"
 CONFIG = ROOT / ".nexus-core" / "config.toml"
 REQUIRED_STATUS = "Nexus Core issue completion"
-CORE_SHA = "076845b3c69dfb90256a422449fb6318522104ba"
+CORE_SHA = "3f3dc38de7120b66f25eb246d22ef29d5d5971d9"
 ISSUE_GATE = f"James3014/nexus-core/.github/actions/issue-gate@{CORE_SHA}"
 RECEIPT_VERIFY = f"James3014/nexus-core/.github/actions/receipt-verify@{CORE_SHA}"
 SAME_REPOSITORY = (
@@ -113,7 +113,7 @@ def test_issuer_signs_only_through_trusted_issue_gate_for_same_repository_pull_r
         "name": "Issue signed Nexus Core receipt",
         "id": "gate",
         "uses": ISSUE_GATE,
-        "with": {"nexus-certify-ref": CORE_SHA},
+        "with": {"nexus-certify-ref": CORE_SHA, "evidence-universe": "trusted-config"},
     }
     assert job["outputs"] == {
         "artifact-name": "${{ steps.gate.outputs.artifact-name }}",
