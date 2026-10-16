@@ -1,6 +1,7 @@
 """Fail closed unless the vendored wheel matches provenance.json wheel_sha256.
 
 Usage: verify_vendored_wheel.py VENDOR_DIR
+Prints the verified wheel's absolute path on stdout.
 Exit 0 only when the wheel named by provenance exists and its sha256 matches.
 """
 from __future__ import annotations
@@ -33,7 +34,11 @@ def main(argv: list[str]) -> int:
         print("usage: verify_vendored_wheel.py VENDOR_DIR", file=sys.stderr)
         return 2
     try:
-        print("vendored wheel verified sha256=" + verify(Path(argv[1])))
+        vendor = Path(argv[1]).absolute()
+        digest = verify(vendor)
+        name = json.loads((vendor / PROVENANCE).read_text(encoding="utf-8"))["wheel_filename"]
+        print(f"vendored wheel verified sha256={digest}", file=sys.stderr)
+        print(vendor / name)  # stdout: only the verified wheel path; the action installs exactly this
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
