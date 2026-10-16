@@ -15,7 +15,8 @@ from pathlib import Path
 PROVENANCE = "repository-intelligence-engine.provenance.json"
 
 
-def verify(vendor: Path) -> str:
+def verify_wheel(vendor: Path) -> tuple[str, str]:
+    """Return (sha256, wheel_filename) from ONE read of provenance."""
     provenance = json.loads((vendor / PROVENANCE).read_text(encoding="utf-8"))
     name = provenance.get("wheel_filename")
     expected = provenance.get("wheel_sha256")
@@ -26,7 +27,11 @@ def verify(vendor: Path) -> str:
     actual = hashlib.sha256((vendor / name).read_bytes()).hexdigest()
     if not hmac.compare_digest(actual, expected.lower()):
         raise ValueError(f"VENDOR_WHEEL_SHA256_MISMATCH expected={expected} actual={actual}")
-    return actual
+    return actual, name
+
+
+def verify(vendor: Path) -> str:
+    return verify_wheel(vendor)[0]
 
 
 def main(argv: list[str]) -> int:
@@ -35,8 +40,7 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         vendor = Path(argv[1]).absolute()
-        digest = verify(vendor)
-        name = json.loads((vendor / PROVENANCE).read_text(encoding="utf-8"))["wheel_filename"]
+        digest, name = verify_wheel(vendor)  # single provenance read: no re-read between check and use
         print(f"vendored wheel verified sha256={digest}", file=sys.stderr)
         print(vendor / name)  # stdout: only the verified wheel path; the action installs exactly this
     except (OSError, ValueError) as exc:

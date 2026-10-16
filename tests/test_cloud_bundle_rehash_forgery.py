@@ -74,3 +74,34 @@ def test_genuine_bundle_flag_forgeries_rejected(forge):
     f = copy.deepcopy(b)
     forge(f)
     assert gha.verify_cloud_bundle(_rehash(f)) is False
+
+
+# --- cross-model review: the revision report must derive and agree too ---------
+
+
+def _revision_declares_head_others_hide_it(b):
+    rev = b["reports"]["revision"]["result"]
+    rev["declared_head_sha"] = "d" * 40
+    rev["stale_declared_head"] = True
+    rev["stale_evidence"] = True
+
+
+def _revision_stale_flag_flipped(b):
+    rev = b["reports"]["revision"]["result"]
+    rev["stale_base"] = not rev.get("stale_base")
+
+
+@pytest.mark.parametrize("forge", [_revision_declares_head_others_hide_it, _revision_stale_flag_flipped])
+def test_revision_report_identity_forgeries_rejected(forge):
+    for build in (_genuine, _stale):
+        b = build()
+        assert gha.verify_cloud_bundle(b) is True
+        forge(b)
+        assert gha.verify_cloud_bundle(_rehash(b)) is False
+
+
+def test_empty_and_none_declared_shas_are_equivalent_across_reports():
+    # RIE 0.1.0 keeps "" in the readiness identity where revision/cfi/eia carry None.
+    b = _genuine()
+    _ident(b, "readiness")["declared_base_sha"] = ""
+    assert gha.verify_cloud_bundle(_rehash(b)) is True

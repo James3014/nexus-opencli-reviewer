@@ -259,6 +259,9 @@ _READINESS_STALE_KEYS = (
 )
 
 
+_DECLARED_SHA_KEYS = ("declared_base_sha", "declared_head_sha", "declared_main_sha")
+
+
 def _identity_flags_derivable(identity: Mapping[str, Any]) -> bool:
     """Re-derive stale flags from the identity's own SHA fields (mirrors RIE core.py)."""
     base, main = identity.get("base_sha"), identity.get("current_main_sha")
@@ -358,9 +361,14 @@ def verify_cloud_bundle(payload: Mapping[str, Any]) -> bool:
     if not _readiness_is_coherent(reports["readiness"]["result"]):
         return False
     readiness_identity = reports["readiness"]["result"]["identity"]
-    for name in ("cfi", "eia"):
-        other = reports[name]["result"]["identity"]
+    # The revision report is itself a RevisionIdentity: it must derive and agree too,
+    # including the declared SHAs ("" and None are the same "not declared").
+    if not _identity_flags_derivable(revision_result):
+        return False
+    for other in (reports["cfi"]["result"]["identity"], reports["eia"]["result"]["identity"], revision_result):
         if any(other.get(k) != readiness_identity.get(k) for k in _READINESS_STALE_KEYS):
+            return False
+        if any((other.get(k) or None) != (readiness_identity.get(k) or None) for k in _DECLARED_SHA_KEYS):
             return False
         if not _identity_flags_derivable(other):
             return False
