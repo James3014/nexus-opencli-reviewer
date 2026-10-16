@@ -857,7 +857,8 @@ def test_reconcile_negative_cases_for_failed_attempts(monkeypatch, tmp_path):
 def test_apply_recovered_exact_key_hostile_cfi_lineage(tmp_path):
     # NOTE (Issue #75): this calls build_ci_failure_evidence directly with a
     # supplied NEW_REGRESSION disposition; it does NOT exercise the scan path,
-    # which always passes NOT_AVAILABLE (see reviewer/scan.py _ci_evidence_for).
+    # which derives the disposition from a base comparison (see
+    # reviewer/scan.py _ci_evidence_for and tests/test_ci_baseline_comparison.py).
     from reviewer.receipt import build_ci_failure_evidence
     from reviewer.unattended import UnattendedReviewService
     identity = ["James3014/Nexus-new", 7, "h", "b", "m"]

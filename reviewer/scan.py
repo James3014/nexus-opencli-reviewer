@@ -122,7 +122,108 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
         enriched.append(row)
     return enriched, errors
 
-def _ci_evidence_for(classification):
+# Only these conclusions are code-regression evidence.  ``cancelled`` (e.g. a
+# superseded run) and ``action_required`` (approval gate) are terminal but say
+# nothing about the code, so they never feed NEW_REGRESSION or baseline debt.
+_REGRESSION_CONCLUSIONS={'failure','failed','error','timed_out'}
+
+def _base_slug(row):
+    slug=row.get('app_slug')
+    if not slug and isinstance(row.get('app'),dict):
+        slug=row['app'].get('slug')
+    return slug if isinstance(slug,str) and slug else None
+
+def _name_key(name):
+    # GitHub treats check-run names case-insensitively.
+    return name.casefold() if isinstance(name,str) and name else None
+
+def _base_workflow_gap(snapshot, check, row, transport):
+    """Return None when the base check provably comes from the same workflow
+    as the failing head check, else a gap.  Costs one more read, and is only
+    paid for a check that would otherwise be a NEW_REGRESSION."""
+    head_workflow=check.get('workflow_name')
+    if not isinstance(head_workflow,str) or not head_workflow:
+        return 'baseline: head workflow identity unavailable'
+    suite=row.get('check_suite') if isinstance(row.get('check_suite'),dict) else {}
+    suite_id=row.get('check_suite_id') or suite.get('id')
+    if type(suite_id) is not int or suite_id<=0 or not hasattr(transport,'list_workflow_runs_for_suite'):
+        return 'baseline: base workflow identity unavailable'
+    try:
+        runs=transport.list_workflow_runs_for_suite(snapshot.repository,suite_id)
+    except Exception as exc:
+        return f'baseline: base workflow lookup failed: {type(exc).__name__}'
+    if not isinstance(runs,list):
+        return 'baseline: base workflow lookup failed: invalid response'
+    exact=[r for r in runs if isinstance(r,dict) and r.get('head_sha')==snapshot.base_sha]
+    if len(exact)!=1 or not isinstance(exact[0].get('name'),str):
+        return 'baseline: base workflow identity unavailable'
+    if exact[0]['name']!=head_workflow:
+        return 'baseline: base check is from a different workflow'
+    return None
+
+def _baseline_disposition(snapshot, failed, transport):
+    """Compare failing head checks with same-named checks on the PR base.
+
+    A head failure is a NEW_REGRESSION only when exactly one check with the
+    same name (case-insensitive), the same app and the same workflow completed
+    successfully on the base commit.  Returns (disposition, gaps).  Never
+    raises; any gap -> NOT_AVAILABLE."""
+    try:
+        if not snapshot.base_sha or snapshot.base_sha!=snapshot.current_main_sha:
+            return 'NOT_AVAILABLE',['baseline: PR base is not current main']
+        if transport is None or not hasattr(transport,'list_checks'):
+            return 'NOT_AVAILABLE',['baseline: transport unavailable']
+        try:
+            rows=transport.list_checks(snapshot.repository,snapshot.base_sha)
+        except Exception as exc:
+            return 'NOT_AVAILABLE',[f'baseline: check lookup failed: {type(exc).__name__}']
+        if not isinstance(rows,list) or not all(isinstance(r,dict) for r in rows):
+            return 'NOT_AVAILABLE',['baseline: check lookup failed: invalid response']
+        gaps=[]; regression=False
+        head_names=[_name_key(c.name) for c in snapshot.checks]
+        for check in failed:
+            key=_name_key(check.get('name'))
+            # A rerun or a second run with the same name on the head (e.g. a
+            # later success or a run still in progress) means the failure is
+            # not the current head result; never compare it.
+            if key is None or head_names.count(key)!=1:
+                gaps.append('baseline: multiple same-name checks on head'); continue
+            if str(check.get('status') or '').lower() not in _REGRESSION_CONCLUSIONS:
+                gaps.append('baseline: head failure is not a regression signal'); continue
+            slug=check.get('app_slug')
+            if not isinstance(slug,str) or not slug:
+                gaps.append('baseline: head check app identity unavailable'); continue
+            named=[r for r in rows if _name_key(r.get('name'))==key]
+            matches=[r for r in named if _base_slug(r)==slug]
+            if not matches:
+                gaps.append('baseline: no same-name check on base'); continue
+            if len(named)>1:
+                gaps.append('baseline: ambiguous same-name checks on base'); continue
+            row=matches[0]
+            if row.get('head_sha')!=snapshot.base_sha:
+                gaps.append('baseline: foreign base check head identity'); continue
+            conclusion=row.get('conclusion'); status=row.get('status')
+            conclusion=conclusion.lower() if isinstance(conclusion,str) else conclusion
+            status=status.lower() if isinstance(status,str) else status
+            # A base row must say it is completed; a missing status is never
+            # read as completed.
+            if not conclusion or status!='completed':
+                gaps.append('baseline: same-name check on base still pending')
+            elif conclusion=='success':
+                gap=_base_workflow_gap(snapshot,check,row,transport)
+                if gap: gaps.append(gap)
+                else: regression=True
+            elif conclusion in _REGRESSION_CONCLUSIONS:
+                pass
+            else:
+                gaps.append('baseline: same-name check on base inconclusive')
+        gaps=list(dict.fromkeys(gaps))
+        if gaps: return 'NOT_AVAILABLE',gaps
+        return ('NEW_REGRESSION' if regression else 'EXACT_BASELINE_DEBT'),[]
+    except Exception as exc:
+        return 'NOT_AVAILABLE',[f'baseline: check lookup failed: {type(exc).__name__}']
+
+def _ci_evidence_for(classification, transport=None):
     from .receipt import build_ci_failure_evidence, ci_failure_evidence_manifest
     snapshot=classification.snapshot
     failed=[asdict(x) for x in snapshot.checks
@@ -130,21 +231,22 @@ def _ci_evidence_for(classification):
     if not failed:
         return None
     selected=failed[0]
+    disposition,baseline_gaps=_baseline_disposition(snapshot,failed,transport)
     try:
         capsule=build_ci_failure_evidence(
             repository=snapshot.repository, pr_number=snapshot.pr_number,
             base_sha=snapshot.base_sha, head_sha=snapshot.head_sha,
             current_main_sha=snapshot.current_main_sha, checks=failed,
             collection_complete=snapshot.collection_complete,
-            collection_errors=snapshot.collection_errors,
+            collection_errors=list(snapshot.collection_errors)+baseline_gaps,
             expected_check_run_id=selected.get('check_run_id'),
             expected_run_id=selected.get('run_id'),
             expected_artifact_identity=selected.get('artifact_identity'),
-            # Issue #75: the scan has no baseline source (no exact-base/main
-            # comparison), so it cannot supply NEW_REGRESSION or
-            # CI_BOOTSTRAP_DEFECT.  NOT_AVAILABLE therefore keeps every
-            # production capsule UNKNOWN; TRIGGERED is unreachable on this path.
-            canonical_disposition='NOT_AVAILABLE')
+            # Issue #75: canonical disposition comes from comparing each failing
+            # head check with the same-named check on the PR base (== current
+            # main); any missing/ambiguous/pending/failed lookup stays
+            # NOT_AVAILABLE (UNKNOWN capsule) with a 'baseline: ...' gap.
+            canonical_disposition=disposition)
         # Fail closed: an evidence capsule that cannot pass its own manifest
         # is never bound to a receipt.  This must never discard an already
         # completed semantic result with a post-invocation ValueError.
@@ -196,6 +298,14 @@ def scan(repo,transport,authority_patterns=(),persist_state=False,state_root='.r
             checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
             checks, enrichment_errors=_collect_check_evidence(
                 repo, checks, transport, raw.get('head',{}).get('sha',''))
+            # GitHub check-runs carry the app as ``app.slug``; surface it as
+            # ``app_slug`` so the baseline comparison (Issue #75) can require
+            # the same app on the base, not just the same name.
+            for row in checks:
+                if isinstance(row,dict) and not row.get('app_slug'):
+                    slug=(row.get('app') or {}).get('slug') if isinstance(row.get('app'),dict) else None
+                    if isinstance(slug,str) and slug:
+                        row['app_slug']=slug
             errors.extend(enrichment_errors)
         except Exception as e: checks=[]; errors.append(f'checks: {e}')
         p=snapshot_from_github(repo,raw,main_sha,files,checks,observed,errors)
@@ -327,7 +437,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
             'claim_ceiling':'PRE_REVIEW_ONLY','retry_safe':False})
         raise SemanticReviewError(f'{result.status} evidence={path}')
     receipt=make_receipt(context,current,result,prompt,observed,parsed,parse_result,
-                         ci_failure_evidence=_ci_evidence_for(current),
+                         ci_failure_evidence=_ci_evidence_for(current,transport),
                          query_evidence_identity=getattr(context, 'query_evidence_identity', None))
     path=persist_receipt(state_root,receipt)
     return receipt,path
