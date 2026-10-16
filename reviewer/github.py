@@ -7,7 +7,12 @@ from typing import Any, Protocol
 REPO_RE=re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
 READ_TIMEOUTS=(30,15)
 class GitHubError(RuntimeError): pass
+def default_branch(transport, repo):
+    """Repository default branch; 'main' only for transports (test fakes) without the lookup."""
+    getter=getattr(transport,'get_default_branch',None)
+    return getter(repo) if callable(getter) else 'main'
 class GitHubTransport(Protocol):
+    def get_default_branch(self, repo:str)->str: ...
     def get_ref(self, repo:str, branch:str)->dict[str,Any]: ...
     def list_open_prs(self, repo:str)->list[dict[str,Any]]: ...
     def list_files(self, repo:str, number:int)->list[dict[str,Any]]: ...
@@ -98,6 +103,15 @@ class GhCliTransport:
             self._token=token
             return
         raise GitHubError(f'GitHub auth credential unavailable: {last_timeout}')
+    def get_default_branch(self,repo):
+        self._validate(repo)
+        cache=self.__dict__.setdefault('_default_branches',{})
+        if repo not in cache:
+            value=self._get(f'repos/{repo}')
+            name=value.get('default_branch') if isinstance(value,dict) else None
+            if not isinstance(name,str) or not name: raise GitHubError('repository default_branch unavailable')
+            cache[repo]=name
+        return cache[repo]
     def get_ref(self,repo,branch):
         self._validate(repo); return self._get(f'repos/{repo}/git/ref/heads/{branch}')
     def _paginate(self, endpoint):

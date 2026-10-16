@@ -295,9 +295,39 @@ def make_receipt(context, classification, transport, prompt, observed_at, parsed
     if query_ident:
         receipt['query_evidence_identity'] = dict(query_ident)
     return receipt
+def _history_dir(root, identity):
+    key=hashlib.sha256(json.dumps(list(identity),separators=(',',':')).encode()).hexdigest()
+    return Path(root)/'reviews'/'history'/key
+def _archive_bytes(directory, data):
+    """Immutably store ``data`` under its sha256; never replaces an existing file."""
+    directory.mkdir(parents=True,exist_ok=True)
+    target=directory/f'{hashlib.sha256(data).hexdigest()}.json'
+    if target.exists(): return target
+    fd,tmp=tempfile.mkstemp(prefix=f'.{target.name}.',dir=directory)
+    try:
+        with os.fdopen(fd,'wb') as f:
+            f.write(data); f.flush(); os.fsync(f.fileno())
+        try: os.link(tmp,target)  # atomic, fails if target exists (same content by construction)
+        except FileExistsError: pass
+    finally:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+    return target
 def persist_receipt(root, receipt):
-    p=receipt_path(root,tuple(receipt['review_identity']))
+    """Persist ``receipt`` as the identity's latest pointer AND immutably in history.
+
+    History is written first so a crash never loses the previous receipt; a
+    pre-existing latest file (e.g. from older code) is archived before it is
+    replaced.  History files are content-addressed and never overwritten.
+    """
+    identity=tuple(receipt['review_identity'])
+    p=receipt_path(root,identity)
     data=(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode()
+    history=_history_dir(root,identity)
+    try: previous=p.read_bytes()
+    except FileNotFoundError: previous=None
+    if previous is not None: _archive_bytes(history,previous)
+    _archive_bytes(history,data)
     fd,tmp=tempfile.mkstemp(prefix=f'.{p.name}.',dir=p.parent)
     try:
         with os.fdopen(fd,'wb') as f:

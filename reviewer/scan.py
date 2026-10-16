@@ -1,4 +1,4 @@
-from .github import GitHubError, utc_now
+from .github import GitHubError, utc_now, default_branch
 from .normalize import snapshot_from_github
 from .classifier import classify
 from .overlap import detect
@@ -167,12 +167,13 @@ def persist(repo, main_sha, observed, items, queue, root='.reviewer-state'):
     _atomic_json(d/'latest-scan.json',{'repository':repo,'observed_at':observed,'current_main_sha':main_sha,'items':[x.to_dict() for x in items],'queue_identities':identities})
     queue.save(d/'queue-state.json')
     return d
-def scan(repo,transport,authority_patterns=(),persist_state=False,state_root='.reviewer-state'):
+def scan(repo,transport,authority_patterns=(),persist_state=False,state_root='.reviewer-state',branch=None):
     # Protected-path patterns are always explicit here; the wheel's classify()
     # default is governance-specific and must not leak into the reviewer scan.
     patterns=tuple(authority_patterns or ())
     transport.auth_preflight() if hasattr(transport,'auth_preflight') else None
-    ref=transport.get_ref(repo,'main'); main_sha=ref['object']['sha']; observed=utc_now(); out=[]
+    branch=branch or default_branch(transport,repo)
+    ref=transport.get_ref(repo,branch); main_sha=ref['object']['sha']; observed=utc_now(); out=[]
     for raw in transport.list_open_prs(repo):
         errors=[]
         try: files=transport.list_files(repo,raw['number'])
@@ -216,7 +217,8 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
     from .semantic import parse_response,SemanticParseError
     from .attempt import (prepare_attempt, mark_dispatching, finish_attempt,
                           discover_for_identity, load_attempt, PREPARED, COMPLETED, FAILED, OUTCOME_UNKNOWN)
-    main_sha,observed,items,q=scan(repo,transport)
+    branch=default_branch(transport,repo)
+    main_sha,observed,items,q=scan(repo,transport,branch=branch)
     selected=next((x for x in items if x.snapshot.pr_number==pr_number),None)
     if selected is None or selected.disposition.value!='REVIEW_READY': raise ContextError('PR_NOT_REVIEW_READY')
     current=selected
@@ -230,7 +232,7 @@ def review_ready(repo,transport,pr_number,semantic_transport=None,patch_provider
     except ContextError: raise
     except Exception as e: raise ContextError('CONTEXT_INCOMPLETE') from e
     rebound=transport.get_pr(repo,pr_number) if hasattr(transport,'get_pr') else None
-    main_rebound=transport.get_ref(repo,'main')['object']['sha'] if hasattr(transport,'get_ref') else current.snapshot.current_main_sha
+    main_rebound=transport.get_ref(repo,branch)['object']['sha'] if hasattr(transport,'get_ref') else current.snapshot.current_main_sha
     if rebound is not None:
         identity=(repo,pr_number,(rebound.get('head') or {}).get('sha',''),(rebound.get('base') or {}).get('sha',''),main_rebound)
         if identity!=context.review_identity: raise ContextError('REVIEW_CONTEXT_STALE')
