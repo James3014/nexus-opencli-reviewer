@@ -10,10 +10,7 @@ IDENTITY = ["o/r", 7, "h", "b", "m"]
 
 
 def _id(semantic, parse="PARSED", transport="REVIEW_COMPLETED"):
-    try:
-        return compute_receipt_id(IDENTITY, "context", "prompt", None, semantic, parse, transport)
-    except TypeError:  # pre-fix signature (RED phase)
-        return compute_receipt_id(IDENTITY, "context", "prompt", None)
+    return compute_receipt_id(IDENTITY, "context", "prompt", None, semantic, parse, transport)
 
 
 def _receipt():
