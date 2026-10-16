@@ -46,6 +46,7 @@ def test_action_verifies_before_installing():
 
 # --- R85-A: install exactly the wheel whose sha256 was verified ---------------
 import hashlib
+import pytest
 import json
 import re
 
@@ -66,13 +67,13 @@ def _run_block():
     return re.sub(r"python3 -m pip install", "echo PIP_INSTALL", script)
 
 
-def _dry_run(tmp_path, mutate):
+def _dry_run(tmp_path, mutate, action_path=None):
     root = tmp_path / "action"
     (root / "scripts").mkdir(parents=True)
     shutil.copy(SCRIPT, root / "scripts" / SCRIPT.name)
     shutil.copytree(ROOT / "vendor", root / "vendor")
     mutate(root / "vendor")
-    env = {"GITHUB_ACTION_PATH": str(root), "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    env = {"GITHUB_ACTION_PATH": action_path(root) if action_path else str(root), "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
     r = subprocess.run(["bash", "-c", _run_block()], capture_output=True, text=True, env=env)
     return root, r
 
@@ -95,6 +96,8 @@ def test_action_dry_run_genuine_installs_verified_wheel(tmp_path):
 def test_action_never_installs_unverified_hardcoded_wheel_when_provenance_is_decoy(tmp_path):
     root, r = _dry_run(tmp_path, _decoy_with_tampered_hardcoded)
     tampered = (root / "vendor" / WHEEL).resolve()
+    assert r.returncode != 0
+    assert "PIP_INSTALL" not in r.stdout
     for line in r.stdout.splitlines():
         if "PIP_INSTALL" in line:
             installed = Path(line.split()[-1])
@@ -116,3 +119,21 @@ def test_action_dry_run_fails_step_when_verifier_fails(tmp_path):
 def test_verifier_prints_only_verified_wheel_path_on_stdout():
     r = _run(ROOT / "vendor")
     assert r.stdout.strip() == str((ROOT / "vendor" / WHEEL).resolve())
+
+
+@pytest.mark.parametrize(
+    "action_path",
+    [
+        lambda root: str(root) + "/",
+        lambda root: str(root.parent) + "/./" + root.name,
+        lambda root: str(root.parent) + "/./" + root.name + "/",
+    ],
+    ids=["trailing-slash", "dot-segment", "dot-segment-trailing-slash"],
+)
+def test_action_dry_run_genuine_installs_with_runner_style_action_path(tmp_path, action_path):
+    # `uses: ./` gives GITHUB_ACTION_PATH with "./" segments; the genuine wheel must still install.
+    root, r = _dry_run(tmp_path, lambda v: None, action_path)
+    assert r.returncode == 0, r.stderr
+    installs = [line for line in r.stdout.splitlines() if "PIP_INSTALL" in line]
+    assert len(installs) == 1
+    assert Path(installs[0].split()[-1]).resolve() == (root / "vendor" / WHEEL).resolve()

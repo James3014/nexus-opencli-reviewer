@@ -46,8 +46,10 @@ runs:
       run: |
         set -euo pipefail
         WHEEL="$(python3 "$GITHUB_ACTION_PATH/scripts/verify_vendored_wheel.py" "$GITHUB_ACTION_PATH/vendor")"
-        PINNED="$GITHUB_ACTION_PATH/vendor/repository_intelligence_engine-0.1.0-py3-none-any.whl"
-        if [[ "$WHEEL" != "$PINNED" ]]; then
+        # Compare canonical paths: GITHUB_ACTION_PATH may contain "./" or a trailing "/" (uses: ./).
+        WHEEL_CANON="$(cd "$(dirname "$WHEEL")" && pwd -P)/$(basename "$WHEEL")"
+        PINNED_CANON="$(cd "$GITHUB_ACTION_PATH/vendor" && pwd -P)/repository_intelligence_engine-0.1.0-py3-none-any.whl"
+        if [[ "$WHEEL_CANON" != "$PINNED_CANON" ]]; then
           echo "ERROR: provenance wheel does not match the pinned wheel path" >&2
           exit 1
         fi
