@@ -24,7 +24,7 @@ from .github import REPO_RE, GhCliTransport
 from .opencli import OpenCLITransport
 from .preflight import preflight_opencli
 from .publication import publish_review
-from .receipt import persist_receipt
+from .receipt import compute_receipt_id, persist_receipt
 from .runtime import RuntimeSupervisor
 from .scan import review_ready, scan, _ci_evidence_for
 from .semantic import SemanticParseError, parse_response
@@ -553,7 +553,7 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
                               "path": str(attempt_path)})
             continue
         raw_sha = hashlib.sha256(match[1].encode()).hexdigest()
-        receipt_id = hashlib.sha256(json.dumps({"identity": identity, "context": attempt["context_pack_sha256"], "prompt": attempt["prompt_sha256"], "raw": raw_sha}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        receipt_id = compute_receipt_id(identity, attempt["context_pack_sha256"], attempt["prompt_sha256"], raw_sha, parsed, "PARSED", "REVIEW_COMPLETED")
         ci_evidence = None
         if hasattr(getattr(item, "snapshot", None), "checks") and getattr(item.snapshot, "checks", None):
             try:

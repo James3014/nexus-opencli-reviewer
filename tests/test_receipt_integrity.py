@@ -15,10 +15,20 @@ from reviewer.receipt import (
 IDENTITY = ["o/r", 7, "head", "base", "main"]
 
 
+def _rid(record):
+    return compute_receipt_id(record["review_identity"], record["context_pack_sha256"], record["prompt_sha256"],
+                              None, record["semantic_result"], record["parse_result"], record["transport_result"])
+
+
 def valid_receipt():
+    record = _valid_receipt_body()
+    record["receipt_id"] = _rid(record)
+    return record
+
+
+def _valid_receipt_body():
     return {
         "schema": "reviewer.pre_review.v1",
-        "receipt_id": compute_receipt_id(IDENTITY, "ctx-a", "prompt-a", None),
         "review_identity": list(IDENTITY),
         "context_pack_sha256": "ctx-a",
         "prompt_sha256": "prompt-a",

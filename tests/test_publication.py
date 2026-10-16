@@ -7,9 +7,19 @@ from reviewer.receipt import build_ci_failure_evidence, compute_receipt_id
 
 
 def receipt(status="PASS"):
+    value = _receipt_body(status)
+    value["receipt_id"] = _rebind(value)
+    return value
+
+
+def _rebind(value):
+    return compute_receipt_id(value["review_identity"], value["context_pack_sha256"], value["prompt_sha256"],
+                              None, value["semantic_result"], value["parse_result"], value["transport_result"])
+
+
+def _receipt_body(status):
     return {
         "schema": "reviewer.pre_review.v1",
-        "receipt_id": compute_receipt_id(["o/r", 7, "h", "b", "m"], "context", "prompt", None),
         "review_identity": ["o/r", 7, "h", "b", "m"],
         "claim_ceiling": "PRE_REVIEW_ONLY",
         "context_pack_sha256": "context", "prompt_sha256": "prompt",
@@ -254,6 +264,7 @@ def test_tampered_semantic_shape_never_publishes(tmp_path):
     t=Fake(); value=receipt('FINDINGS')
     value['semantic_result']['findings']=[{'severity':'HIGH','category':'x','path':None,
         'evidence':'e','reason':'r'}]
+    value['receipt_id']=_rebind(value)  # keep the id valid so the shape check is what rejects it
     with pytest.raises(PublicationError,match='SEMANTIC_RESULT_INVALID'):
         publish_review(tmp_path,t,value)
     assert t.writes==0
