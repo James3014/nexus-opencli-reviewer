@@ -12,7 +12,8 @@ def _classification(base="base", main="base", checks=None):
     if checks is None:
         checks = [{"name": "CI", "conclusion": "failure", "id": 1, "run_id": 2,
                    "external_id": "artifact", "artifact_identity": "artifact",
-                   "head_sha": "head"}]
+                   "head_sha": "head", "app_slug": "github-actions",
+                   "workflow_name": "PR CI"}]
     return classify(snapshot_from_github(
         REPO, {"number": 7, "base": {"sha": base}, "head": {"sha": "head"}},
         main, [], checks))
@@ -20,12 +21,21 @@ def _classification(base="base", main="base", checks=None):
 
 def _row(name="CI", conclusion="success", status="completed", head_sha="base"):
     return {"name": name, "status": status, "conclusion": conclusion,
-            "head_sha": head_sha, "id": 99}
+            "head_sha": head_sha, "id": 99, "app": {"slug": "github-actions"},
+            "check_suite": {"id": 55}}
 
 
 class FakeTransport:
-    def __init__(self, result=None, exc=None):
+    def __init__(self, result=None, exc=None, runs=None, runs_exc=None):
         self.result, self.exc, self.calls = result, exc, []
+        self.runs = [{"id": 5, "head_sha": "base", "name": "PR CI"}] if runs is None else runs
+        self.runs_exc, self.suite_calls = runs_exc, []
+
+    def list_workflow_runs_for_suite(self, repo, suite_id):
+        self.suite_calls.append((repo, suite_id))
+        if self.runs_exc:
+            raise self.runs_exc
+        return self.runs
 
     def list_checks(self, repo, sha):
         self.calls.append((repo, sha))
@@ -118,7 +128,7 @@ def test_invalid_response():
 def _head(conclusion):
     return [{"name": "CI", "conclusion": conclusion, "id": 1, "run_id": 2,
              "external_id": "artifact", "artifact_identity": "artifact",
-             "head_sha": "head"}]
+             "head_sha": "head", "app_slug": "github-actions", "workflow_name": "PR CI"}]
 
 
 def test_cancelled_head_check_never_triggers_even_if_base_passes():
@@ -173,6 +183,7 @@ def test_hostile_base_rows_that_raise_fail_closed():
 
 def test_head_app_slug_requires_same_app_on_base():
     head = _head("failure"); head[0]["app_slug"] = "github-actions"
+    head[0]["app_slug"] = "github-actions"
     other = _row(); other["app"] = {"slug": "circleci"}
     _unknown(_ci_evidence_for(_classification(checks=head), FakeTransport([other])),
              "baseline: no same-name check on base")
@@ -183,8 +194,8 @@ def test_head_app_slug_requires_same_app_on_base():
 
 class _ScanTransport:
     """Real scan() path: head check from GitHub Actions, base rows supplied."""
-    def __init__(self, base_rows):
-        self.base_rows = base_rows
+    def __init__(self, base_rows, base_workflow="PR CI"):
+        self.base_rows, self.base_workflow = base_rows, base_workflow
 
     def get_ref(self, r, b): return {"object": {"sha": "m"}}
     def list_open_prs(self, r):
@@ -198,14 +209,17 @@ class _ScanTransport:
                      "check_suite": {"id": 11}, "head_sha": "h", "app": {"slug": "github-actions"}}]
         return self.base_rows
     def list_check_annotations(self, r, i): return []
-    def list_workflow_runs_for_suite(self, r, i): return [{"id": 9, "head_sha": "h"}]
-    def get_workflow_run(self, r, i): return {"id": 9, "name": "CI", "head_sha": "h"}
+    def list_workflow_runs_for_suite(self, r, i):
+        if i == 55:
+            return [{"id": 6, "head_sha": "m", "name": self.base_workflow}]
+        return [{"id": 9, "head_sha": "h"}]
+    def get_workflow_run(self, r, i): return {"id": 9, "name": "PR CI", "head_sha": "h"}
     def list_workflow_artifacts(self, r, i): return [{"id": 42, "name": "evidence"}]
 
 
 def _base(slug):
     return [{"name": "CI", "conclusion": "success", "status": "completed", "id": 5,
-             "head_sha": "m", "app": {"slug": slug}}]
+             "head_sha": "m", "app": {"slug": slug}, "check_suite": {"id": 55}}]
 
 
 def test_scan_path_end_to_end_triggers_only_for_same_app_base():
@@ -251,3 +265,64 @@ def test_head_rerun_with_same_name_never_compares_the_old_failure():
         capsule = _ci_evidence_for(_classification(checks=_head("failure") + [rerun]),
                                    FakeTransport([_row()]))
         _unknown(capsule, "baseline: multiple same-name checks on head")
+
+
+def test_head_without_app_identity_never_triggers():
+    head = _head("failure"); del head[0]["app_slug"]
+    _unknown(_ci_evidence_for(_classification(checks=head), FakeTransport([_row()])),
+             "baseline: head check app identity unavailable")
+
+
+def test_case_only_head_rerun_is_a_duplicate():
+    rerun = dict(_head("success")[0], name="ci", id=3)
+    _unknown(_ci_evidence_for(_classification(checks=_head("failure") + [rerun]),
+                              FakeTransport([_row()])),
+             "baseline: multiple same-name checks on head")
+
+
+def test_base_name_matches_case_insensitively():
+    assert _ci_evidence_for(_classification(), FakeTransport([_row(name="ci")]))["state"] == "TRIGGERED"
+
+
+def test_base_same_name_from_two_apps_is_ambiguous():
+    other = _row(); other["app"] = {"slug": "circleci"}
+    _unknown(_ci_evidence_for(_classification(), FakeTransport([_row(), other])),
+             "baseline: ambiguous same-name checks on base")
+
+
+def test_base_check_from_a_different_workflow_never_triggers():
+    t = FakeTransport([_row()], runs=[{"id": 5, "head_sha": "base", "name": "Main CI"}])
+    _unknown(_ci_evidence_for(_classification(), t),
+             "baseline: base check is from a different workflow")
+    assert t.suite_calls == [(REPO, 55)]
+
+
+def test_base_workflow_lookup_failures_fail_closed():
+    cases = [
+        (FakeTransport([_row()], runs_exc=RuntimeError("x")), "baseline: base workflow lookup failed: RuntimeError"),
+        (FakeTransport([_row()], runs={}), "baseline: base workflow lookup failed: invalid response"),
+        (FakeTransport([_row()], runs=[]), "baseline: base workflow identity unavailable"),
+        (FakeTransport([_row()], runs=[{"id": 5, "head_sha": "other", "name": "PR CI"}]),
+         "baseline: base workflow identity unavailable"),
+    ]
+    for t, gap in cases:
+        _unknown(_ci_evidence_for(_classification(), t), gap)
+    row = _row(); del row["check_suite"]
+    _unknown(_ci_evidence_for(_classification(), FakeTransport([row])),
+             "baseline: base workflow identity unavailable")
+    head = _head("failure"); del head[0]["workflow_name"]
+    _unknown(_ci_evidence_for(_classification(checks=head), FakeTransport([_row()])),
+             "baseline: head workflow identity unavailable")
+
+
+def test_workflow_lookup_is_not_paid_for_baseline_debt():
+    t = FakeTransport([_row(conclusion="failure")])
+    assert _ci_evidence_for(_classification(), t)["state"] == "CLEAR"
+    assert t.suite_calls == []
+
+
+def test_scan_path_different_workflow_never_triggers():
+    from reviewer.scan import scan
+    t = _ScanTransport(_base("github-actions"), base_workflow="Main CI")
+    _, _, items, _ = scan("o/r", t)
+    _unknown(_ci_evidence_for(items[0], t), "baseline: base check is from a different workflow")

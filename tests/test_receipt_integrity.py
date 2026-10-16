@@ -501,14 +501,20 @@ def test_scan_ci_evidence_operational_path_triggers_on_new_regression_against_ba
         "o/r", {"number": 7, "base": {"sha": "base"}, "head": {"sha": "head"}},
         "base", [], [{"name": "CI", "conclusion": "failure", "id": 1,
                        "run_id": 2, "external_id": "artifact",
-                       "artifact_identity": "artifact", "head_sha": "head"}],
+                       "artifact_identity": "artifact", "head_sha": "head",
+                       "app_slug": "github-actions", "workflow_name": "PR CI"}],
     )
 
     class T:
         def list_checks(self, repo, sha):
             assert (repo, sha) == ("o/r", "base")
             return [{"name": "CI", "status": "completed", "conclusion": "success",
-                     "head_sha": "base", "id": 99}]
+                     "head_sha": "base", "id": 99, "app": {"slug": "github-actions"},
+                     "check_suite": {"id": 55}}]
+
+        def list_workflow_runs_for_suite(self, repo, suite_id):
+            assert (repo, suite_id) == ("o/r", 55)
+            return [{"id": 5, "head_sha": "base", "name": "PR CI"}]
 
     capsule=_ci_evidence_for(classify(snapshot), T())
     assert capsule is not None

@@ -128,12 +128,46 @@ def _collect_check_evidence(repo, check_rows, transport, pr_head_sha):
 _REGRESSION_CONCLUSIONS={'failure','failed','error','timed_out'}
 
 def _base_slug(row):
-    return row.get('app_slug') or (row.get('app') or {}).get('slug')
+    slug=row.get('app_slug')
+    if not slug and isinstance(row.get('app'),dict):
+        slug=row['app'].get('slug')
+    return slug if isinstance(slug,str) and slug else None
+
+def _name_key(name):
+    # GitHub treats check-run names case-insensitively.
+    return name.casefold() if isinstance(name,str) and name else None
+
+def _base_workflow_gap(snapshot, check, row, transport):
+    """Return None when the base check provably comes from the same workflow
+    as the failing head check, else a gap.  Costs one more read, and is only
+    paid for a check that would otherwise be a NEW_REGRESSION."""
+    head_workflow=check.get('workflow_name')
+    if not isinstance(head_workflow,str) or not head_workflow:
+        return 'baseline: head workflow identity unavailable'
+    suite=row.get('check_suite') if isinstance(row.get('check_suite'),dict) else {}
+    suite_id=row.get('check_suite_id') or suite.get('id')
+    if type(suite_id) is not int or suite_id<=0 or not hasattr(transport,'list_workflow_runs_for_suite'):
+        return 'baseline: base workflow identity unavailable'
+    try:
+        runs=transport.list_workflow_runs_for_suite(snapshot.repository,suite_id)
+    except Exception as exc:
+        return f'baseline: base workflow lookup failed: {type(exc).__name__}'
+    if not isinstance(runs,list):
+        return 'baseline: base workflow lookup failed: invalid response'
+    exact=[r for r in runs if isinstance(r,dict) and r.get('head_sha')==snapshot.base_sha]
+    if len(exact)!=1 or not isinstance(exact[0].get('name'),str):
+        return 'baseline: base workflow identity unavailable'
+    if exact[0]['name']!=head_workflow:
+        return 'baseline: base check is from a different workflow'
+    return None
 
 def _baseline_disposition(snapshot, failed, transport):
     """Compare failing head checks with same-named checks on the PR base.
 
-    Returns (disposition, gaps).  Never raises; any gap -> NOT_AVAILABLE."""
+    A head failure is a NEW_REGRESSION only when exactly one check with the
+    same name (case-insensitive), the same app and the same workflow completed
+    successfully on the base commit.  Returns (disposition, gaps).  Never
+    raises; any gap -> NOT_AVAILABLE."""
     try:
         if not snapshot.base_sha or snapshot.base_sha!=snapshot.current_main_sha:
             return 'NOT_AVAILABLE',['baseline: PR base is not current main']
@@ -146,20 +180,24 @@ def _baseline_disposition(snapshot, failed, transport):
         if not isinstance(rows,list) or not all(isinstance(r,dict) for r in rows):
             return 'NOT_AVAILABLE',['baseline: check lookup failed: invalid response']
         gaps=[]; regression=False
-        head_names=[c.name for c in snapshot.checks]
+        head_names=[_name_key(c.name) for c in snapshot.checks]
         for check in failed:
+            key=_name_key(check.get('name'))
             # A rerun or a second run with the same name on the head (e.g. a
             # later success or a run still in progress) means the failure is
             # not the current head result; never compare it.
-            if head_names.count(check.get('name'))!=1:
+            if key is None or head_names.count(key)!=1:
                 gaps.append('baseline: multiple same-name checks on head'); continue
             if str(check.get('status') or '').lower() not in _REGRESSION_CONCLUSIONS:
                 gaps.append('baseline: head failure is not a regression signal'); continue
-            matches=[r for r in rows if r.get('name')==check.get('name')
-                     and (not check.get('app_slug') or _base_slug(r)==check.get('app_slug'))]
+            slug=check.get('app_slug')
+            if not isinstance(slug,str) or not slug:
+                gaps.append('baseline: head check app identity unavailable'); continue
+            named=[r for r in rows if _name_key(r.get('name'))==key]
+            matches=[r for r in named if _base_slug(r)==slug]
             if not matches:
                 gaps.append('baseline: no same-name check on base'); continue
-            if len(matches)>1:
+            if len(named)>1:
                 gaps.append('baseline: ambiguous same-name checks on base'); continue
             row=matches[0]
             if row.get('head_sha')!=snapshot.base_sha:
@@ -172,7 +210,9 @@ def _baseline_disposition(snapshot, failed, transport):
             if not conclusion or status!='completed':
                 gaps.append('baseline: same-name check on base still pending')
             elif conclusion=='success':
-                regression=True
+                gap=_base_workflow_gap(snapshot,check,row,transport)
+                if gap: gaps.append(gap)
+                else: regression=True
             elif conclusion in _REGRESSION_CONCLUSIONS:
                 pass
             else:
