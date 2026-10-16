@@ -45,8 +45,16 @@ runs:
         RI_REPORT_PATH: ${{ inputs.report-path }}
       run: |
         set -euo pipefail
-        python3 "$GITHUB_ACTION_PATH/scripts/verify_vendored_wheel.py" "$GITHUB_ACTION_PATH/vendor"
-        python3 -m pip install --no-deps --no-index "$GITHUB_ACTION_PATH/vendor/repository_intelligence_engine-0.1.0-py3-none-any.whl"
+        WHEEL="$(python3 "$GITHUB_ACTION_PATH/scripts/verify_vendored_wheel.py" "$GITHUB_ACTION_PATH/vendor")"
+        # Compare canonical paths: GITHUB_ACTION_PATH may contain "./" or a trailing "/" (uses: ./).
+        WHEEL_CANON="$(cd "$(dirname "$WHEEL")" && pwd -P)/$(basename "$WHEEL")"
+        PINNED_REL="vendor/repository_intelligence_engine-0.1.0-py3-none-any.whl"
+        PINNED_CANON="$(cd "$GITHUB_ACTION_PATH/$(dirname "$PINNED_REL")" && pwd -P)/$(basename "$PINNED_REL")"
+        if [[ "$WHEEL_CANON" != "$PINNED_CANON" ]]; then
+          echo "ERROR: provenance wheel does not match the pinned wheel path" >&2
+          exit 1
+        fi
+        python3 -m pip install --no-deps --no-index "$WHEEL"
         args=(--repository "$GITHUB_REPOSITORY" --output "$RI_REPORT_PATH")
         if [[ -n "$RI_PR_NUMBER" ]]; then
           args+=(--pr-number "$RI_PR_NUMBER")

@@ -259,6 +259,25 @@ _READINESS_STALE_KEYS = (
 )
 
 
+_DECLARED_SHA_KEYS = ("declared_base_sha", "declared_head_sha", "declared_main_sha")
+
+
+def _identity_flags_derivable(identity: Mapping[str, Any]) -> bool:
+    """Re-derive stale flags from the identity's own SHA fields (mirrors RIE core.py)."""
+    base, main = identity.get("base_sha"), identity.get("current_main_sha")
+    head = identity.get("head_sha")
+    expected = {
+        "stale_base": bool(base and main and base != main),
+        "stale_declared_base": bool(identity.get("declared_base_sha") and identity.get("declared_base_sha") != base),
+        "stale_declared_head": bool(identity.get("declared_head_sha") and identity.get("declared_head_sha") != head),
+        "stale_declared_main": bool(identity.get("declared_main_sha") and identity.get("declared_main_sha") != main),
+    }
+    expected["stale_evidence"] = (
+        expected["stale_declared_base"] or expected["stale_declared_head"] or expected["stale_declared_main"]
+    )
+    return all(identity.get(key) is value for key, value in expected.items())
+
+
 def _readiness_is_coherent(result: Mapping[str, Any]) -> bool:
     """Fail closed on REVIEW_READY claims that are not derivable from identity/completeness.
 
@@ -271,6 +290,8 @@ def _readiness_is_coherent(result: Mapping[str, Any]) -> bool:
     is_valid = identity.get("is_valid")
     completeness = result.get("evidence_completeness")
     if not isinstance(is_valid, bool) or not isinstance(completeness, str):
+        return False
+    if not _identity_flags_derivable(identity):
         return False
     ready = result.get("disposition") == "REVIEW_READY"
     if result.get("is_review_ready") is not bool(is_valid and ready and completeness != "INCOMPLETE"):
@@ -339,6 +360,18 @@ def verify_cloud_bundle(payload: Mapping[str, Any]) -> bool:
             return False
     if not _readiness_is_coherent(reports["readiness"]["result"]):
         return False
+    readiness_identity = reports["readiness"]["result"]["identity"]
+    # The revision report is itself a RevisionIdentity: it must derive and agree too,
+    # including the declared SHAs ("" and None are the same "not declared").
+    if not _identity_flags_derivable(revision_result):
+        return False
+    for other in (reports["cfi"]["result"]["identity"], reports["eia"]["result"]["identity"], revision_result):
+        if any(other.get(k) != readiness_identity.get(k) for k in _READINESS_STALE_KEYS):
+            return False
+        if any((other.get(k) or None) != (readiness_identity.get(k) or None) for k in _DECLARED_SHA_KEYS):
+            return False
+        if not _identity_flags_derivable(other):
+            return False
 
     if not verify_ci_failure_intelligence_report(reports["cfi"]["result"]):
         return False
