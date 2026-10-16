@@ -231,6 +231,25 @@ Configuration is validated before a service starts. Repository values must be
 absolute local paths, and semantic concurrency is fixed at one. The config
 contains no GitHub credentials, cookies, prompts, or browser profile data.
 
+### Prompt delivery, persistence and retention
+
+- **Delivery (known limitation).** The semantic prompt is passed to OpenCLI as a
+  command-line argument (`opencli chatgpt ask <prompt> --new ...`), so the full
+  prompt is visible in the process list (`ps`) to other local users while the
+  command runs. The OpenCLI `chatgpt ask` command takes `prompt` as a required
+  positional and has no stdin, `-`, or `@file` input, and changing OpenCLI is out
+  of scope here. The supported host is a single-user Mac, so this is accepted; do
+  not run the reviewer on a shared multi-user host. A test pins the current argv
+  shape so any change is deliberate.
+- **Persistence.** Each dispatched prompt is stored byte-for-byte at
+  `<state_root>/reviews/prompts/<attempt_id>.txt` (recorded as `prompt_text_path`
+  in the attempt record) for forensic verification of renderer-transformed
+  recovery candidates. It is local state only and is never published. The
+  directory is created with mode `0700` (an existing directory owned by the
+  current user is tightened to `0700`) and the files are `0600`.
+- **Retention.** Nothing deletes these files; they are kept until removed
+  manually. Remove old ones only when no unfinished attempt needs them.
+
 `authority_patterns` (default `[]`) lists protected-path patterns for the
 reviewer scan; a changed file matching one raises `AUTHORITY_OVERLAP` and risk
 `HIGH`. The default is empty and is never inherited from the vendored
