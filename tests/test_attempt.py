@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -87,3 +88,34 @@ def test_same_physical_identity_new_prompt_is_fresh(tmp_path):
     assert not discover_for_identity(tmp_path,identity,context_pack_sha256="context",prompt_sha256="new")
     loaded,path=load_attempt(tmp_path,"old")
     assert loaded["state"]==PREPARED and path.name=="old.json"
+
+
+def _prepare_with_prompt(root, text="exact prompt bytes\n"):
+    return prepare_attempt(
+        root, ["o/r", 7, "head", "base", "main"], "ctx", "prompt",
+        {"source": "unit", "executable": "fake"}, attempt_id="a-priv", now="t1",
+        prompt_text=text,
+    )
+
+
+def test_prompts_dir_is_0700_under_permissive_umask(tmp_path):
+    import os
+    old = os.umask(0o022)
+    try:
+        record, _ = _prepare_with_prompt(tmp_path)
+    finally:
+        os.umask(old)
+    prompt_dir = tmp_path / "reviews" / "prompts"
+    assert (prompt_dir.stat().st_mode & 0o777) == 0o700
+    prompt_file = Path(record["prompt_text_path"])
+    assert (prompt_file.stat().st_mode & 0o777) == 0o600
+    assert prompt_file.read_bytes() == b"exact prompt bytes\n"
+
+
+def test_existing_owned_prompts_dir_is_tightened(tmp_path):
+    import os
+    prompt_dir = tmp_path / "reviews" / "prompts"
+    prompt_dir.mkdir(parents=True)
+    os.chmod(prompt_dir, 0o755)
+    _prepare_with_prompt(tmp_path)
+    assert (prompt_dir.stat().st_mode & 0o777) == 0o700

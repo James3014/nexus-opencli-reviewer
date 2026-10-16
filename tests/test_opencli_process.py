@@ -78,3 +78,22 @@ def test_timeout_final_read_is_bounded_when_setsid_descendant_holds_pipes(tmp_pa
     elapsed=_time.monotonic()-started
     assert r.outcome_unknown
     assert elapsed < 10, f"transport blocked for {elapsed:.1f}s"
+
+
+def test_prompt_is_delivered_in_argv_pinned_shape(tmp_path):
+    """Issue #78: opencli chatgpt ask has no stdin/file prompt input, so the
+    prompt is argv[3].  Pin the exact shape so any change is deliberate."""
+    log = tmp_path / 'argv.json'
+    script = tmp_path / 'recorder'
+    script.write_text(
+        '#!/usr/bin/env python3\n'
+        'import json, sys\n'
+        f'open({str(log)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
+        'print(json.dumps([{"conversationId": "c1", "response": "r"}]))\n'
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    prompt = 'PROMPT-BODY-\u00e9\nline2'
+    OpenCLITransport(executable=str(script), process_timeout=5).invoke(prompt)
+    assert json.loads(log.read_text().splitlines()[0]) == [
+        'chatgpt', 'ask', prompt, '--new', '--timeout', '120',
+        '--site-session', 'ephemeral', '-f', 'json']

@@ -33,6 +33,24 @@ def _attempt_path(root: str | os.PathLike[str], attempt_id: str) -> Path:
     return path
 
 
+def _ensure_private_dir(path: Path) -> None:
+    """Create ``path`` (and parents) and force the leaf to mode 0700.
+
+    ``mkdir(mode=)`` is masked by the umask and ``exist_ok`` leaves a
+    pre-existing directory untouched, so chmod explicitly.  An existing
+    directory is tightened only when the current user owns it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        if not path.is_dir():
+            raise
+    st = os.stat(path)
+    if st.st_uid == os.getuid() and (st.st_mode & 0o777) != 0o700:
+        os.chmod(path, 0o700)
+
+
 def _atomic_write(path: Path, value: dict[str, Any]) -> None:
     """Write JSON durably, replacing the old record only after fsync."""
     encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -124,7 +142,7 @@ def prepare_attempt(
         # Persist the exact dispatched prompt bytes for forensic verification
         # of renderer-transformed recovery candidates.  Local state only.
         prompt_dir = Path(root) / "reviews" / "prompts"
-        prompt_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(prompt_dir)
         prompt_path = prompt_dir / f"{aid}.txt"
         data = prompt_text.encode("utf-8")
         fd, temporary = tempfile.mkstemp(prefix=f".{prompt_path.name}.", suffix=".tmp", dir=prompt_dir)
