@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
-from .github import REPO_RE, GhCliTransport
+from .github import REPO_RE, GhCliTransport, default_branch
 from repository_intelligence import (
     CLAIM_CEILING as PR_CLAIM_CEILING,
     CI_EVIDENCE_CLAIM_CEILING as CI_CLAIM_CEILING,
@@ -72,9 +72,13 @@ def _acquire_snapshots(repository: str, transport: Any) -> tuple[str, str, list[
     being collected, the snapshot set is stale as a unit and must fail closed
     instead of being exposed as a complete current report.
     """
-    main_sha, observed, items, _queue = scan(repository, transport, persist_state=False)
     try:
-        rebound = transport.get_ref(repository, "main")
+        branch = default_branch(transport, repository)
+    except Exception as exc:
+        raise RuntimeError("MAIN_REBIND_UNAVAILABLE") from exc
+    main_sha, observed, items, _queue = scan(repository, transport, persist_state=False, branch=branch)
+    try:
+        rebound = transport.get_ref(repository, branch)
         rebound_sha = (rebound.get("object") or {}).get("sha") if isinstance(rebound, dict) else None
     except Exception as exc:
         raise RuntimeError("MAIN_REBIND_UNAVAILABLE") from exc
