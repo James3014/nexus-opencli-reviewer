@@ -140,6 +140,10 @@ def _ci_evidence_for(classification):
             expected_check_run_id=selected.get('check_run_id'),
             expected_run_id=selected.get('run_id'),
             expected_artifact_identity=selected.get('artifact_identity'),
+            # Issue #75: the scan has no baseline source (no exact-base/main
+            # comparison), so it cannot supply NEW_REGRESSION or
+            # CI_BOOTSTRAP_DEFECT.  NOT_AVAILABLE therefore keeps every
+            # production capsule UNKNOWN; TRIGGERED is unreachable on this path.
             canonical_disposition='NOT_AVAILABLE')
         # Fail closed: an evidence capsule that cannot pass its own manifest
         # is never bound to a receipt.  This must never discard an already

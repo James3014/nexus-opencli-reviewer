@@ -481,3 +481,22 @@ def test_reuse_rejects_receipt_id_that_does_not_bind_content(tmp_path):
         mutate(record)
         persist_receipt(tmp_path, record)
         assert reusable_receipt(tmp_path, IDENTITY, context_sha256="ctx-a", prompt_sha256="prompt-a") is None
+
+
+def test_scan_ci_evidence_operational_path_has_no_baseline_and_stays_unknown():
+    """Issue #75 pin: the production scan path has no baseline comparison, so a
+    failing check never reaches TRIGGERED; it yields an UNKNOWN capsule with the
+    'canonical disposition unavailable' gap.  Direct builder calls with
+    NEW_REGRESSION are a different (caller-supplied) path."""
+    snapshot=snapshot_from_github(
+        "o/r", {"number": 7, "base": {"sha": "base"}, "head": {"sha": "head"}},
+        "main", [], [{"name": "CI", "conclusion": "failure", "id": 1,
+                       "run_id": 2, "external_id": "artifact",
+                       "artifact_identity": "artifact", "head_sha": "head"}],
+    )
+    capsule=_ci_evidence_for(classify(snapshot))
+    assert capsule is not None
+    assert capsule["state"] == "UNKNOWN"
+    assert capsule["trigger"] is None
+    assert capsule["canonical_disposition"] == "NOT_AVAILABLE"
+    assert "canonical disposition unavailable" in capsule["evidence_gaps"]
