@@ -160,7 +160,10 @@ def _baseline_disposition(snapshot, failed, transport):
                 gaps.append('baseline: foreign base check head identity'); continue
             conclusion=row.get('conclusion'); status=row.get('status')
             conclusion=conclusion.lower() if isinstance(conclusion,str) else conclusion
-            if not conclusion or status not in (None,'completed'):
+            status=status.lower() if isinstance(status,str) else status
+            # A base row must say it is completed; a missing status is never
+            # read as completed.
+            if not conclusion or status!='completed':
                 gaps.append('baseline: same-name check on base still pending')
             elif conclusion=='success':
                 regression=True
@@ -249,6 +252,14 @@ def scan(repo,transport,authority_patterns=(),persist_state=False,state_root='.r
             checks=transport.list_checks(repo,raw.get('head',{}).get('sha',''))
             checks, enrichment_errors=_collect_check_evidence(
                 repo, checks, transport, raw.get('head',{}).get('sha',''))
+            # GitHub check-runs carry the app as ``app.slug``; surface it as
+            # ``app_slug`` so the baseline comparison (Issue #75) can require
+            # the same app on the base, not just the same name.
+            for row in checks:
+                if isinstance(row,dict) and not row.get('app_slug'):
+                    slug=(row.get('app') or {}).get('slug') if isinstance(row.get('app'),dict) else None
+                    if isinstance(slug,str) and slug:
+                        row['app_slug']=slug
             errors.extend(enrichment_errors)
         except Exception as e: checks=[]; errors.append(f'checks: {e}')
         p=snapshot_from_github(repo,raw,main_sha,files,checks,observed,errors)
