@@ -146,7 +146,13 @@ def _baseline_disposition(snapshot, failed, transport):
         if not isinstance(rows,list) or not all(isinstance(r,dict) for r in rows):
             return 'NOT_AVAILABLE',['baseline: check lookup failed: invalid response']
         gaps=[]; regression=False
+        head_names=[c.name for c in snapshot.checks]
         for check in failed:
+            # A rerun or a second run with the same name on the head (e.g. a
+            # later success or a run still in progress) means the failure is
+            # not the current head result; never compare it.
+            if head_names.count(check.get('name'))!=1:
+                gaps.append('baseline: multiple same-name checks on head'); continue
             if str(check.get('status') or '').lower() not in _REGRESSION_CONCLUSIONS:
                 gaps.append('baseline: head failure is not a regression signal'); continue
             matches=[r for r in rows if r.get('name')==check.get('name')

@@ -238,3 +238,16 @@ def test_review_ready_passes_its_transport_to_ci_evidence(tmp_path, monkeypatch)
     t = _DevelopTransport()
     scan_mod.review_ready("o/r", t, 1, S(), state_root=tmp_path)
     assert seen == [t]
+
+
+def test_head_rerun_with_same_name_never_compares_the_old_failure():
+    for later in ("success", None):
+        rerun = {"name": "CI", "id": 2, "run_id": 2, "artifact_identity": "artifact",
+                 "head_sha": "head"}
+        if later:
+            rerun["conclusion"] = later
+        else:
+            rerun["state"] = "in_progress"
+        capsule = _ci_evidence_for(_classification(checks=_head("failure") + [rerun]),
+                                   FakeTransport([_row()]))
+        _unknown(capsule, "baseline: multiple same-name checks on head")
