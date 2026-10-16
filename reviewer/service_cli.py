@@ -528,7 +528,8 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
         except SemanticParseError:
             continue
         identity = attempt["review_identity"]
-        _, observed, items, _ = scan(repository, GhCliTransport())
+        gh_transport = GhCliTransport()
+        _, observed, items, _ = scan(repository, gh_transport)
         item = next((x for x in items if list(x.review_identity) == identity), None)
         attempt_path = config.state_root / "reviews" / "attempts" / f"{attempt['attempt_id']}.json"
         if item is None:
@@ -556,7 +557,7 @@ def reconcile_semantic_history(config: ReviewerConfig, repository: str,
         ci_evidence = None
         if hasattr(getattr(item, "snapshot", None), "checks") and getattr(item.snapshot, "checks", None):
             try:
-                ci_evidence = _ci_evidence_for(item)
+                ci_evidence = _ci_evidence_for(item, gh_transport)
             except Exception:
                 ci_evidence = None
         receipt_id = compute_receipt_id(identity, attempt["context_pack_sha256"], attempt["prompt_sha256"], raw_sha, parsed, "PARSED", "REVIEW_COMPLETED", ci_evidence)
