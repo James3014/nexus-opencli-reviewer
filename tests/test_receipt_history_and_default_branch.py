@@ -17,7 +17,7 @@ def _receipt(ctx="ctx-a", prompt="prompt-a"):
                 "summary": "ok", "findings": [], "evidence_gaps": []}
     return {
         "schema": "reviewer.pre_review.v1",
-        "receipt_id": compute_receipt_id(IDENTITY, ctx, prompt, None, semantic, "PARSED", "REVIEW_COMPLETED"),
+        "receipt_id": compute_receipt_id(IDENTITY, ctx, prompt, None, semantic, "PARSED", "REVIEW_COMPLETED", None),
         "review_identity": list(IDENTITY),
         "context_pack_sha256": ctx, "prompt_sha256": prompt,
         "transport_result": "REVIEW_COMPLETED", "parse_result": "PARSED",

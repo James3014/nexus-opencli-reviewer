@@ -10,7 +10,7 @@ IDENTITY = ["o/r", 7, "h", "b", "m"]
 
 
 def _id(semantic, parse="PARSED", transport="REVIEW_COMPLETED"):
-    return compute_receipt_id(IDENTITY, "context", "prompt", None, semantic, parse, transport)
+    return compute_receipt_id(IDENTITY, "context", "prompt", None, semantic, parse, transport, None)
 
 
 def _receipt():

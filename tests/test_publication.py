@@ -14,7 +14,7 @@ def receipt(status="PASS"):
 
 def _rebind(value):
     return compute_receipt_id(value["review_identity"], value["context_pack_sha256"], value["prompt_sha256"],
-                              None, value["semantic_result"], value["parse_result"], value["transport_result"])
+                              None, value["semantic_result"], value["parse_result"], value["transport_result"], value.get("ci_failure_evidence"))
 
 
 def _receipt_body(status):
@@ -272,14 +272,17 @@ def test_tampered_semantic_shape_never_publishes(tmp_path):
 
 def test_publication_wires_valid_ci_evidence_and_rejects_foreign_or_tampered(tmp_path):
     valid = receipt(); valid["ci_failure_evidence"] = ci_evidence()
+    valid["receipt_id"] = _rebind(valid)
     t = Fake()
     publish_review(tmp_path, t, valid, attempt_id="ci-valid")
     assert "CI Failure Intelligence" in t.comments[0]["body"]
     foreign = receipt(); foreign["ci_failure_evidence"] = ci_evidence("foreign")
+    foreign["receipt_id"] = _rebind(foreign)
     with pytest.raises(PublicationError):
         publish_review(tmp_path, Fake(), foreign, attempt_id="ci-foreign")
     tampered = receipt(); tampered["ci_failure_evidence"] = ci_evidence()
     tampered["ci_failure_evidence"]["trigger"] = "ATTACKER"
+    tampered["receipt_id"] = _rebind(tampered)
     with pytest.raises(PublicationError):
         publish_review(tmp_path, Fake(), tampered, attempt_id="ci-tampered")
 
@@ -298,6 +301,7 @@ def test_valid_cfi_blocked_receipt_publishes_advisory_comment_with_ci_section(tm
     t = Fake()
     valid_cfi = receipt("BLOCKED")
     valid_cfi["ci_failure_evidence"] = ci_evidence()
+    valid_cfi["receipt_id"] = _rebind(valid_cfi)
     p = publish_review(tmp_path, t, valid_cfi, attempt_id="cfi-blocked-1")
     assert p.exists() and t.writes == 1
     value = json.loads(p.read_text())
@@ -318,12 +322,14 @@ def test_valid_cfi_blocked_receipt_publishes_advisory_comment_with_ci_section(tm
 def test_cfi_blocked_rejects_tampered_or_foreign_ci_evidence(tmp_path):
     foreign = receipt("BLOCKED")
     foreign["ci_failure_evidence"] = ci_evidence("foreign")
+    foreign["receipt_id"] = _rebind(foreign)
     with pytest.raises(PublicationError):
         publish_review(tmp_path, Fake(), foreign, attempt_id="cfi-foreign")
 
     tampered = receipt("BLOCKED")
     tampered["ci_failure_evidence"] = ci_evidence()
     tampered["ci_failure_evidence"]["trigger"] = "ATTACKER"
+    tampered["receipt_id"] = _rebind(tampered)
     with pytest.raises(PublicationError):
         publish_review(tmp_path, Fake(), tampered, attempt_id="cfi-tampered")
 

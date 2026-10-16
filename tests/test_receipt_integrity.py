@@ -17,7 +17,7 @@ IDENTITY = ["o/r", 7, "head", "base", "main"]
 
 def _rid(record):
     return compute_receipt_id(record["review_identity"], record["context_pack_sha256"], record["prompt_sha256"],
-                              None, record["semantic_result"], record["parse_result"], record["transport_result"])
+                              None, record["semantic_result"], record["parse_result"], record["transport_result"], record.get("ci_failure_evidence"))
 
 
 def valid_receipt():

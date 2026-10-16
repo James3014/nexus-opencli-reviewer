@@ -1099,7 +1099,7 @@ def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monk
     }
     blocked_receipt["receipt_id"] = compute_receipt_id(
         blocked_receipt["review_identity"], "ctx", "prompt", None,
-        blocked_receipt["semantic_result"], "PARSED", "REVIEW_COMPLETED")
+        blocked_receipt["semantic_result"], "PARSED", "REVIEW_COMPLETED", blocked_receipt["ci_failure_evidence"])
     comments = []
     writes = []
 

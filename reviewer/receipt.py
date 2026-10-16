@@ -278,13 +278,13 @@ def receipt_path(root, identity):
 def _semantic_sha(semantic_result):
     if semantic_result is None: return None
     return hashlib.sha256(json.dumps(semantic_result,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-def compute_receipt_id(identity, context_sha256, prompt_sha256, raw_response_sha256, semantic_result, parse_result, transport_result):
+def compute_receipt_id(identity, context_sha256, prompt_sha256, raw_response_sha256, semantic_result, parse_result, transport_result, ci_failure_evidence):
     # The verdict (semantic_result), parse_result and transport_result are bound
     # unconditionally: there is deliberately no legacy 4-field fallback (Issue #84).
-    return hashlib.sha256(json.dumps({'identity':list(identity),'context':context_sha256,'prompt':prompt_sha256,'raw':raw_response_sha256,'semantic':_semantic_sha(semantic_result),'parse':parse_result,'transport':transport_result},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return hashlib.sha256(json.dumps({'identity':list(identity),'context':context_sha256,'prompt':prompt_sha256,'raw':raw_response_sha256,'semantic':_semantic_sha(semantic_result),'parse':parse_result,'transport':transport_result,'ci':_semantic_sha(ci_failure_evidence)},sort_keys=True,separators=(',',':')).encode()).hexdigest()
 def receipt_id_matches(receipt):
     try:
-        expected=compute_receipt_id(receipt['review_identity'],receipt.get('context_pack_sha256'),receipt.get('prompt_sha256'),receipt.get('raw_response_sha256'),receipt.get('semantic_result'),receipt.get('parse_result'),receipt.get('transport_result'))
+        expected=compute_receipt_id(receipt['review_identity'],receipt.get('context_pack_sha256'),receipt.get('prompt_sha256'),receipt.get('raw_response_sha256'),receipt.get('semantic_result'),receipt.get('parse_result'),receipt.get('transport_result'),receipt.get('ci_failure_evidence'))
     except (KeyError,TypeError,ValueError):
         return False
     rid=receipt.get('receipt_id')
@@ -294,7 +294,7 @@ def make_receipt(context, classification, transport, prompt, observed_at, parsed
         ci_failure_evidence_manifest(ci_failure_evidence)
         if ci_failure_evidence.get("review_identity") != list(context.review_identity):
             raise ValueError("CI_FAILURE_EVIDENCE_REVIEW_IDENTITY_MISMATCH")
-    raw=transport.raw or ''; now=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z'); version=getattr(transport,'version',''); version=version() if callable(version) else version; prompt_sha=hashlib.sha256(prompt.encode()).hexdigest(); raw_sha=hashlib.sha256(raw.encode()).hexdigest() if raw else None; receipt_id=compute_receipt_id(context.review_identity,context.context_sha256,prompt_sha,raw_sha,parsed,parse_result,transport.status)
+    raw=transport.raw or ''; now=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00','Z'); version=getattr(transport,'version',''); version=version() if callable(version) else version; prompt_sha=hashlib.sha256(prompt.encode()).hexdigest(); raw_sha=hashlib.sha256(raw.encode()).hexdigest() if raw else None; receipt_id=compute_receipt_id(context.review_identity,context.context_sha256,prompt_sha,raw_sha,parsed,parse_result,transport.status,ci_failure_evidence)
     query_ident = query_evidence_identity or getattr(context, 'query_evidence_identity', None) or getattr(context, 'payload', {}).get('query_identity')
     receipt = {'schema':'reviewer.pre_review.v1','receipt_id':receipt_id,'repository':context.review_identity[0],'pr_number':context.review_identity[1],'base_sha':context.review_identity[3],'head_sha':context.review_identity[2],'current_main_sha':context.review_identity[4],'review_identity':list(context.review_identity),'source_observed_at':observed_at,'source_identity':classification.snapshot.source_identity,'deterministic_findings':classification.findings,'risk':classification.risk,'changed_files':list(classification.snapshot.changed_files),'context_pack_sha256':context.context_sha256,'prompt_sha256':prompt_sha,'opencli_executable':getattr(transport,'executable','fake'),'opencli_version':version,'browser_profile':getattr(transport,'profile',None),'session_mode':getattr(transport,'session_mode','ephemeral'),'safe_argv':getattr(transport,'argv',[]),'invocation_started_at':getattr(transport,'started_at',now) or now,'invocation_finished_at':getattr(transport,'finished_at',now) or now,'transport_result':transport.status,'outcome_unknown':getattr(transport,'outcome_unknown',False),'retry_safe':getattr(transport,'retry_safe',False),'raw_response_sha256':raw_sha,'parse_result':parse_result,'semantic_result':parsed,'ci_failure_evidence':ci_failure_evidence,'claim_ceiling':'PRE_REVIEW_ONLY'}
     if query_ident:
