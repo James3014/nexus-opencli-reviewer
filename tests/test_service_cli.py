@@ -855,6 +855,9 @@ def test_reconcile_negative_cases_for_failed_attempts(monkeypatch, tmp_path):
 
 
 def test_apply_recovered_exact_key_hostile_cfi_lineage(tmp_path):
+    # NOTE (Issue #75): this calls build_ci_failure_evidence directly with a
+    # supplied NEW_REGRESSION disposition; it does NOT exercise the scan path,
+    # which always passes NOT_AVAILABLE (see reviewer/scan.py _ci_evidence_for).
     from reviewer.receipt import build_ci_failure_evidence
     from reviewer.unattended import UnattendedReviewService
     identity = ["James3014/Nexus-new", 7, "h", "b", "m"]
@@ -1084,7 +1087,6 @@ def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monk
                  "job_identity": "44", "head_sha": "head"}])
     blocked_receipt = {
         "schema": "reviewer.pre_review.v1",
-        "receipt_id": compute_receipt_id(["repo", 1, "head", "base", "main"], "ctx", "prompt", None),
         "review_identity": ["repo", 1, "head", "base", "main"],
         "claim_ceiling": "PRE_REVIEW_ONLY",
         "context_pack_sha256": "ctx", "prompt_sha256": "prompt",
@@ -1095,6 +1097,9 @@ def test_ci_evidence_survives_full_review_ready_publication_chain(tmp_path, monk
                             "status": "BLOCKED", "summary": "intentional canary failure diagnosed",
                             "findings": [], "evidence_gaps": []},
     }
+    blocked_receipt["receipt_id"] = compute_receipt_id(
+        blocked_receipt["review_identity"], "ctx", "prompt", None,
+        blocked_receipt["semantic_result"], "PARSED", "REVIEW_COMPLETED", blocked_receipt["ci_failure_evidence"])
     comments = []
     writes = []
 

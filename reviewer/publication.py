@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from .render import render_advisory
 from .semantic import parse_response, SemanticParseError
+from .github import default_branch
 from .receipt import ci_failure_evidence_manifest, receipt_id_matches
 
 
@@ -181,7 +182,7 @@ def _fresh_identity(transport: Any, identity: tuple[str, int, str, str, str]) ->
     if not hasattr(transport, "get_pr") or not hasattr(transport, "get_ref"):
         raise PublicationError("PUBLICATION_REBIND_REQUIRED")
     pr = transport.get_pr(repo, number)
-    main = transport.get_ref(repo, "main").get("object", {}).get("sha", "")
+    main = transport.get_ref(repo, default_branch(transport, repo)).get("object", {}).get("sha", "")
     return (repo, number, (pr.get("head") or {}).get("sha", ""),
             (pr.get("base") or {}).get("sha", ""), main)
 

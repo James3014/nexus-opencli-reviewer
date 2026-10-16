@@ -52,6 +52,10 @@ def inventory(root: str | Path) -> dict[str, Any]:
     if not base.exists():
         return result
     for path in sorted(base.rglob("*.json")):
+        # reviews/history/** holds immutable copies of receipts that are also
+        # (or were once) the latest pointer; counting them would duplicate.
+        if "history" in path.relative_to(base).parts[1:2] and path.relative_to(base).parts[0] == "reviews":
+            continue
         value = _read(path)
         if value is None:
             result["invalid_files"].append(str(path))

@@ -15,10 +15,20 @@ from reviewer.receipt import (
 IDENTITY = ["o/r", 7, "head", "base", "main"]
 
 
+def _rid(record):
+    return compute_receipt_id(record["review_identity"], record["context_pack_sha256"], record["prompt_sha256"],
+                              None, record["semantic_result"], record["parse_result"], record["transport_result"], record.get("ci_failure_evidence"))
+
+
 def valid_receipt():
+    record = _valid_receipt_body()
+    record["receipt_id"] = _rid(record)
+    return record
+
+
+def _valid_receipt_body():
     return {
         "schema": "reviewer.pre_review.v1",
-        "receipt_id": compute_receipt_id(IDENTITY, "ctx-a", "prompt-a", None),
         "review_identity": list(IDENTITY),
         "context_pack_sha256": "ctx-a",
         "prompt_sha256": "prompt-a",
@@ -481,3 +491,22 @@ def test_reuse_rejects_receipt_id_that_does_not_bind_content(tmp_path):
         mutate(record)
         persist_receipt(tmp_path, record)
         assert reusable_receipt(tmp_path, IDENTITY, context_sha256="ctx-a", prompt_sha256="prompt-a") is None
+
+
+def test_scan_ci_evidence_operational_path_has_no_baseline_and_stays_unknown():
+    """Issue #75 pin: the production scan path has no baseline comparison, so a
+    failing check never reaches TRIGGERED; it yields an UNKNOWN capsule with the
+    'canonical disposition unavailable' gap.  Direct builder calls with
+    NEW_REGRESSION are a different (caller-supplied) path."""
+    snapshot=snapshot_from_github(
+        "o/r", {"number": 7, "base": {"sha": "base"}, "head": {"sha": "head"}},
+        "main", [], [{"name": "CI", "conclusion": "failure", "id": 1,
+                       "run_id": 2, "external_id": "artifact",
+                       "artifact_identity": "artifact", "head_sha": "head"}],
+    )
+    capsule=_ci_evidence_for(classify(snapshot))
+    assert capsule is not None
+    assert capsule["state"] == "UNKNOWN"
+    assert capsule["trigger"] is None
+    assert capsule["canonical_disposition"] == "NOT_AVAILABLE"
+    assert "canonical disposition unavailable" in capsule["evidence_gaps"]
