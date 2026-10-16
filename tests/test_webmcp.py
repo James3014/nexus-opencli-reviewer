@@ -810,3 +810,38 @@ class TestIssue86OriginHostContentTypeGuards:
         status, data, calls = self._post({"Origin": "http://localhost:1234",
                                           "Content-Type": "application/json; charset=utf-8"})
         assert status == 500 and calls  # reached transport (stub raises)
+
+
+class _DevelopOnlyTransport:
+    """Default branch is 'develop'; ref lookups for 'main' fail (Issue #79)."""
+    def __init__(self, default="develop"):
+        self.default = default
+        self.refs = []
+
+    def get_default_branch(self, repo):
+        if self.default is None:
+            raise RuntimeError("repo lookup failed")
+        return self.default
+
+    def get_ref(self, repo, branch):
+        self.refs.append(branch)
+        if branch != "develop":
+            raise RuntimeError("no such ref " + branch)
+        return {"object": {"sha": "m"}}
+
+    def list_open_prs(self, repo):
+        return []
+
+
+def test_acquire_snapshots_rebinds_repository_default_branch():
+    from reviewer.webmcp import _acquire_snapshots
+    t = _DevelopOnlyTransport()
+    main_sha, _observed, snapshots = _acquire_snapshots("o/r", t)
+    assert main_sha == "m" and snapshots == []
+    assert set(t.refs) == {"develop"}
+
+
+def test_acquire_snapshots_default_branch_failure_maps_to_rebind_unavailable():
+    from reviewer.webmcp import _acquire_snapshots
+    with pytest.raises(RuntimeError, match="MAIN_REBIND_UNAVAILABLE"):
+        _acquire_snapshots("o/r", _DevelopOnlyTransport(default=None))
