@@ -27,6 +27,7 @@ SENTINELS = {
     'GITLAB_PAT': 'pat-sentinel',
     'DATABASE_URL': 'postgres://u:p@h/db',
     'KUBECONFIG': '/tmp/kube',
+    'BASIC_AUTH': 'x',
     'GH_OPENCLI_HOST': 'x',
 }
 KEPT = {
@@ -108,14 +109,11 @@ def test_preflight_child_uses_filtered_environment(tmp_path, monkeypatch):
     _assert_clean(dump, bin_dir, profile=None)
 
 
-def test_filter_unit_cases():
+def test_filter_unit_cases(monkeypatch):
     from reviewer.opencli import child_environment
     for name in SENTINELS:
-        os.environ[name] = 'x'
-    try:
-        env = child_environment('p')
-    finally:
-        for name in SENTINELS:
-            os.environ.pop(name, None)
+        monkeypatch.setenv(name, 'x')
+    monkeypatch.delenv('OPENCLI_PROFILE', raising=False)
+    env = child_environment('p')
     assert not set(SENTINELS) & set(env)
     assert env['OPENCLI_PROFILE'] == 'p'
