@@ -77,18 +77,55 @@ def _bounded_evidence_fingerprint(checks):
     return [{field: check.get(field) for field in fields} for check in checks]
 
 
+CI_EVIDENCE_V1 = "reviewer.ci_failure_evidence.v1"
+CI_EVIDENCE_V2 = "reviewer.ci_failure_evidence.v2"
+_BASELINE_KEYS = {"base_sha", "check_run_id", "check_conclusion", "app_slug",
+                  "workflow_run_id", "workflow_name"}
+_BASELINE_FAILURES = {"failure", "failed", "error", "timed_out"}
+
+
+def _baseline_basis_complete(baseline, base_sha, disposition):
+    """True when ``baseline`` names the exact base check (and, for a new
+    regression, the exact base workflow run) the head failure was compared with."""
+    if not isinstance(baseline, dict) or set(baseline) != _BASELINE_KEYS:
+        return False
+    if baseline["base_sha"] != base_sha or type(base_sha) is not str or not base_sha:
+        return False
+    if type(baseline["check_run_id"]) is not int or baseline["check_run_id"] <= 0:
+        return False
+    if type(baseline["app_slug"]) is not str or not baseline["app_slug"]:
+        return False
+    conclusion = baseline["check_conclusion"]
+    if disposition in {"NEW_REGRESSION", "CI_BOOTSTRAP_DEFECT"}:
+        if conclusion != "success":
+            return False
+        # The base check must be tied to the base workflow run it came from.
+        return (type(baseline["workflow_run_id"]) is int and baseline["workflow_run_id"] > 0
+                and type(baseline["workflow_name"]) is str and bool(baseline["workflow_name"]))
+    if disposition == "EXACT_BASELINE_DEBT":
+        # The base check failed, so no base workflow identity is needed; the
+        # fields must still be present (None) so the object shape is fixed.
+        wid, wname = baseline["workflow_run_id"], baseline["workflow_name"]
+        return conclusion in _BASELINE_FAILURES and ((wid is None and wname is None) or (
+            type(wid) is int and wid > 0 and type(wname) is str and bool(wname)))
+    return False
+
+
 def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
                               current_main_sha, checks, collection_complete=True,
                               collection_errors=(), expected_run_id=None,
                               expected_artifact_identity=None,
                               expected_check_run_id=None,
-                              canonical_disposition=None):
+                              canonical_disposition=None, baseline=None):
     """Build a deterministic, advisory CI trigger capsule.
 
     This is evidence normalization, not a second classifier: only the
     existing exact-base check path is considered and every identity-bearing
     field is retained.  Missing or mismatched evidence is explicitly UNKNOWN.
     """
+    # Issue #103: ``baseline`` selects the v2 schema.  v1 (no baseline) is kept
+    # only so already-stored capsules keep verifying (transition window).
+    v2 = baseline is not None
     identity = [repository, pr_number, head_sha, base_sha, current_main_sha]
     normalized = []
     gaps = list(collection_errors)
@@ -142,6 +179,8 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
         artifact = item.get("artifact_identity")
         if artifact is not None and artifact != expected_artifact_identity:
             gaps.append("foreign check artifact identity")
+    if v2 and not _baseline_basis_complete(baseline, base_sha, canonical_disposition):
+        gaps.append("baseline basis incomplete")
     normalized.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
     if not collection_complete:
         state = "UNKNOWN"
@@ -154,7 +193,7 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
     else:
         state = "UNKNOWN"
     capsule = {
-        "schema": "reviewer.ci_failure_evidence.v1",
+        "schema": CI_EVIDENCE_V2 if v2 else CI_EVIDENCE_V1,
         "review_identity": identity,
         "state": state,
         "trigger": "NEXUS_EXACT_BASE" if state == "TRIGGERED" else None,
@@ -166,6 +205,8 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
         "evidence_gaps": sorted(set(str(gap) for gap in gaps)),
         "claim_ceiling": "CI_EVIDENCE_ONLY",
     }
+    if v2:
+        capsule["baseline"] = dict(baseline)
     fingerprint_payload = {
         "review_identity": identity,
         "check_identity": [item.get("check_run_id") for item in normalized],
@@ -173,6 +214,8 @@ def build_ci_failure_evidence(*, repository, pr_number, base_sha, head_sha,
         "artifact_identity": [item.get("external_id") or item.get("artifact_identity") for item in normalized],
         "canonical_disposition": canonical_disposition,
     }
+    if v2:
+        fingerprint_payload["baseline"] = capsule["baseline"]
     bounded_evidence = _bounded_evidence_fingerprint(normalized)
     if bounded_evidence is not None:
         fingerprint_payload["bounded_evidence"] = bounded_evidence
@@ -189,8 +232,9 @@ def make_ci_failure_evidence(**kwargs):
 
 def ci_failure_evidence_manifest(evidence):
     """Return a stable manifest projection for a validated evidence capsule."""
-    if not isinstance(evidence, dict) or evidence.get("schema") != "reviewer.ci_failure_evidence.v1":
+    if not isinstance(evidence, dict) or evidence.get("schema") not in {CI_EVIDENCE_V1, CI_EVIDENCE_V2}:
         raise ValueError("CI_FAILURE_EVIDENCE_REQUIRED")
+    v2 = evidence.get("schema") == CI_EVIDENCE_V2
     supplied = evidence.get("content_sha256")
     unsigned = {key: value for key, value in evidence.items() if key != "content_sha256"}
     actual = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -201,6 +245,8 @@ def ci_failure_evidence_manifest(evidence):
     expected_keys = {"schema", "review_identity", "state", "trigger", "canonical_disposition",
                      "expected_check_run_id", "expected_run_id", "expected_artifact_identity",
                      "checks", "evidence_gaps", "claim_ceiling", "failure_fingerprint", "content_sha256"}
+    if v2:
+        expected_keys = expected_keys | {"baseline"}
     if set(evidence) != expected_keys:
         raise ValueError("CI_FAILURE_EVIDENCE_SCHEMA_FIELDS_INVALID")
     identity = evidence.get("review_identity")
@@ -255,6 +301,14 @@ def ci_failure_evidence_manifest(evidence):
         "artifact_identity": [check.get("external_id") or check.get("artifact_identity") for check in checks],
         "canonical_disposition": disposition,
     }
+    if v2:
+        baseline = evidence.get("baseline")
+        if state in {"TRIGGERED", "CLEAR"} and not _baseline_basis_complete(baseline, identity[3], disposition):
+            raise ValueError("CI_FAILURE_EVIDENCE_BASELINE_INCOMPLETE")
+        if state == "UNKNOWN" and baseline is not None and (
+                not isinstance(baseline, dict) or set(baseline) != _BASELINE_KEYS):
+            raise ValueError("CI_FAILURE_EVIDENCE_BASELINE_INVALID")
+        fp_payload["baseline"] = baseline
     bounded_evidence = _bounded_evidence_fingerprint(checks)
     if bounded_evidence is not None:
         fp_payload["bounded_evidence"] = bounded_evidence
