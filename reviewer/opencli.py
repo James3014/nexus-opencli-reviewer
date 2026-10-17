@@ -7,6 +7,35 @@ import subprocess
 from datetime import datetime, timezone
 
 
+_CREDENTIAL_ENV_MARKERS = ('API_KEY', 'SECRET', 'PASSWORD', 'CREDENTIAL')
+_CREDENTIAL_ENV_PREFIXES = ('GOOGLE_', 'GEMINI_', 'OPENAI_', 'ANTHROPIC_')
+
+
+def _is_credential_env_name(name):
+    """True for env names that carry model-provider or generic secrets.
+
+    OPENCLI-scoped names are exempt because they configure the child process itself.
+    """
+    upper = name.upper()
+    if 'OPENCLI' in upper:
+        return False
+    return upper.startswith(_CREDENTIAL_ENV_PREFIXES) or any(
+        marker in upper for marker in _CREDENTIAL_ENV_MARKERS)
+
+
+def _child_environment(profile=None):
+    """Parent environment minus credential-shaped variables (Nexus-new#2394 / #105)."""
+    env = {
+        k: v for k, v in os.environ.items()
+        if not (k.startswith('GITHUB_') or k.startswith('GH_')
+                or ('TOKEN' in k and 'PROVIDER' not in k and 'OPENCLI' not in k)
+                or _is_credential_env_name(k))
+    }
+    if profile:
+        env['OPENCLI_PROFILE'] = profile
+    return env
+
+
 class TransportResult:
     def __init__(self, status, raw='', version='', envelope=None, argv=None,
                  outcome_unknown=False, retry_safe=False, started_at='', finished_at='',
@@ -126,9 +155,7 @@ class OpenCLITransport:
         def result(status, raw='', **kwargs):
             return TransportResult(status, raw, executable=self.executable,
                                    profile=self.profile, session_mode='ephemeral', **kwargs)
-        env = os.environ.copy()
-        if self.profile:
-            env['OPENCLI_PROFILE'] = self.profile
+        env = _child_environment(self.profile)
         returncode, stdout, stderr, timed_out = self._run_process(args, env)
         if returncode is None:
             return result('OPENCLI_NOT_FOUND', argv=redacted, started_at=started, finished_at=now())
@@ -182,7 +209,8 @@ class OpenCLITransport:
     def version(self):
         try:
             result = subprocess.run([self.executable, '--version'], check=False,
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=10,
+                                    env=_child_environment(self.profile))
             return result.stdout.strip()
         except Exception:
             return ''
