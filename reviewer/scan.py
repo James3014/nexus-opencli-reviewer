@@ -137,7 +137,7 @@ def _name_key(name):
     # GitHub treats check-run names case-insensitively.
     return name.casefold() if isinstance(name,str) and name else None
 
-def _base_workflow_gap(snapshot, check, row, transport):
+def _base_workflow_gap(snapshot, check, row, transport, found=None):
     """Return None when the base check provably comes from the same workflow
     as the failing head check, else a gap.  Costs one more read, and is only
     paid for a check that would otherwise be a NEW_REGRESSION."""
@@ -159,15 +159,23 @@ def _base_workflow_gap(snapshot, check, row, transport):
         return 'baseline: base workflow identity unavailable'
     if exact[0]['name']!=head_workflow:
         return 'baseline: base check is from a different workflow'
+    if found is not None:
+        found['workflow_run_id']=exact[0].get('id') if type(exact[0].get('id')) is int else None
+        found['workflow_name']=exact[0]['name']
     return None
 
-def _baseline_disposition(snapshot, failed, transport):
+def _baseline_disposition(snapshot, failed, transport, basis_out=None):
     """Compare failing head checks with same-named checks on the PR base.
 
     A head failure is a NEW_REGRESSION only when exactly one check with the
     same name (case-insensitive), the same app and the same workflow completed
     successfully on the base commit.  Returns (disposition, gaps).  Never
-    raises; any gap -> NOT_AVAILABLE."""
+    raises; any gap -> NOT_AVAILABLE.
+
+    ``basis_out`` (a dict, optional) receives ``{name_key: basis}`` for every
+    failing check that was compared against a base check row: the exact base
+    sha, base check-run id / conclusion / app slug and, when it was resolved,
+    the base workflow run id / name (Issue #103)."""
     try:
         if not snapshot.base_sha or snapshot.base_sha!=snapshot.current_main_sha:
             return 'NOT_AVAILABLE',['baseline: PR base is not current main']
@@ -205,18 +213,24 @@ def _baseline_disposition(snapshot, failed, transport):
             conclusion=row.get('conclusion'); status=row.get('status')
             conclusion=conclusion.lower() if isinstance(conclusion,str) else conclusion
             status=status.lower() if isinstance(status,str) else status
+            found={}
             # A base row must say it is completed; a missing status is never
             # read as completed.
             if not conclusion or status!='completed':
                 gaps.append('baseline: same-name check on base still pending')
             elif conclusion=='success':
-                gap=_base_workflow_gap(snapshot,check,row,transport)
+                gap=_base_workflow_gap(snapshot,check,row,transport,found)
                 if gap: gaps.append(gap)
                 else: regression=True
             elif conclusion in _REGRESSION_CONCLUSIONS:
                 pass
             else:
                 gaps.append('baseline: same-name check on base inconclusive')
+            if basis_out is not None and conclusion in ({'success'}|_REGRESSION_CONCLUSIONS) and status=='completed':
+                basis_out[key]={'base_sha':snapshot.base_sha,'check_run_id':row.get('id'),
+                                'check_conclusion':conclusion,'app_slug':slug,
+                                'workflow_run_id':found.get('workflow_run_id'),
+                                'workflow_name':found.get('workflow_name')}
         gaps=list(dict.fromkeys(gaps))
         if gaps: return 'NOT_AVAILABLE',gaps
         return ('NEW_REGRESSION' if regression else 'EXACT_BASELINE_DEBT'),[]
@@ -231,7 +245,12 @@ def _ci_evidence_for(classification, transport=None):
     if not failed:
         return None
     selected=failed[0]
-    disposition,baseline_gaps=_baseline_disposition(snapshot,failed,transport)
+    bases={}
+    disposition,baseline_gaps=_baseline_disposition(snapshot,failed,transport,bases)
+    # Issue #103: a capsule that can act (TRIGGERED / CLEAR) is emitted as v2
+    # and records the exact base check/workflow run it was compared against.
+    # Without a comparison basis (UNKNOWN) the capsule stays v1.
+    baseline=bases.get(_name_key(selected.get('name'))) if disposition in {'NEW_REGRESSION','EXACT_BASELINE_DEBT'} else None
     try:
         capsule=build_ci_failure_evidence(
             repository=snapshot.repository, pr_number=snapshot.pr_number,
@@ -246,7 +265,7 @@ def _ci_evidence_for(classification, transport=None):
             # head check with the same-named check on the PR base (== current
             # main); any missing/ambiguous/pending/failed lookup stays
             # NOT_AVAILABLE (UNKNOWN capsule) with a 'baseline: ...' gap.
-            canonical_disposition=disposition)
+            canonical_disposition=disposition, baseline=baseline)
         # Fail closed: an evidence capsule that cannot pass its own manifest
         # is never bound to a receipt.  This must never discard an already
         # completed semantic result with a post-invocation ValueError.
