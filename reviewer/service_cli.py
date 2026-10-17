@@ -21,7 +21,7 @@ from typing import Any
 from .attempt import COMPLETED, DISPATCHING, discover_unfinished, finish_attempt
 from .config import DEFAULT_CONFIG_PATH, ReviewerConfig, load_config, save_config
 from .github import REPO_RE, GhCliTransport
-from .opencli import OpenCLITransport
+from .opencli import OpenCLITransport, child_environment
 from .preflight import preflight_opencli
 from .publication import publish_review
 from .receipt import compute_receipt_id, persist_receipt
@@ -243,14 +243,15 @@ def _daemon_restart(executable: str) -> bool:
     try:
         result = subprocess.run([executable, "daemon", "restart"], check=False,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=20)
+                                stderr=subprocess.DEVNULL, timeout=20,
+                                env=child_environment())
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
 
 def _opencli_json(executable: str, profile: str, args: list[str]) -> Any:
-    env=os.environ.copy();env["OPENCLI_PROFILE"]=profile
+    env=child_environment(profile)
     result=subprocess.run([executable,*args,"-f","json"],check=False,capture_output=True,
                           text=True,timeout=45,env=env)
     if result.returncode:
@@ -260,8 +261,7 @@ def _opencli_json(executable: str, profile: str, args: list[str]) -> Any:
 
 def _opencli_browser(executable: str, profile: str, args: list[str]) -> Any:
     """Run one bounded, read-only Browser Bridge command."""
-    env = os.environ.copy()
-    env["OPENCLI_PROFILE"] = profile
+    env = child_environment(profile)
     result = subprocess.run(
         [executable, "browser", *args], check=False, capture_output=True,
         text=True, timeout=45, env=env,
