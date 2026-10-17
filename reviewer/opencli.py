@@ -7,6 +7,65 @@ import subprocess
 from datetime import datetime, timezone
 
 
+_CREDENTIAL_ENV_PREFIXES = (
+    'GITHUB_',
+    'GH_',
+    'GOOGLE_',
+    'GEMINI_',
+    'OPENAI_',
+    'ANTHROPIC_',
+    'AWS_',
+)
+_CREDENTIAL_ENV_NAMES = frozenset(
+    {'SSH_AUTH_SOCK', 'KUBECONFIG', 'DOCKER_AUTH_CONFIG', 'DATABASE_URL'}
+)
+_CREDENTIAL_ENV_MARKERS = (
+    'TOKEN',
+    'API_KEY',
+    'SECRET',
+    'PASSWORD',
+    'PASSWD',
+    'CREDENTIAL',
+    'PRIVATE_KEY',
+    'KEY_ID',
+    'COOKIE',
+    'AUTHORIZATION',
+)
+_CREDENTIAL_ENV_SUFFIXES = ('_KEY', '_PAT')
+
+
+def _is_credential_env_name(name):
+    '''Return True for env names that look like secrets (case-insensitive).
+
+    ``OPENCLI_*`` names configure the child itself and pass unless they also match
+    a secret marker (``OPENCLI_TOKEN``, ``OPENCLI_API_KEY`` are filtered). The word
+    OPENCLI elsewhere in a name grants no exemption.
+    '''
+    upper = name.upper()
+    if (
+        any(marker in upper for marker in _CREDENTIAL_ENV_MARKERS)
+        or upper.endswith(_CREDENTIAL_ENV_SUFFIXES)
+        or upper == 'AUTH'
+        or 'AUTH_' in upper
+        or '_AUTH' in upper
+    ):
+        return True
+    if upper.startswith('OPENCLI_'):
+        return False
+    return upper in _CREDENTIAL_ENV_NAMES or upper.startswith(_CREDENTIAL_ENV_PREFIXES)
+
+
+def child_environment(profile=None):
+    """Parent environment minus credential-shaped variables (Nexus-new#2394 / #105).
+
+    Every opencli child of the reviewer must be spawned with this environment.
+    """
+    env = {k: v for k, v in os.environ.items() if not _is_credential_env_name(k)}
+    if profile:
+        env['OPENCLI_PROFILE'] = profile
+    return env
+
+
 class TransportResult:
     def __init__(self, status, raw='', version='', envelope=None, argv=None,
                  outcome_unknown=False, retry_safe=False, started_at='', finished_at='',
@@ -126,9 +185,7 @@ class OpenCLITransport:
         def result(status, raw='', **kwargs):
             return TransportResult(status, raw, executable=self.executable,
                                    profile=self.profile, session_mode='ephemeral', **kwargs)
-        env = os.environ.copy()
-        if self.profile:
-            env['OPENCLI_PROFILE'] = self.profile
+        env = child_environment(self.profile)
         returncode, stdout, stderr, timed_out = self._run_process(args, env)
         if returncode is None:
             return result('OPENCLI_NOT_FOUND', argv=redacted, started_at=started, finished_at=now())
@@ -182,7 +239,8 @@ class OpenCLITransport:
     def version(self):
         try:
             result = subprocess.run([self.executable, '--version'], check=False,
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=10,
+                                    env=child_environment(self.profile))
             return result.stdout.strip()
         except Exception:
             return ''

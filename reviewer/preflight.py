@@ -6,6 +6,8 @@ import signal
 import subprocess
 from dataclasses import dataclass
 
+from .opencli import child_environment
+
 
 @dataclass
 class PreflightResult:
@@ -28,7 +30,7 @@ class OpenCLIPreflight:
         try:
             p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True, start_new_session=True,
-                                 shell=False)
+                                 shell=False, env=child_environment())
         except FileNotFoundError:
             return None, '', 'OPENCLI_NOT_FOUND'
         try:
