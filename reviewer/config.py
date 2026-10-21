@@ -77,7 +77,7 @@ class ReviewerConfig:
             interval = float(self.poll_interval_seconds)
         except (TypeError, ValueError) as exc:
             raise ConfigError("poll_interval_seconds must be a number") from exc
-        if interval < 5 or interval > 86400:
+        if not (5 <= interval <= 86400):
             raise ConfigError("poll_interval_seconds must be between 5 and 86400")
         if isinstance(self.semantic_concurrency, bool) or int(self.semantic_concurrency) != 1:
             raise ConfigError("semantic_concurrency is fixed at 1")
