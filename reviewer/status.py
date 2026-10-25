@@ -86,7 +86,7 @@ def inventory(root: str | Path) -> dict[str, Any]:
             )
             if valid: result["pre_review_receipts"].append(_entry(value, path))
             else: result["invalid_files"].append(str(path))
-        elif "publication" in str(path).lower():
+        elif "publication" in str(path.relative_to(base)).lower():
             if isinstance(value, dict) and ("attempt" in str(schema).lower() or "attempt" in name.lower()):
                 result["publication_attempts"].append(_entry(value, path))
             elif isinstance(value, dict):

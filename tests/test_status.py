@@ -31,3 +31,14 @@ def test_inventory_fails_closed_on_malformed_and_unfinished(tmp_path):
     assert str(bad) in out["invalid_files"]
     assert out["semantic_attempts"]["unfinished"][0]["attempt_id"] == "pending"
     assert str(tmp_path / "reviews" / "publication-attempt.json") in out["invalid_files"]
+
+
+def test_inventory_ignores_publication_in_root_directory_name(tmp_path):
+    root = tmp_path / "publication-state"
+    misc = root / "misc"
+    misc.mkdir(parents=True)
+    (misc / "x.json").write_text(json.dumps({"foo": 1}), encoding="utf-8")
+    out = inventory(root)
+    assert out["publication_receipts"] == []
+    assert out["publication_attempts"] == []
+
