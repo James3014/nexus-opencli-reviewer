@@ -3,7 +3,7 @@ from reviewer.opencli import OpenCLITransport
 
 SHIM = textwrap.dedent('''\
 #!/usr/bin/env python3
-import json, signal, subprocess, sys, time
+import json, os, signal, subprocess, sys, time
 command=sys.argv[2]
 value=sys.argv[3]
 if command=='ask':
@@ -17,7 +17,11 @@ if command=='ask':
     elif mode=='partial': print('{"partial":', end='', flush=True); time.sleep(30)
     elif mode=='descendant': subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); time.sleep(30)
     elif mode=='setsid-descendant':
-        subprocess.Popen([sys.executable,'-c','import os,time; os.setsid(); time.sleep(30)'])
+        code = 'import os,time; os.setsid(); p=os.environ.get("OPENCLI_TEST_PIDFILE"); f=p and open(p,"w"); f and [f.write(str(os.getpid())), f.close()]; time.sleep(30)'
+        proc = subprocess.Popen([sys.executable,'-c',code])
+        p = os.environ.get("OPENCLI_TEST_PIDFILE")
+        if p:
+            while not os.path.exists(p) and proc.poll() is None: time.sleep(0.005)
         time.sleep(30)
     elif mode=='ignore-term': signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)
 elif command=='detail':
@@ -67,17 +71,46 @@ def test_real_process_kills_ignored_term_and_descendant(tmp_path):
     assert call(p,'descendant',process_timeout=.15,terminate_grace=.05).outcome_unknown
 
 
-def test_timeout_final_read_is_bounded_when_setsid_descendant_holds_pipes(tmp_path):
+def test_timeout_final_read_is_bounded_when_setsid_descendant_holds_pipes(tmp_path, monkeypatch):
     """Regression (live 18-min daemon stall): after SIGTERM/SIGKILL a detached
     setsid descendant can still hold the stdout pipes; the final read must be
     bounded instead of blocking the service cycle."""
-    import time as _time
+    import os, signal, time as _time
+    pid_file = tmp_path / "descendant.pid"
+    monkeypatch.setenv("OPENCLI_TEST_PIDFILE", str(pid_file))
     p=shim(tmp_path)
-    started=_time.monotonic()
-    r=call(p,'setsid-descendant',process_timeout=.15,terminate_grace=.05)
-    elapsed=_time.monotonic()-started
-    assert r.outcome_unknown
-    assert elapsed < 10, f"transport blocked for {elapsed:.1f}s"
+    try:
+        started=_time.monotonic()
+        r=call(p,'setsid-descendant',process_timeout=.15,terminate_grace=.05)
+        elapsed=_time.monotonic()-started
+        assert r.outcome_unknown
+        assert elapsed < 10, f"transport blocked for {elapsed:.1f}s"
+    finally:
+        deadline = _time.monotonic() + 5
+        while not pid_file.exists() and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            deadline = _time.monotonic() + 5
+            while _time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                _time.sleep(0.05)
+
+    assert pid_file.exists()
+    pid = int(pid_file.read_text().strip())
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    assert not alive, f"setsid descendant pid {pid} is still alive"
 
 
 def test_prompt_is_delivered_in_argv_pinned_shape(tmp_path):
