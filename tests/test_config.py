@@ -69,3 +69,23 @@ def test_bootstrap_new_only_cannot_review_historical_backlog():
 def test_missing_file_returns_defaults(tmp_path):
     config = load_config(tmp_path / "missing.json")
     assert config == ReviewerConfig()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"bootstrap": {"mode": "bounded", "max_reviews": "abc"}},
+        {"bootstrap": {"mode": "bounded", "max_reviews": None}},
+        {"semantic_concurrency": None},
+    ],
+)
+def test_invalid_numeric_fields_raise_config_error(payload):
+    with pytest.raises(ConfigError):
+        ReviewerConfig.from_mapping(payload)
+    if "bootstrap" in payload:
+        with pytest.raises(ConfigError):
+            BootstrapPolicy(**payload["bootstrap"])
+    else:
+        with pytest.raises(ConfigError):
+            ReviewerConfig(**payload)
+

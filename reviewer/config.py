@@ -36,12 +36,18 @@ class BootstrapPolicy:
         mode = str(self.mode).strip().lower()
         if mode not in _BOOTSTRAP_MODES:
             raise ConfigError(f"bootstrap.mode must be one of {sorted(_BOOTSTRAP_MODES)}")
-        if isinstance(self.max_reviews, bool) or int(self.max_reviews) < 0:
+        try:
+            if isinstance(self.max_reviews, bool):
+                raise TypeError
+            max_reviews = int(self.max_reviews)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("bootstrap.max_reviews must be a non-negative integer") from exc
+        if max_reviews < 0:
             raise ConfigError("bootstrap.max_reviews must be a non-negative integer")
-        if mode == "new_only" and int(self.max_reviews) != 0:
+        if mode == "new_only" and max_reviews != 0:
             raise ConfigError("bootstrap.max_reviews must be 0 when mode is new_only")
         object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "max_reviews", int(self.max_reviews))
+        object.__setattr__(self, "max_reviews", max_reviews)
 
     def to_dict(self) -> dict[str, Any]:
         return {"mode": self.mode, "max_reviews": self.max_reviews}
@@ -79,7 +85,13 @@ class ReviewerConfig:
             raise ConfigError("poll_interval_seconds must be a number") from exc
         if not (5 <= interval <= 86400):
             raise ConfigError("poll_interval_seconds must be between 5 and 86400")
-        if isinstance(self.semantic_concurrency, bool) or int(self.semantic_concurrency) != 1:
+        try:
+            if isinstance(self.semantic_concurrency, bool):
+                raise TypeError
+            semantic_concurrency = int(self.semantic_concurrency)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("semantic_concurrency is fixed at 1") from exc
+        if semantic_concurrency != 1:
             raise ConfigError("semantic_concurrency is fixed at 1")
         if not isinstance(self.publication_enabled, bool):
             raise ConfigError("publication_enabled must be boolean")
