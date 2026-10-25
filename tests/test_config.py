@@ -106,5 +106,3 @@ def test_infinite_numeric_fields_raise_config_error(payload):
     else:
         with pytest.raises(ConfigError):
             ReviewerConfig(**payload)
-
-
