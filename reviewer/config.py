@@ -40,7 +40,7 @@ class BootstrapPolicy:
             if isinstance(self.max_reviews, bool):
                 raise TypeError
             max_reviews = int(self.max_reviews)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigError("bootstrap.max_reviews must be a non-negative integer") from exc
         if max_reviews < 0:
             raise ConfigError("bootstrap.max_reviews must be a non-negative integer")
@@ -89,7 +89,7 @@ class ReviewerConfig:
             if isinstance(self.semantic_concurrency, bool):
                 raise TypeError
             semantic_concurrency = int(self.semantic_concurrency)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigError("semantic_concurrency is fixed at 1") from exc
         if semantic_concurrency != 1:
             raise ConfigError("semantic_concurrency is fixed at 1")

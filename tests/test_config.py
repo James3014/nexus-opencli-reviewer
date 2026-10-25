@@ -89,3 +89,20 @@ def test_invalid_numeric_fields_raise_config_error(payload):
         with pytest.raises(ConfigError):
             ReviewerConfig(**payload)
 
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"bootstrap": {"mode": "bounded", "max_reviews": float("inf")}},
+        {"semantic_concurrency": float("inf")},
+    ],
+)
+def test_infinite_numeric_fields_raise_config_error(payload):
+    with pytest.raises(ConfigError):
+        ReviewerConfig.from_mapping(payload)
+    if "bootstrap" in payload:
+        with pytest.raises(ConfigError):
+            BootstrapPolicy(**payload["bootstrap"])
+    else:
+        with pytest.raises(ConfigError):
+            ReviewerConfig(**payload)
