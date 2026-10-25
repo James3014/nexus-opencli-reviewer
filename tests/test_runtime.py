@@ -60,3 +60,19 @@ def test_check_is_read_only_and_does_not_restart():
     assert health.status == "CHATGPT_QUOTA_OR_RATE_LIMIT"
     assert calls == ["preflight"]
     assert health.to_dict()["restart_attempted"] is False
+
+
+def test_recover_resets_backoff_attempts_after_ready_check():
+    responses = iter([
+        SimpleNamespace(status="CHALLENGE"),
+        SimpleNamespace(status="CHALLENGE"),
+        SimpleNamespace(status="READY"),
+        SimpleNamespace(status="CHALLENGE"),
+    ])
+    supervisor = RuntimeSupervisor(lambda: next(responses), base_backoff=5.0)
+    h1 = supervisor.recover()
+    h2 = supervisor.recover()
+    h3 = supervisor.recover()
+    h4 = supervisor.recover()
+    assert [h1.retry_after, h2.retry_after, h3.retry_after, h4.retry_after] == [5.0, 10.0, 0.0, 5.0]
+

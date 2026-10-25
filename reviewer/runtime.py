@@ -100,7 +100,7 @@ class RuntimeSupervisor:
         """Recover only daemon-unavailable health, at most once per call."""
         first = self.check()
         if first.status != "OPENCLI_DAEMON_UNAVAILABLE" or self.restart_daemon is None:
-            self._attempts += 1 if not first.ready else 0
+            self._attempts = 0 if first.ready else self._attempts + 1
             return first
         try:
             restarted = bool(self.restart_daemon())
