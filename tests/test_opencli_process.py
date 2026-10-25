@@ -96,21 +96,27 @@ def test_timeout_final_read_is_bounded_when_setsid_descendant_holds_pipes(tmp_pa
             except ProcessLookupError:
                 pass
             deadline = _time.monotonic() + 5
-            while _time.monotonic() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    break
+            while _process_alive(pid) and _time.monotonic() < deadline:
                 _time.sleep(0.05)
 
     assert pid_file.exists()
     pid = int(pid_file.read_text().strip())
+    assert not _process_alive(pid), f"setsid descendant pid {pid} is still alive"
+
+
+def _process_alive(pid):
+    """True while pid runs. A killed orphan can stay a zombie when nothing reaps it
+    (e.g. a sandbox whose pid 1 does not wait), so a zombie counts as gone."""
+    import os
+    from pathlib import Path
     try:
         os.kill(pid, 0)
-        alive = True
     except ProcessLookupError:
-        alive = False
-    assert not alive, f"setsid descendant pid {pid} is still alive"
+        return False
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
 
 
 def test_prompt_is_delivered_in_argv_pinned_shape(tmp_path):
