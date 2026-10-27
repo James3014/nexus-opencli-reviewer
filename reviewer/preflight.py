@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 from dataclasses import dataclass
@@ -84,7 +85,14 @@ class OpenCLIPreflight:
                 continue
             if text.lower().startswith('no browser bridge profiles'):
                 continue
-            if 'connected' not in text.lower():
+            if '—' not in text:
+                continue
+            status = text.split('—', 1)[1]
+            if re.search(r'\bdisconnected\b', status, re.IGNORECASE) or re.search(
+                r'\bnot\b.*\bconnected\b', status, re.IGNORECASE
+            ):
+                continue
+            if not re.search(r'\bconnected\b', status, re.IGNORECASE):
                 continue
             profile_id = text.split()[0]
             rows.append({
