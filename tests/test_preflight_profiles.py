@@ -37,3 +37,12 @@ def test_only_disconnected_profiles_require_the_bridge(tmp_path):
  )
  p.chmod(p.stat().st_mode | stat.S_IXUSR)
  assert preflight_opencli(str(p)).status == 'BROWSER_BRIDGE_REQUIRED'
+
+
+def test_real_opencli_output_with_saved_disconnected_profiles():
+ # opencli 1.8.8 prints saved, disconnected profiles in their own section after the connected ones.
+ raw = (HEAD + '  abc work default — connected v1.0.24\n\n'
+        'Disconnected saved profiles:\n'
+        '  def home — not connected\n'
+        '  ghi — default, not connected\n')
+ assert [p['id'] for p in OpenCLIPreflight._profiles(raw)] == ['abc']
