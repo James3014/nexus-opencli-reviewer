@@ -37,7 +37,9 @@ class BootstrapPolicy:
         if mode not in _BOOTSTRAP_MODES:
             raise ConfigError(f"bootstrap.mode must be one of {sorted(_BOOTSTRAP_MODES)}")
         try:
-            if isinstance(self.max_reviews, bool):
+            if isinstance(self.max_reviews, bool) or (
+                isinstance(self.max_reviews, float) and not self.max_reviews.is_integer()
+            ):
                 raise TypeError
             max_reviews = int(self.max_reviews)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -86,7 +88,9 @@ class ReviewerConfig:
         if not (5 <= interval <= 86400):
             raise ConfigError("poll_interval_seconds must be between 5 and 86400")
         try:
-            if isinstance(self.semantic_concurrency, bool):
+            if isinstance(self.semantic_concurrency, bool) or (
+                isinstance(self.semantic_concurrency, float) and not self.semantic_concurrency.is_integer()
+            ):
                 raise TypeError
             semantic_concurrency = int(self.semantic_concurrency)
         except (TypeError, ValueError, OverflowError) as exc:
