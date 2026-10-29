@@ -106,3 +106,20 @@ def test_infinite_numeric_fields_raise_config_error(payload):
     else:
         with pytest.raises(ConfigError):
             ReviewerConfig(**payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"bootstrap": {"mode": "bounded", "max_reviews": 1.5}},
+        {"semantic_concurrency": 1.5},
+    ],
+)
+def test_non_integral_numeric_fields_raise_config_error(payload):
+    with pytest.raises(ConfigError):
+        ReviewerConfig.from_mapping(payload)
+
+
+def test_integral_float_numeric_fields_still_accepted():
+    assert BootstrapPolicy("bounded", 2.0).max_reviews == 2
+    assert ReviewerConfig(semantic_concurrency=1.0).semantic_concurrency == 1
