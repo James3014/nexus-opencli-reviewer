@@ -66,6 +66,19 @@ def child_environment(profile=None):
     return env
 
 
+def unwrap_opencli_json(stdout):
+    """Parse OpenCLI -f json output: v1 bare array or v2 {"ok": true, "data": [...]}.
+
+    Any other shape (ok false, non-list data, extra keys) is returned unchanged so
+    callers' list checks fail closed.
+    """
+    value = json.loads(stdout)
+    if (isinstance(value, dict) and set(value) == {'ok', 'data'}
+            and value['ok'] is True and isinstance(value['data'], list)):
+        return value['data']
+    return value
+
+
 class TransportResult:
     def __init__(self, status, raw='', version='', envelope=None, argv=None,
                  outcome_unknown=False, retry_safe=False, started_at='', finished_at='',
@@ -159,7 +172,7 @@ class OpenCLITransport:
 
     @staticmethod
     def _stable_assistant_text(stdout, stable_seconds=6):
-        rows = json.loads(stdout)
+        rows = unwrap_opencli_json(stdout)
         if not isinstance(rows, list):
             raise ValueError
         assistants = [
@@ -196,7 +209,7 @@ class OpenCLITransport:
         if returncode:
             envelope = None
             try:
-                ask_rows = json.loads(stdout)
+                ask_rows = unwrap_opencli_json(stdout)
                 if (isinstance(ask_rows, list) and len(ask_rows) == 1
                         and isinstance(ask_rows[0], dict)
                         and isinstance(ask_rows[0].get('conversationId'), str)
@@ -207,7 +220,7 @@ class OpenCLITransport:
             return result('OPENCLI_PROCESS_FAILURE', stdout or stderr, envelope=envelope,
                           argv=redacted, started_at=started, finished_at=now())
         try:
-            ask_rows = json.loads(stdout)
+            ask_rows = unwrap_opencli_json(stdout)
             if (not isinstance(ask_rows, list) or len(ask_rows) != 1 or
                     not isinstance(ask_rows[0], dict) or
                     not isinstance(ask_rows[0].get('response'), str) or
